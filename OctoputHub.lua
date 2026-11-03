@@ -2670,7 +2670,9 @@ task.spawn(function()
                         end
                     end
 
-                    local useGriffithOrder = State.AutoBuffGriffith and partyHasGriffith
+                    -- Griffith placement priority is automatic whenever Griffith is equipped.
+                    -- AutoBuffGriffith only controls his active ability, not placement order.
+                    local useGriffithOrder = partyHasGriffith
                     local farmCount = CountCategory(myUnits, IsFarmUnit)
                     local griffithCount = CountCategory(myUnits, IsGriffithUnit)
                     local sacrifice = 0
