@@ -701,6 +701,7 @@ local function EnrichEquipped(list)
                 info.name = data.name
             end
             info.spawnCap = tonumber(data.spawn_cap)
+            info.globalSpawnCap = tonumber(data.global_spawn_cap)
             info.maxUpgrade = type(data.upgrade) == "table" and #data.upgrade or nil
             info.hybrid = data.hybrid_placement == true
             info.hill = data.hill_unit == true
@@ -843,6 +844,72 @@ local function CountPlacedInfo(info)
     return count
 end
 
+-- Count a unit across the entire match, not just the local player.
+-- Some units (e.g. Windsong) use global_spawn_cap shared by the whole party.
+local function CountGlobalPlacedInfo(info)
+    if not info then return 0 end
+
+    local wanted = {}
+    local function addWanted(value)
+        local key = NormalizeName(value)
+        if key ~= "" and key ~= "unit" then wanted[key] = true end
+    end
+
+    addWanted(info.unitId)
+    addWanted(info.name)
+    addWanted(info.displayName)
+    local equippedData = LookupUnitData(info.unitId)
+    if type(equippedData) == "table" then
+        addWanted(equippedData.name)
+        addWanted(equippedData.display_name)
+        addWanted(equippedData.displayName)
+    end
+    if next(wanted) == nil then return 0 end
+
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return 0 end
+
+    local count = 0
+    for _, unit in ipairs(unitsFolder:GetChildren()) do
+        if unit:IsA("Model") and unit:FindFirstChild("_stats") then
+            local actual = {}
+            local function addActual(value)
+                local key = NormalizeName(value)
+                if key ~= "" and key ~= "unit" then actual[key] = true end
+            end
+
+            local rawId = GetRawUnitId(unit)
+            local normalizedId = GetUnitId(unit)
+            addActual(rawId)
+            addActual(normalizedId)
+            addActual(unit.Name)
+            addActual(State.UnitNames[rawId])
+            addActual(State.UnitNames[normalizedId])
+
+            local stats = unit:FindFirstChild("_stats")
+            for _, fieldName in ipairs({ "name", "display_name", "unit_name" }) do
+                local field = stats:FindFirstChild(fieldName)
+                if field then addActual(field.Value) end
+            end
+
+            local placedData = LookupUnitData(rawId)
+            if type(placedData) == "table" then
+                addActual(placedData.name)
+                addActual(placedData.display_name)
+                addActual(placedData.displayName)
+            end
+
+            for key in pairs(wanted) do
+                if actual[key] then
+                    count = count + 1
+                    break
+                end
+            end
+        end
+    end
+    return count
+end
+
 local function ResolvePlacementKind(unitId)
     local data = LookupUnitData(unitId)
     if data and data.hybrid_placement then
@@ -865,20 +932,27 @@ end
 
 local function CanPlaceConfigured(info, wave)
     local cfg = GetUnitConfig(info.unitId)
-    if not cfg then
-        return true
-    end
-    if cfg.placeStartWave ~= nil and wave < cfg.placeStartWave then
+    if cfg and cfg.placeStartWave ~= nil and wave < cfg.placeStartWave then
         return false
     end
-    if cfg.maxPlace ~= nil then
-        local limit = cfg.maxPlace
-        if info.spawnCap and limit > info.spawnCap then
-            limit = info.spawnCap
-        end
-        if CountPlacedUnit(info.unitId) >= limit then
-            return false
-        end
+
+    -- Enforce the game's shared party-wide cap before sending spawn_unit.
+    -- Returning false lets the Auto Place loop continue to the next equipped unit.
+    local data = LookupUnitData(info.unitId)
+    local globalCap = tonumber(info.globalSpawnCap)
+        or (type(data) == "table" and tonumber(data.global_spawn_cap))
+    if globalCap and CountGlobalPlacedInfo(info) >= globalCap then
+        return false
+    end
+
+    local localLimit = cfg and tonumber(cfg.maxPlace) or nil
+    if info.spawnCap and localLimit then
+        localLimit = math.min(localLimit, info.spawnCap)
+    elseif info.spawnCap and not localLimit then
+        localLimit = info.spawnCap
+    end
+    if localLimit and CountPlacedUnit(info.unitId) >= localLimit then
+        return false
     end
     return true
 end
@@ -2864,6 +2938,30 @@ end
 
 local farmStall = { count = 0, lastChange = 0 }
 local matchEndHandled = false
+
+-- Farm-first means all placed farm units must reach their configured upgrade
+-- target before Auto Place spends resources on Griffith, buffers, or attackers.
+-- The upgrade worker above remains responsible for performing the upgrades.
+local function HasPendingFarmUpgrade(myUnits)
+    for _, unit in ipairs(myUnits or {}) do
+        if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
+            local stats = unit._stats
+            local current = stats:FindFirstChild("upgrade")
+            local maximum = stats:FindFirstChild("max_upgrade")
+            if current and maximum then
+                local target = tonumber(maximum.Value) or 0
+                local cfg = GetUnitConfig(GetRawUnitId(unit))
+                if cfg and tonumber(cfg.upgradeTarget) then
+                    target = math.min(target, math.max(0, math.floor(cfg.upgradeTarget)))
+                end
+                if current.Value < target then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
 local votedStart = false
 local lobbyStartSent = false
 local lastLobbyStartAttempt = 0
@@ -3287,6 +3385,19 @@ task.spawn(function()
                                     local cfg = GetUnitConfig(info.unitId)
                                     if cfg and tonumber(cfg.maxPlace) then cap = cap and math.min(cap, cfg.maxPlace) or cfg.maxPlace end
                                     if cap then target = math.min(target, cap) end
+
+                                    -- If teammates already consumed the shared cap, count
+                                    -- this buff group as complete for placement sequencing.
+                                    local globalCap = tonumber(info.globalSpawnCap)
+                                    if not globalCap then
+                                        local data = LookupUnitData(info.unitId)
+                                        globalCap = type(data) == "table" and tonumber(data.global_spawn_cap) or nil
+                                    end
+                                    if globalCap then
+                                        local globalCount = CountGlobalPlacedInfo(info)
+                                        local remainingGlobal = math.max(0, globalCap - globalCount)
+                                        target = math.min(target, buffPlaced[group] + remainingGlobal)
+                                    end
                                     break
                                 end
                             end
@@ -3341,9 +3452,20 @@ task.spawn(function()
                         end)
                     end
 
+                    -- When Auto Upgrade Farm First is enabled, do not spend money
+                    -- on non-farm placements while any placed farm is still below
+                    -- its configured upgrade target. This also holds Griffith until
+                    -- farm upgrades are complete, preserving the farm-first economy.
+                    local farmUpgradePending = State.AutoUpgrade and State.AutoUpgradeFarmFirst
+                        and HasPendingFarmUpgrade(myUnits)
+                    if farmUpgradePending then
+                        UpdateAutoPlayStatus("Farm upgrades first - saving for farm upgrades", Color3.fromRGB(255, 200, 80))
+                    end
+
                     local placeIndex = #myUnits
                     for _, unitInfo in ipairs(equipped) do
-                        if CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
+                        local farmUpgradeAllowsPlacement = not farmUpgradePending or IsFarmInfo(unitInfo)
+                        if farmUpgradeAllowsPlacement and CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
                             if not (useGriffithOrder and IsGriffithName(unitInfo.name) and griffithCount >= 1) then
                                 placeIndex = placeIndex + 1
                                 local cframe, kind = GetPlacementCFrameForInfo(placeIndex, unitInfo)
