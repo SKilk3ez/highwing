@@ -11,7 +11,7 @@ local playerGui = player:WaitForChild("PlayerGui")
 
 -- ป้องกันการสร้างซ้ำ
 if playerGui:FindFirstChild("XT_Hub_UI") then
-    playerGui:FindFirstChild("XT_Hub_UI"):Destroy()
+    playerGui:FindFirstChild("XT_HUB_UI"):Destroy()
 end
 
 local ScreenGui = Instance.new("ScreenGui")
@@ -39,7 +39,7 @@ local TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -20, 0, 35)
 TitleLabel.Position = UDim2.new(0, 15, 0, 8)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = "Anime Adventures / XT Hub v0.4.8"
+TitleLabel.Text = "Octoput_Hub"
 TitleLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
 TitleLabel.TextSize = 14
 TitleLabel.Font = Enum.Font.GothamBold
@@ -78,9 +78,17 @@ ContentArea.Position = UDim2.new(0, 175, 0, 40)
 ContentArea.BackgroundTransparency = 1
 ContentArea.Parent = MainFrame
 
+-- State จัดเก็บสถานะการเปิด-ปิดระบบทั้งหมด
 local State = {
+    -- Auto Play
     AutoPlace = false,
     AutoUpgrade = false,
+    AutoUpgradeFarmFirst = true,
+    AutoUseAbility = false,
+    AutoBuffChain = false,
+    AutoBuffGriffith = false,
+
+    -- Event (Summer Hunt)
     AutoFindMatch = false,
     AutoEventQuests = false,
     AutoPickCards = false,
@@ -142,6 +150,158 @@ local function IsMatchmaking()
     return false
 end
 
+-- ดึงยูนิตทั้งหมดที่เป็นของผู้เล่นปัจจุบันในแมตช์
+local function GetPlayerUnits()
+    local myUnits = {}
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return myUnits end
+
+    for _, u in ipairs(unitsFolder:GetChildren()) do
+        if u:IsA("Model") and u:FindFirstChild("_stats") then
+            local pVal = u._stats:FindFirstChild("player")
+            if pVal and pVal.Value == player then
+                table.insert(myUnits, u)
+            end
+        end
+    end
+    return myUnits
+end
+
+-- ตรวจสอบว่าเป็นยูนิตฟาร์มเงินหรือไม่ (Speedwagon, Bulma, Nami ฯลฯ)
+local function IsFarmUnit(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return false end
+    local idVal = unit._stats:FindFirstChild("id")
+    if not idVal then return false end
+    local id = tostring(idVal.Value):lower()
+    
+    if id:find("speedwagon") or id:find("bulma") or id:find("nami") then
+        return true
+    end
+    return false
+end
+
+-- ตรวจสอบยูนิตประเภทบัฟต่อเนื่อง 100% (Erwin, Wanda/Wendy, Elfy)
+local function GetBuffChainGroup(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return nil end
+    local idVal = unit._stats:FindFirstChild("id")
+    if not idVal then return nil end
+    local id = tostring(idVal.Value):lower()
+    
+    if id:find("erwin") then
+        return "erwin"
+    elseif id:find("wendy") or id:find("wanda") then
+        return "wendy"
+    elseif id:find("leafa") or id:find("elfy") then
+        return "elfy"
+    end
+    return nil
+end
+
+-- ตรวจสอบยูนิต Griffith / Femto
+local function IsGriffithUnit(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return false end
+    local idVal = unit._stats:FindFirstChild("id")
+    if not idVal then return false end
+    local id = tostring(idVal.Value):lower()
+    
+    if id:find("griffith") or id:find("femto") then
+        return true
+    end
+    return false
+end
+
+-- ตรวจสอบว่าสามารถกดใช้สกิล (Active Attack) ได้หรือไม่
+local function CanUseActiveAttack(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return false end
+    local stats = unit._stats
+    
+    local isQueued = stats:FindFirstChild("active_queued_or_using")
+    if isQueued and isQueued.Value == true then
+        return false
+    end
+    
+    local lastCast = stats:FindFirstChild("last_active_cast")
+    local cd = stats:FindFirstChild("active_attack_cooldown")
+    if lastCast and cd then
+        return (tick() - lastCast.Value) >= cd.Value
+    end
+    return true
+end
+
+-- ดึงรายชื่อยูนิตที่สวมใส่ (Equipped Units)
+local function GetEquippedUnitList()
+    local unitsList = {}
+    
+    -- วิธีที่ 1: ดึงจาก spawn_units GUI
+    local spawnGui = playerGui:FindFirstChild("spawn_units")
+    local frame = spawnGui and spawnGui:FindFirstChild("Lives") and spawnGui.Lives:FindFirstChild("Frame")
+    local unitsGrid = frame and frame:FindFirstChild("Units")
+    if unitsGrid then
+        for _, slotFrame in ipairs(unitsGrid:GetChildren()) do
+            local uuid = slotFrame:GetAttribute("_equipped_frame_unit_uuid")
+            if uuid then
+                local cost = 0
+                if slotFrame:FindFirstChild("Cost") and slotFrame.Cost:FindFirstChild("text") then
+                    cost = tonumber(slotFrame.Cost.text.Text) or 0
+                end
+                local unitName = slotFrame:FindFirstChild("name") and slotFrame.name.Text or "Unit"
+                table.insert(unitsList, {
+                    uuid = uuid,
+                    cost = cost,
+                    name = unitName,
+                    slot = slotFrame.Name
+                })
+            end
+        end
+    end
+    
+    -- วิธีที่ 2: ดึงผ่าน UnitCollectionServiceClient สำรอง
+    if #unitsList == 0 then
+        pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+            if ucs and ucs.get_equipped_units then
+                for slot, uuid in pairs(ucs.get_equipped_units()) do
+                    table.insert(unitsList, {
+                        uuid = uuid,
+                        cost = 0,
+                        name = "Unit",
+                        slot = tostring(slot)
+                    })
+                end
+            end
+        end)
+    end
+    
+    return unitsList
+end
+
+-- คำนวณพิกัด CFrame สำหรับวางยูนิตรอบตัวผู้เล่น
+local function GetPlacementCFrame(index)
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    
+    local basePos = hrp.Position
+    local angle = (index * 45) * (math.pi / 180)
+    local distance = 6 + math.floor(index / 8) * 5
+    local offsetX = math.cos(angle) * distance
+    local offsetZ = math.sin(angle) * distance
+    local targetPos = basePos + Vector3.new(offsetX, 0, offsetZ)
+    
+    -- ยิง Raycast ลงพื้นเพื่อหาจุดวางที่ถูกต้อง
+    local rayOrigin = targetPos + Vector3.new(0, 10, 0)
+    local rayDir = Vector3.new(0, -30, 0)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = { char, workspace:FindFirstChild("_UNITS") }
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    
+    local hit = workspace:Raycast(rayOrigin, rayDir, rayParams)
+    local finalPos = hit and hit.Position or targetPos
+    
+    return CFrame.new(finalPos, finalPos + hrp.CFrame.LookVector)
+end
+
 local tabs = {}
 local function CreateTab(name, layoutOrder)
     local TabButton = Instance.new("TextButton")
@@ -182,7 +342,7 @@ local function CreateTab(name, layoutOrder)
             t.Button.TextColor3 = Color3.fromRGB(170, 170, 190)
         end
         PageFrame.Visible = true
-        TabButton.BackgroundColor3 = Color3.fromRGB(210, 70, 170) -- สีไฮไลต์ชมพูสไตล์ XTHub
+        TabButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255) -- สีไฮไลต์ชมพูสไตล์ XTHub
         TabButton.TextColor3 = Color3.fromRGB(255, 255, 255)
     end)
     
@@ -214,7 +374,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local SwitchBtn = Instance.new("TextButton")
     SwitchBtn.Size = UDim2.new(0, 44, 0, 22)
     SwitchBtn.Position = UDim2.new(1, -54, 0.5, -11)
-    SwitchBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
     SwitchBtn.Text = ""
     SwitchBtn.Parent = ToggleContainer
     
@@ -225,7 +385,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local Indicator = Instance.new("Frame")
     Indicator.Name = "Indicator"
     Indicator.Size = UDim2.new(0, 16, 0, 16)
-    Indicator.Position = UDim2.new(0, 3, 0.5, -8)
+    Indicator.Position = State[stateKey] and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
     Indicator.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
     Indicator.Parent = SwitchBtn
     
@@ -263,9 +423,52 @@ tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
 tabs["Auto Play"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 
--- เพิ่มปุ่มในหมวด Auto Play
+-- ========================================================
+-- 1. หมวด AUTO PLAY
+-- ========================================================
+
+-- แถบแสดงสถานะ Auto Play
+local AutoPlayStatusCard = Instance.new("Frame")
+AutoPlayStatusCard.Size = UDim2.new(1, -10, 0, 38)
+AutoPlayStatusCard.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+AutoPlayStatusCard.LayoutOrder = 0
+AutoPlayStatusCard.Parent = AutoPlayPage
+
+local AutoPlayStatusCorner = Instance.new("UICorner")
+AutoPlayStatusCorner.CornerRadius = UDim.new(0, 6)
+AutoPlayStatusCorner.Parent = AutoPlayStatusCard
+
+local AutoPlayStatusLabel = Instance.new("TextLabel")
+AutoPlayStatusLabel.Size = UDim2.new(1, -20, 1, 0)
+AutoPlayStatusLabel.Position = UDim2.new(0, 10, 0, 0)
+AutoPlayStatusLabel.BackgroundTransparency = 1
+AutoPlayStatusLabel.Text = "Auto Play Status: Idle"
+AutoPlayStatusLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
+AutoPlayStatusLabel.TextSize = 12
+AutoPlayStatusLabel.Font = Enum.Font.GothamMedium
+AutoPlayStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+AutoPlayStatusLabel.Parent = AutoPlayStatusCard
+
+local function UpdateAutoPlayStatus(text, color)
+    if AutoPlayStatusLabel then
+        AutoPlayStatusLabel.Text = "Auto Play: " .. text
+        if color then
+            AutoPlayStatusLabel.TextColor3 = color
+        end
+    end
+end
+
+-- เพิ่มปุ่มในหมวด Auto Play ตามที่ผู้ใช้ต้องการ
 CreateToggle(AutoPlayPage, "Auto Place Units", "AutoPlace", 1)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 2)
+CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 3)
+CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 4)
+CreateToggle(AutoPlayPage, "Auto Buff 100% (Erwin / Wanda / Elfy)", "AutoBuffChain", 5)
+CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 6)
+
+-- ========================================================
+-- 2. หมวด EVENT
+-- ========================================================
 
 -- แถบแสดงสถานะ Event Matchmaking
 local EventStatusCard = Instance.new("Frame")
@@ -365,7 +568,148 @@ CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 2)
 CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 3)
 CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 4)
 
--- ระบบ Background Loop สำหรับจัดการ Event Automation ทั้งหมด
+-- ========================================================
+-- ระบบการทำงานเบื้องหลัง (Background Logic)
+-- ========================================================
+
+-- ตารางจัดเก็บเวลาบัฟล่าสุดเพื่อทำ Chain 100% Uptime (บัฟอยู่นาน 30 วินาที)
+local BuffChains = {
+    erwin = { lastCast = 0 },
+    wendy = { lastCast = 0 },
+    elfy = { lastCast = 0 },
+}
+
+-- 1. ลูปสำหรับ Auto Play (Place, Upgrade, Abilities, Buffs)
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+
+        -- ทำงานเฉพาะตอนที่อยู่ในห้องแข่งขัน (Game Match)
+        if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            local myUnits = GetPlayerUnits()
+
+            -- [1] Auto Place Units
+            if State.AutoPlace then
+                local equipped = GetEquippedUnitList()
+                if #equipped > 0 then
+                    -- หากเปิด Auto Upgrade Farm First ให้เรียงวางยูนิตฟาร์มเงินก่อน
+                    if State.AutoUpgradeFarmFirst then
+                        table.sort(equipped, function(a, b)
+                            local aFarm = a.name:lower():find("speedwagon") or a.name:lower():find("bulma") or a.name:lower():find("nami")
+                            local bFarm = b.name:lower():find("speedwagon") or b.name:lower():find("bulma") or b.name:lower():find("nami")
+                            if aFarm and not bFarm then return true end
+                            if not aFarm and bFarm then return false end
+                            return false
+                        end)
+                    end
+
+                    for i, unitInfo in ipairs(equipped) do
+                        local cframe = GetPlacementCFrame(#myUnits + i)
+                        if cframe then
+                            InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
+                        end
+                    end
+                end
+            end
+
+            -- [2] Auto Upgrade Units (พร้อมรองรับ Farm First)
+            if State.AutoUpgrade and #myUnits > 0 then
+                local upgradable = {}
+                for _, u in ipairs(myUnits) do
+                    if u._stats:FindFirstChild("upgrade") and u._stats:FindFirstChild("max_upgrade") then
+                        if u._stats.upgrade.Value < u._stats.max_upgrade.Value then
+                            table.insert(upgradable, u)
+                        end
+                    end
+                end
+
+                if #upgradable > 0 then
+                    -- หากเปิด Farm First ให้จัดลำดับยูนิตฟาร์มขึ้นมาก่อน
+                    if State.AutoUpgradeFarmFirst then
+                        table.sort(upgradable, function(a, b)
+                            local aFarm = IsFarmUnit(a)
+                            local bFarm = IsFarmUnit(b)
+                            if aFarm and not bFarm then
+                                return true
+                            elseif not aFarm and bFarm then
+                                return false
+                            end
+                            return a._stats.upgrade.Value < b._stats.upgrade.Value
+                        end)
+                    end
+
+                    -- อัปเกรดยูนิตลำดับแรกสุดตาม Priority
+                    InvokeEndpoint("upgrade_unit_ingame", upgradable[1])
+                end
+            end
+
+            -- [3] Auto Buff 100% Chain (Erwin / Wanda / Elfy)
+            if State.AutoBuffChain and #myUnits > 0 then
+                local groups = {
+                    erwin = {},
+                    wendy = {},
+                    elfy = {},
+                }
+
+                for _, u in ipairs(myUnits) do
+                    local g = GetBuffChainGroup(u)
+                    if g and groups[g] then
+                        table.insert(groups[g], u)
+                    end
+                end
+
+                local now = tick()
+                for groupName, units in pairs(groups) do
+                    if #units > 0 then
+                        local chain = BuffChains[groupName]
+                        -- บัฟมีผล 30 วินาที หมุนเวียนที่ 29.5 วินาทีเพื่อให้บัฟทำงานต่อเนื่อง 100%
+                        if now - chain.lastCast >= 29.5 then
+                            for _, u in ipairs(units) do
+                                if CanUseActiveAttack(u) then
+                                    InvokeEndpoint("use_active_attack", u)
+                                    chain.lastCast = now
+                                    UpdateAutoPlayStatus("Buff 100%: Activated " .. groupName, Color3.fromRGB(100, 255, 100))
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- [4] Auto Buff 100% Griffith
+            if State.AutoBuffGriffith and #myUnits > 0 then
+                for _, u in ipairs(myUnits) do
+                    if IsGriffithUnit(u) and CanUseActiveAttack(u) then
+                        InvokeEndpoint("use_active_attack", u)
+                        UpdateAutoPlayStatus("Griffith Buff 100% Activated!", Color3.fromRGB(255, 215, 0))
+                    end
+                end
+            end
+
+            -- [5] Auto Use Ability ทั่วไป
+            if State.AutoUseAbility and #myUnits > 0 then
+                for _, u in ipairs(myUnits) do
+                    -- ข้ามยูนิตที่เป็น Buff Chain หรือ Griffith เพื่อไม่ให้กวนระบบ 100% Buff
+                    local isChain = State.AutoBuffChain and (GetBuffChainGroup(u) ~= nil)
+                    local isGriffith = State.AutoBuffGriffith and IsGriffithUnit(u)
+
+                    if not isChain and not isGriffith then
+                        if CanUseActiveAttack(u) then
+                            InvokeEndpoint("use_active_attack", u)
+                        end
+                    end
+                end
+            end
+
+            UpdateAutoPlayStatus("Active in Match", Color3.fromRGB(70, 200, 255))
+        else
+            UpdateAutoPlayStatus("Idle (Waiting for Match)", Color3.fromRGB(160, 160, 180))
+        end
+    end
+end)
+
+-- 2. ลูปสำหรับ Event Automation & Matchmaking
 task.spawn(function()
     while true do
         task.wait(1.5)
@@ -446,4 +790,4 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
-print("XT Hub UI Loaded Successfully! Event Matchmaking ready for Summer Hunt.")
+print("XT Hub UI Loaded Successfully! Auto Play & Event Matchmaking are ready.")
