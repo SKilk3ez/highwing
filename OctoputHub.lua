@@ -541,9 +541,11 @@ end
 
 local function GetBuffChainGroup(unit)
     local id = GetUnitId(unit)
-    if id:find("erwin", 1, true) or id:find("commander", 1, true) then
+    if id:find("erwin", 1, true) or id:find("commander", 1, true) or id:find("commando", 1, true) then
         return "erwin"
-    elseif id:find("wendy", 1, true) or id:find("wanda", 1, true) then
+    elseif id:find("wenda", 1, true) or id:find("windsong", 1, true)
+        or id:find("wendy", 1, true) or id:find("wanda", 1, true)
+        or id:find("winddragon", 1, true) or id:find("wind_dragon", 1, true) then
         return "wendy"
     elseif id:find("leafa", 1, true) or id:find("elfy", 1, true) then
         return "elfy"
@@ -689,6 +691,28 @@ local function EnrichEquipped(list)
         end
     end
     return list
+end
+
+-- Detect farm units from both their displayed name and unit database metadata.
+-- Some equipped-unit records use an internal ID that does not contain the display name.
+local function IsFarmInfo(info)
+    if not info then
+        return false
+    end
+    local farmText = NormalizeName(info.name) .. NormalizeName(info.displayName) .. NormalizeName(info.unitId)
+    if IsFarmName(info.name) or IsFarmName(info.displayName) or IsFarmName(info.unitId)
+        or farmText:find("farm", 1, true) then
+        return true
+    end
+    local data = LookupUnitData(info.unitId)
+    if type(data) == "table" then
+        if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
+            or data._show_as_farm_unit == true or data.show_as_farm_unit == true
+            or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
+            return true
+        end
+    end
+    return false
 end
 
 local function GetCurrentWave()
@@ -1978,7 +2002,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
-CreateToggle(AutoPlayPage, "Auto Buff 100% (Erwin / Wanda / Elfy)", "AutoBuffChain", 6)
+CreateToggle(AutoPlayPage, "Auto Buff 100% (Commando / Wenda / Elfy)", "AutoBuffChain", 6)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 7)
 
 CreateSection(AutoPlayPage, "Hybrid Units", 8)
@@ -2401,10 +2425,51 @@ end, function(value)
 end)
 
 local BuffChains = {
-    erwin = { lastCast = 0 },
-    wendy = { lastCast = 0 },
-    elfy = { lastCast = 0 },
+    erwin = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
+    wendy = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
+    elfy = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
 }
+
+local function GetBuffChainCooldown(units, index)
+    local unit = units and units[index or 1]
+    if unit and unit:FindFirstChild("_stats") then
+        local value = unit._stats:FindFirstChild("active_attack_cooldown")
+        if value and tonumber(value.Value) then
+            return math.max(1, tonumber(value.Value))
+        end
+    end
+    return 60
+end
+
+local function GetBuffChainCurseOffset(units)
+    -- Cursed four-unit loop: use the unit's displayed SPA integer digit
+    -- as the initial offset (e.g. 14.9 -> 4s, 16.1 -> 6s).
+    local unit = units and units[1]
+    local stats = unit and unit:FindFirstChild("_stats")
+    if stats then
+        local candidates = {
+            "attack_cooldown", "base_attack_cooldown",
+            "cooldown", "spa", "base_spa"
+        }
+        for _, name in ipairs(candidates) do
+            local value = stats:FindFirstChild(name)
+            local number = value and tonumber(value.Value)
+            if number and number > 0 then
+                return math.clamp(math.floor(number) % 10, 3, 7)
+            end
+        end
+        -- Some versions expose only the active cooldown. Do not derive SPA
+        -- from that value; use a conservative 5s offset if SPA is unavailable.
+    end
+    return 5
+end
+
+local function ResetBuffChain(chain, units)
+    chain.unitOrder = table.clone(units)
+    chain.phase = 1
+    chain.cycleStart = 0
+    chain.nextCastAt = 0
+end
 
 local farmStall = { count = 0, lastChange = 0 }
 local matchEndHandled = false
@@ -2652,13 +2717,27 @@ task.spawn(function()
                         if IsGriffithName(info.name) then
                             partyHasGriffith = true
                         end
-                        if IsFarmName(info.name) then
+                        if IsFarmInfo(info) then
                             partyHasFarm = true
                         end
                     end
 
                     local useGriffithOrder = State.AutoBuffGriffith and partyHasGriffith
                     local farmCount = CountCategory(myUnits, IsFarmUnit)
+                    -- Also count placed farms by their equipped internal IDs. Some game
+                    -- versions omit farm_amount from the placed model's _stats.
+                    for _, placed in ipairs(myUnits) do
+                        if not IsFarmUnit(placed) then
+                            local placedId = GetUnitId(placed)
+                            for _, equippedFarm in ipairs(equipped) do
+                                if IsFarmInfo(equippedFarm)
+                                    and NormalizeName(equippedFarm.unitId) == placedId then
+                                    farmCount = farmCount + 1
+                                    break
+                                end
+                            end
+                        end
+                    end
                     local griffithCount = CountCategory(myUnits, IsGriffithUnit)
                     local griffithReincarnated = false
                     for _, u in ipairs(myUnits) do
@@ -2675,13 +2754,15 @@ task.spawn(function()
                         farmStall.lastChange = tick()
                     end
                     local farmElapsed = tick() - farmStall.lastChange
-                    local farmComplete = (farmCount > 0 and farmElapsed >= 4) or farmElapsed >= 15
+                    -- Never let Griffith jump ahead just because the farm detector timed out.
+                    -- Once at least one farm is placed and stable, proceed to Griffith.
+                    local farmComplete = not partyHasFarm or (farmCount > 0 and farmElapsed >= 4)
 
                     local function CanPlaceInfo(info)
                         if not useGriffithOrder then
                             return true
                         end
-                        local isFarm = IsFarmName(info.name)
+                        local isFarm = IsFarmInfo(info)
                         local isGriff = IsGriffithName(info.name)
                         local isBuff = IsBuffName(info.name)
 
@@ -2703,6 +2784,19 @@ task.spawn(function()
                         return isBuff
                     end
 
+                    -- In Griffith mode, explicitly prioritize farms regardless of the
+                    -- equipped-list order (which may put Griffith at index 1).
+                    if useGriffithOrder and partyHasFarm then
+                        table.sort(equipped, function(a, b)
+                            local aFarm = IsFarmInfo(a)
+                            local bFarm = IsFarmInfo(b)
+                            if aFarm ~= bFarm then
+                                return aFarm
+                            end
+                            return false
+                        end)
+                    end
+
                     local placeIndex = #myUnits
                     for _, unitInfo in ipairs(equipped) do
                         if CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
@@ -2712,8 +2806,8 @@ task.spawn(function()
                                 local cframe = GetPlacementCFrame(placeIndex, kind)
                                 if cframe then
                                     InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
-                                end
-                                if useGriffithOrder and IsGriffithName(unitInfo.name) then
+                                    -- Place only one unit per scan. This guarantees the
+                                    -- farm-first order is respected before Griffith is considered.
                                     break
                                 end
                             end
@@ -2739,18 +2833,74 @@ task.spawn(function()
                 end
 
                 local now = tick()
-                for groupName, units in pairs(groups) do
-                    if #units > 0 then
-                        local chain = BuffChains[groupName]
-                        if now - chain.lastCast >= 29.5 then
-                            for _, u in ipairs(units) do
-                                if CanUseActiveAttack(u) then
-                                    InvokeEndpoint("use_active_attack", u)
-                                    chain.lastCast = now
-                                    UpdateAutoPlayStatus("Buff 100%: Activated " .. groupName, Color3.fromRGB(100, 255, 100))
+                for groupName, allUnits in pairs(groups) do
+                    -- Cursed 100% method uses four copies of the SAME buffer.
+                    -- Extra copies are left untouched by this rotation.
+                    local units = {}
+                    for i = 1, math.min(4, #allUnits) do
+                        table.insert(units, allUnits[i])
+                    end
+
+                    local chain = BuffChains[groupName]
+                    if #units == 4 then
+                        local changed = #chain.unitOrder ~= 4
+                        if not changed then
+                            for i, unit in ipairs(units) do
+                                if chain.unitOrder[i] ~= unit then
+                                    changed = true
                                     break
                                 end
                             end
+                        end
+
+                        if changed then
+                            ResetBuffChain(chain, units)
+                        end
+
+                        if now >= chain.nextCastAt then
+                            local phase = chain.phase
+                            local unit = units[phase]
+                            if unit and CanUseActiveAttack(unit) then
+                                InvokeEndpoint("use_active_attack", unit)
+
+                                if phase == 1 then
+                                    chain.cycleStart = now
+                                    chain.nextCastAt = now + GetBuffChainCurseOffset(units)
+                                    chain.phase = 2
+                                elseif phase == 2 then
+                                    -- The first buff expires at 30s; then pass it to unit 3.
+                                    chain.nextCastAt = chain.cycleStart + 30
+                                    chain.phase = 3
+                                elseif phase == 3 then
+                                    -- The second-stage buff expires 30s after unit 2.
+                                    chain.nextCastAt = chain.cycleStart + 30
+                                        + GetBuffChainCurseOffset(units)
+                                    chain.phase = 4
+                                else
+                                    -- Start the next cycle when unit 1 is genuinely ready again.
+                                    chain.nextCastAt = chain.cycleStart
+                                        + GetBuffChainCooldown(units, 1)
+                                    chain.phase = 1
+                                end
+
+                                UpdateAutoPlayStatus(
+                                    "Cursed Buff Rotation: " .. groupName
+                                        .. " " .. tostring(phase) .. "/4",
+                                    Color3.fromRGB(100, 255, 100)
+                                )
+                            end
+                        end
+                    else
+                        chain.unitOrder = {}
+                        chain.phase = 1
+                        chain.cycleStart = 0
+                        chain.nextCastAt = 0
+                        if #units > 0 then
+                            UpdateAutoPlayStatus(
+                                "Cursed Buff Rotation: " .. groupName
+                                    .. " needs 4 units (found " .. tostring(#units) .. ")",
+                                Color3.fromRGB(255, 190, 80)
+                            )
                         end
                     end
                 end
