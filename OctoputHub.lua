@@ -104,6 +104,7 @@ local State = {
     AutoUseAbility = false,
     AutoBuffChain = false,
     AutoBuffGriffith = false,
+    GriffithBuddyUnitId = "",
     BuffDelays = {
         commander = { [2] = 3, [3] = 0.7, [4] = 0.7 },
         windsong = { [2] = 3.5, [3] = 0.7, [4] = 0.7 },
@@ -233,6 +234,7 @@ local function CopyStateForSave()
         AutoUseAbility = State.AutoUseAbility,
         AutoBuffChain = State.AutoBuffChain,
         AutoBuffGriffith = State.AutoBuffGriffith,
+        GriffithBuddyUnitId = State.GriffithBuddyUnitId,
         BuffDelays = State.BuffDelays,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
@@ -289,6 +291,9 @@ local function ApplySavedTable(saved)
         if type(saved[key]) == "boolean" then
             State[key] = saved[key]
         end
+    end
+    if type(saved.GriffithBuddyUnitId) == "string" then
+        State.GriffithBuddyUnitId = saved.GriffithBuddyUnitId
     end
     if type(saved.BuffDelays) == "table" then
         for _, group in ipairs({ "commander", "windsong", "elfy" }) do
@@ -559,17 +564,31 @@ local function IsFarmUnit(unit)
     return IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)
 end
 
-local function GetBuffChainGroup(unit)
-    local id = GetUnitId(unit)
-    if id:find("commander", 1, true) or id:find("erwin", 1, true) then
+local function GetBuffChainGroupFromText(...)
+    -- Match canonical IDs and displayed/evolved names across game versions.
+    local text = ""
+    for i = 1, select("#", ...) do
+        text = text .. NormalizeName(select(i, ...))
+    end
+    if text:find("commander", 1, true) or text:find("erwin", 1, true) then
         return "commander"
-    elseif id:find("windsong", 1, true) or id:find("wenda", 1, true)
-        or id:find("winddragon", 1, true) or id:find("wind_dragon", 1, true) then
+    elseif text:find("windsong", 1, true) or text:find("wenda", 1, true)
+        or text:find("winddragon", 1, true) then
         return "windsong"
-    elseif id:find("elfy", 1, true) or id:find("sylph", 1, true) then
+    elseif text:find("elfy", 1, true) or text:find("sylph", 1, true) then
         return "elfy"
     end
     return nil
+end
+
+local function GetBuffChainGroup(unit)
+    if not unit then return nil end
+    local statsId = ""
+    if unit:FindFirstChild("_stats") then
+        local idValue = unit._stats:FindFirstChild("id")
+        statsId = idValue and tostring(idValue.Value) or ""
+    end
+    return GetBuffChainGroupFromText(GetUnitId(unit), statsId, unit.Name)
 end
 
 local IsGriffithReincarnation
@@ -1243,6 +1262,49 @@ local function GetPlacementCFrameForInfo(index, info)
         if cf then return cf, kind end
     end
     return nil, primary
+end
+
+local function GetPlacementCFrameNearGriffith(info, myUnits)
+    if not info or not State.GriffithBuddyUnitId or State.GriffithBuddyUnitId == "" then
+        return nil
+    end
+    local griffith
+    for _, unit in ipairs(myUnits or {}) do
+        if IsGriffithUnit(unit) then
+            griffith = unit
+            break
+        end
+    end
+    if not griffith then return nil end
+
+    local ok, pivot = pcall(function() return griffith:GetPivot() end)
+    if not ok or not pivot then return nil end
+    local center = pivot.Position
+    local look = pivot.LookVector
+    local right = Vector3.new(look.Z, 0, -look.X)
+    if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+    local forward = Vector3.new(look.X, 0, look.Z)
+    if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
+
+    local kind = ResolvePlacementKind(info.unitId)
+    local offsets = {
+        Vector2.new(4.2, 0), Vector2.new(-4.2, 0),
+        Vector2.new(0, 4.2), Vector2.new(0, -4.2),
+        Vector2.new(4.2, 4.2), Vector2.new(-4.2, 4.2),
+        Vector2.new(4.2, -4.2), Vector2.new(-4.2, -4.2),
+        Vector2.new(6.5, 0), Vector2.new(-6.5, 0),
+        Vector2.new(0, 6.5), Vector2.new(0, -6.5),
+    }
+    for _, offset in ipairs(offsets) do
+        local candidate = center + right * offset.X + forward * offset.Y
+        local finalPos = PlacementIsClear(candidate, kind)
+        if finalPos then
+            local flatLook = Vector3.new(look.X, 0, look.Z)
+            if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) else flatLook = flatLook.Unit end
+            return CFrame.new(finalPos, finalPos + flatLook), kind
+        end
+    end
+    return nil
 end
 
 local function ReadNumberValue(container, keywords)
@@ -2304,6 +2366,144 @@ CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 8)
 
+-- Expandable selector: choose one equipped unit type to place beside Griffith.
+local BuddyContainer = Instance.new("Frame")
+BuddyContainer.Name = "GriffithBuddySelector"
+BuddyContainer.Size = UDim2.new(1, -10, 0, 30)
+BuddyContainer.BackgroundTransparency = 1
+BuddyContainer.LayoutOrder = 9
+BuddyContainer.ZIndex = 12
+BuddyContainer.Parent = AutoPlayPage
+
+local BuddyToggle = Instance.new("TextButton")
+BuddyToggle.Size = UDim2.new(1, 0, 0, 28)
+BuddyToggle.BackgroundColor3 = Color3.fromRGB(30, 38, 52)
+BuddyToggle.Text = "  Griffith Nearby Unit Selector  ▾"
+BuddyToggle.TextColor3 = Color3.fromRGB(175, 205, 245)
+BuddyToggle.TextSize = 11
+BuddyToggle.Font = Enum.Font.GothamSemibold
+BuddyToggle.TextXAlignment = Enum.TextXAlignment.Left
+BuddyToggle.ZIndex = 13
+BuddyToggle.Parent = BuddyContainer
+Instance.new("UICorner", BuddyToggle).CornerRadius = UDim.new(0, 6)
+
+local BuddyPanel = Instance.new("Frame")
+BuddyPanel.Name = "GriffithBuddyPanel"
+BuddyPanel.Position = UDim2.new(0, 0, 0, 34)
+BuddyPanel.Size = UDim2.new(1, 0, 0, 164)
+BuddyPanel.BackgroundColor3 = Color3.fromRGB(22, 26, 37)
+BuddyPanel.BorderSizePixel = 0
+BuddyPanel.Visible = false
+BuddyPanel.ZIndex = 13
+BuddyPanel.Parent = BuddyContainer
+Instance.new("UICorner", BuddyPanel).CornerRadius = UDim.new(0, 6)
+local buddyStroke = Instance.new("UIStroke", BuddyPanel)
+buddyStroke.Color = Color3.fromRGB(55, 70, 95)
+
+local BuddyHint = Instance.new("TextLabel")
+BuddyHint.Size = UDim2.new(1, -90, 0, 24)
+BuddyHint.Position = UDim2.new(0, 8, 0, 3)
+BuddyHint.BackgroundTransparency = 1
+BuddyHint.Text = "เลือกยูนิตในทีมที่จะให้วางใกล้ Griffith"
+BuddyHint.TextColor3 = Color3.fromRGB(155, 165, 185)
+BuddyHint.TextSize = 10
+BuddyHint.Font = Enum.Font.Gotham
+BuddyHint.TextXAlignment = Enum.TextXAlignment.Left
+BuddyHint.ZIndex = 14
+BuddyHint.Parent = BuddyPanel
+
+local BuddyRefresh = Instance.new("TextButton")
+BuddyRefresh.Size = UDim2.new(0, 68, 0, 22)
+BuddyRefresh.Position = UDim2.new(1, -76, 0, 4)
+BuddyRefresh.BackgroundColor3 = Color3.fromRGB(45, 55, 75)
+BuddyRefresh.Text = "Refresh"
+BuddyRefresh.TextColor3 = Color3.fromRGB(230, 235, 245)
+BuddyRefresh.TextSize = 10
+BuddyRefresh.Font = Enum.Font.GothamBold
+BuddyRefresh.ZIndex = 15
+BuddyRefresh.Parent = BuddyPanel
+Instance.new("UICorner", BuddyRefresh).CornerRadius = UDim.new(0, 4)
+
+local BuddyList = Instance.new("ScrollingFrame")
+BuddyList.Size = UDim2.new(1, -12, 0, 126)
+BuddyList.Position = UDim2.new(0, 6, 0, 31)
+BuddyList.BackgroundColor3 = Color3.fromRGB(18, 20, 29)
+BuddyList.BorderSizePixel = 0
+BuddyList.ScrollBarThickness = 4
+BuddyList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+BuddyList.CanvasSize = UDim2.new(0, 0, 0, 0)
+BuddyList.ZIndex = 14
+BuddyList.Parent = BuddyPanel
+Instance.new("UICorner", BuddyList).CornerRadius = UDim.new(0, 4)
+local BuddyListLayout = Instance.new("UIListLayout", BuddyList)
+BuddyListLayout.Padding = UDim.new(0, 3)
+BuddyListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+local BuddyListPadding = Instance.new("UIPadding", BuddyList)
+BuddyListPadding.PaddingTop = UDim.new(0, 4)
+BuddyListPadding.PaddingBottom = UDim.new(0, 4)
+BuddyListPadding.PaddingLeft = UDim.new(0, 4)
+BuddyListPadding.PaddingRight = UDim.new(0, 4)
+
+local function RefreshGriffithBuddyList()
+    for _, child in ipairs(BuddyList:GetChildren()) do
+        if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end
+    end
+    local equipped = EnrichEquipped(GetEquippedUnitList())
+    local seen = {}
+    local options = {}
+    for _, info in ipairs(equipped) do
+        local id = tostring(info.unitId or "")
+        if id ~= "" and not IsGriffithName(id) and not seen[id] then
+            seen[id] = true
+            table.insert(options, { id = id, name = tostring(info.name or id) })
+        end
+    end
+    table.sort(options, function(a, b) return a.name:lower() < b.name:lower() end)
+
+    local function AddOption(label, id, selected)
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -4, 0, 25)
+        button.BackgroundColor3 = selected and Color3.fromRGB(80, 55, 105) or Color3.fromRGB(31, 35, 48)
+        button.Text = (selected and "✓  " or "    ") .. label
+        button.TextColor3 = Color3.fromRGB(225, 230, 242)
+        button.TextSize = 10
+        button.Font = Enum.Font.Gotham
+        button.TextXAlignment = Enum.TextXAlignment.Left
+        button.ZIndex = 15
+        button.Parent = BuddyList
+        Instance.new("UICorner", button).CornerRadius = UDim.new(0, 4)
+        button.MouseButton1Click:Connect(function()
+            State.GriffithBuddyUnitId = id or ""
+            SaveConfig()
+            RefreshGriffithBuddyList()
+        end)
+    end
+
+    AddOption("None (ปิดการเลือก)", "", State.GriffithBuddyUnitId == "")
+    for _, option in ipairs(options) do
+        AddOption(option.name, option.id, State.GriffithBuddyUnitId == option.id)
+    end
+    if #options == 0 then
+        local empty = Instance.new("TextLabel")
+        empty.Size = UDim2.new(1, -4, 0, 24)
+        empty.BackgroundTransparency = 1
+        empty.Text = "ไม่พบ Unit ในทีม กด Refresh หลังเข้าเกม"
+        empty.TextColor3 = Color3.fromRGB(145, 145, 160)
+        empty.TextSize = 10
+        empty.Font = Enum.Font.Gotham
+        empty.ZIndex = 15
+        empty.Parent = BuddyList
+    end
+end
+
+BuddyToggle.MouseButton1Click:Connect(function()
+    BuddyPanel.Visible = not BuddyPanel.Visible
+    BuddyContainer.Size = UDim2.new(1, -10, 0, BuddyPanel.Visible and 202 or 30)
+    BuddyToggle.Text = BuddyPanel.Visible and "  Griffith Nearby Unit Selector  ▴" or "  Griffith Nearby Unit Selector  ▾"
+    if BuddyPanel.Visible then RefreshGriffithBuddyList() end
+end)
+BuddyRefresh.MouseButton1Click:Connect(RefreshGriffithBuddyList)
+
 -- Compact inline Auto Buff Delay Settings (inside a small frame under Auto Buff 100%).
 local function SetBuffDelay(group, index, value)
     local number = tonumber(value)
@@ -3247,53 +3447,96 @@ if State.BlackScreen then
 end
 RefreshUnitConfigUI()
 
+-- Estimate the next upgrade price from live unit stats first, then unit data.
+-- Unknown prices sort last instead of being mistaken for free upgrades.
+local function GetNextUpgradeCost(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return math.huge end
+    local stats = unit._stats
+    local keys = { "next_upgrade_cost", "upgrade_cost", "next_cost", "upgrade_price" }
+    local best = nil
+    for _, child in ipairs(stats:GetDescendants()) do
+        local name = NormalizeName(child.Name)
+        local isCost = false
+        for _, key in ipairs(keys) do
+            if name == NormalizeName(key) or name:find("upgradecost", 1, true) then
+                isCost = true break
+            end
+        end
+        if isCost and (child:IsA("NumberValue") or child:IsA("IntValue") or child:IsA("StringValue")) then
+            local value = tonumber(child.Value)
+            if value and value >= 0 then best = value break end
+        end
+    end
+    if best ~= nil then return best end
+
+    local current = stats:FindFirstChild("upgrade")
+    local data = LookupUnitData(GetRawUnitId(unit))
+    local upgrades = type(data) == "table" and data.upgrade or nil
+    if current and type(upgrades) == "table" then
+        local nextInfo = upgrades[(tonumber(current.Value) or 0) + 1]
+        if type(nextInfo) == "table" then
+            local value = tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
+            if value then return value end
+        end
+    end
+    return math.huge
+end
+
+local pendingUpgradeRequests = {}
+local pendingSpawnRequests = {}
+local abilityCursor = 1
+
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
         task.wait(0.5)
-
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             local units = GetPlayerUnits()
-            if #units > 0 then
-                local wave = GetCurrentWave()
-                local upgradable = {}
+            local now = tick()
+            local candidates = {}
 
-                for _, u in ipairs(units) do
-                    if u._stats:FindFirstChild("upgrade") and u._stats:FindFirstChild("max_upgrade")
-                        and u._stats.upgrade.Value < u._stats.max_upgrade.Value then
-                        local cfg = GetUnitConfig(GetRawUnitId(u))
-                        local allowed = true
-
-                        if cfg then
-                            if cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave then
-                                allowed = false
-                            end
-                            if cfg.upgradeTarget ~= nil and u._stats.upgrade.Value >= cfg.upgradeTarget then
-                                allowed = false
-                            end
-                        end
-
-                        if allowed then
-                            table.insert(upgradable, u)
-                        end
-                    end
-                end
-
-                if #upgradable > 0 then
-                    if State.AutoUpgradeFarmFirst then
-                        table.sort(upgradable, function(a, b)
-                            local aFarm = IsFarmUnit(a)
-                            local bFarm = IsFarmUnit(b)
-                            if aFarm ~= bFarm then
-                                return aFarm
-                            end
-                            return a._stats.upgrade.Value < b._stats.upgrade.Value
-                        end)
-                    end
-
-                    InvokeEndpoint("upgrade_unit_ingame", upgradable[1])
+            for unit, pending in pairs(pendingUpgradeRequests) do
+                local stats = unit and unit.Parent and unit:FindFirstChild("_stats")
+                local level = stats and stats:FindFirstChild("upgrade")
+                if not level or level.Value > pending.level or now - pending.time > 5 then
+                    pendingUpgradeRequests[unit] = nil
                 end
             end
+
+            for _, unit in ipairs(units) do
+                local stats = unit:FindFirstChild("_stats")
+                local level = stats and stats:FindFirstChild("upgrade")
+                local maximum = stats and stats:FindFirstChild("max_upgrade")
+                if level and maximum and level.Value < maximum.Value and not pendingUpgradeRequests[unit] then
+                    local cfg = GetUnitConfig(GetRawUnitId(unit))
+                    local allowed = true
+                    local wave = GetCurrentWave()
+                    if cfg then
+                        if cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave then allowed = false end
+                        if cfg.upgradeTarget ~= nil and level.Value >= cfg.upgradeTarget then allowed = false end
+                    end
+                    if allowed then
+                        table.insert(candidates, { unit = unit, cost = GetNextUpgradeCost(unit), farm = IsFarmUnit(unit) })
+                    end
+                end
+            end
+
+            if #candidates > 0 then
+                local farmPriority = State.AutoUpgradeFarmFirst or State.AutoBuffGriffith
+                table.sort(candidates, function(a, b)
+                    if farmPriority and a.farm ~= b.farm then return a.farm end
+                    if a.cost ~= b.cost then return a.cost < b.cost end
+                    local aLevel = a.unit._stats.upgrade.Value
+                    local bLevel = b.unit._stats.upgrade.Value
+                    if aLevel ~= bLevel then return aLevel < bLevel end
+                    return tostring(a.unit) < tostring(b.unit)
+                end)
+                local target = candidates[1].unit
+                InvokeEndpoint("upgrade_unit_ingame", target)
+                pendingUpgradeRequests[target] = { level = target._stats.upgrade.Value, time = now }
+            end
+        else
+            table.clear(pendingUpgradeRequests)
         end
     end
 end)
@@ -3327,8 +3570,8 @@ task.spawn(function()
                         end
                     end
 
-                    -- Placement order is automatic whenever Griffith is equipped; the toggle controls only skill activation.
-                    local useGriffithOrder = partyHasGriffith
+                    -- Griffith-specific placement order runs only when Auto Buff 100% (Griffith) is enabled.
+                    local useGriffithOrder = State.AutoBuffGriffith and partyHasGriffith
                     local griffithCount = CountCategory(myUnits, IsGriffithUnit)
                     local griffithReincarnated = false
                     for _, u in ipairs(myUnits) do
@@ -3377,16 +3620,7 @@ task.spawn(function()
                     local buffRequired = { commander = 0, windsong = 0, elfy = 0 }
                     local buffPlaced = { commander = 0, windsong = 0, elfy = 0 }
                     for _, info in ipairs(equipped) do
-                        local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
-                        local group = nil
-                        if unitText:find("commander", 1, true) or unitText:find("erwin", 1, true) then
-                            group = "commander"
-                        elseif unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true)
-                            or unitText:find("winddragon", 1, true) then
-                            group = "windsong"
-                        elseif unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true) then
-                            group = "elfy"
-                        end
+                        local group = GetBuffChainGroupFromText(info.unitId, info.name)
                         if group then buffRequired[group] = 1 end
                     end
                     -- A present buff group must reach four placed copies for the curse loop.
@@ -3395,10 +3629,7 @@ task.spawn(function()
                         if present > 0 then
                             local target = 4
                             for _, info in ipairs(equipped) do
-                                local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
-                                local matches = (group == "commander" and (unitText:find("commander", 1, true) or unitText:find("erwin", 1, true)))
-                                    or (group == "windsong" and (unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true) or unitText:find("winddragon", 1, true)))
-                                    or (group == "elfy" and (unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true)))
+                                local matches = GetBuffChainGroupFromText(info.unitId, info.name) == group
                                 if matches then
                                     local cap = tonumber(info.spawnCap)
                                     local cfg = GetUnitConfig(info.unitId)
@@ -3479,31 +3710,65 @@ task.spawn(function()
                     -- on non-farm placements while any placed farm is still below
                     -- its configured upgrade target. This also holds Griffith until
                     -- farm upgrades are complete, preserving the farm-first economy.
-                    local farmUpgradePending = State.AutoUpgrade and State.AutoUpgradeFarmFirst
-                        and HasPendingFarmUpgrade(myUnits)
+                    local farmUpgradePending = useGriffithOrder and HasPendingFarmUpgrade(myUnits)
                     if farmUpgradePending then
                         UpdateAutoPlayStatus("Farm upgrades first - saving for farm upgrades", Color3.fromRGB(255, 200, 80))
                     end
 
-                    local placeIndex = #myUnits
+                    local eligible = {}
+                    local now = tick()
+                    for uuid, pending in pairs(pendingSpawnRequests) do
+                        local info = nil
+                        for _, equippedInfo in ipairs(equipped) do
+                            if tostring(equippedInfo.uuid or "") == uuid then info = equippedInfo break end
+                        end
+                        local observed = info and CountPlacedInfo(info) or 0
+                        if (pending.countBefore and observed > pending.countBefore) or now - pending.time > 8 then
+                            pendingSpawnRequests[uuid] = nil
+                        end
+                    end
+                    local missingFirst = {}
                     for _, unitInfo in ipairs(equipped) do
+                        local uuidKey = tostring(unitInfo.uuid or "")
                         local farmUpgradeAllowsPlacement = not farmUpgradePending or IsFarmInfo(unitInfo)
-                        if farmUpgradeAllowsPlacement and CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
-                            if not (useGriffithOrder and IsGriffithName(unitInfo.name) and griffithCount >= 1) then
-                                placeIndex = placeIndex + 1
-                                local cframe, kind = GetPlacementCFrameForInfo(placeIndex, unitInfo)
-                                if cframe then
-                                    InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
-                                    -- Place only one unit per scan. This guarantees the
-                                    -- farm-first order is respected before Griffith is considered.
-                                    break
-                                end
+                        local isSecondGriffith = useGriffithOrder
+                            and (IsGriffithName(unitInfo.name) or IsGriffithName(unitInfo.unitId))
+                            and griffithCount >= 1
+                        if uuidKey ~= "" and not pendingSpawnRequests[uuidKey]
+                            and not isSecondGriffith and farmUpgradeAllowsPlacement
+                            and CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
+                            table.insert(eligible, unitInfo)
+                            if CountPlacedInfo(unitInfo) < 1 then
+                                table.insert(missingFirst, unitInfo)
                             end
+                        end
+                    end
+
+                    -- First guarantee one placement for every equipped unit type; after
+                    -- that, randomly fill remaining allowed copies until each cap is met.
+                    if #missingFirst > 0 then eligible = missingFirst end
+                    if #eligible > 0 then
+                        local chosen = eligible[math.random(1, #eligible)]
+                        local placeIndex = #myUnits + math.random(1, 12)
+                        local cframe, kind
+                        if State.GriffithBuddyUnitId ~= "" and tostring(chosen.unitId) == State.GriffithBuddyUnitId then
+                            cframe, kind = GetPlacementCFrameNearGriffith(chosen, myUnits)
+                        end
+                        if not cframe then cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen) end
+                        if cframe then
+                            local countBefore = CountPlacedInfo(chosen)
+                            InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
+                            pendingSpawnRequests[tostring(chosen.uuid)] = {
+                                time = now,
+                                unitId = chosen.unitId,
+                                countBefore = countBefore,
+                            }
                         end
                     end
                 end
             else
                 farmStall = { count = 0, lastChange = 0 }
+                table.clear(pendingSpawnRequests)
             end
 
             if State.AutoBuffChain and #myUnits > 0 then
@@ -3526,15 +3791,8 @@ task.spawn(function()
                 local requiredBuffGroups = {}
                 local equippedBuffs = EnrichEquipped(GetEquippedUnitList())
                 for _, info in ipairs(equippedBuffs) do
-                    local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
-                    if unitText:find("commander", 1, true) or unitText:find("erwin", 1, true) then
-                        requiredBuffGroups.commander = true
-                    elseif unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true)
-                        or unitText:find("winddragon", 1, true) or unitText:find("wind_dragon", 1, true) then
-                        requiredBuffGroups.windsong = true
-                    elseif unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true) then
-                        requiredBuffGroups.elfy = true
-                    end
+                    local group = GetBuffChainGroupFromText(info.unitId, info.name)
+                    if group then requiredBuffGroups[group] = true end
                 end
 
                 local allRequiredBuffGroupsReady = true
@@ -3639,15 +3897,30 @@ task.spawn(function()
             end
 
             if State.AutoUseAbility and #myUnits > 0 then
-                for _, u in ipairs(myUnits) do
-                    local isChain = State.AutoBuffChain and (GetBuffChainGroup(u) ~= nil)
-                    local isGriffith = State.AutoBuffGriffith and IsGriffithUnit(u)
-                    if not isChain and not isGriffith then
-                        if CanUseActiveAttack(u) then
-                            InvokeEndpoint("use_active_attack", u)
+                local abilityUnits = {}
+                for _, unit in ipairs(myUnits) do
+                    local isChain = State.AutoBuffChain and (GetBuffChainGroup(unit) ~= nil)
+                    local isGriffithBuff = State.AutoBuffGriffith and IsGriffithUnit(unit)
+                    if not isChain and not isGriffithBuff then table.insert(abilityUnits, unit) end
+                end
+                if #abilityUnits > 0 then
+                    abilityCursor = ((abilityCursor - 1) % #abilityUnits) + 1
+                    -- Cast at most one ability per scan, advancing the cursor so a 3-unit
+                    -- or 4-unit squad receives a complete, even rotation without burst casts.
+                    for offset = 0, #abilityUnits - 1 do
+                        local index = ((abilityCursor + offset - 1) % #abilityUnits) + 1
+                        local unit = abilityUnits[index]
+                        if CanUseActiveAttack(unit) then
+                            InvokeEndpoint("use_active_attack", unit)
+                            abilityCursor = (index % #abilityUnits) + 1
+                            break
                         end
                     end
+                else
+                    abilityCursor = 1
                 end
+            else
+                abilityCursor = 1
             end
 
             UpdateAutoPlayStatus("Active in Match", Color3.fromRGB(70, 200, 255))
