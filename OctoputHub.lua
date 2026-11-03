@@ -361,37 +361,32 @@ HubScale.Scale = State.UIScale
 local EVENT_LEVEL_ID = "summer2_event"
 
 local function InvokeEndpoint(endpointName, ...)
-    -- Return (result, succeeded). A successful endpoint call may legitimately return nil;
-    -- never fall through to a second transport after an invocation attempt.
-    local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
-    if loaderModule then
-        local loaderOk, endpointsClient = pcall(function()
+    local ok, res = pcall(function(...)
+        local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
+        if loaderModule then
             local Loader = require(loaderModule)
-            return Loader.load_client_service(game, "EndpointsClient")
-        end)
-        if loaderOk and endpointsClient and type(endpointsClient.invoke_server) == "function" then
-            local callOk, result = pcall(endpointsClient.invoke_server, endpointName, ...)
-            return result, callOk
+            local EndpointsClient = Loader.load_client_service(game, "EndpointsClient")
+            if EndpointsClient and EndpointsClient.invoke_server then
+                return EndpointsClient.invoke_server(endpointName, ...)
+            end
         end
+    end, ...)
+    if ok and res ~= nil then
+        return res
     end
 
-    -- Direct Remote fallback is used only when the client service is unavailable.
     local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
-    local clientToServer = endpoints and endpoints:FindFirstChild("client_to_server")
-    local remote = clientToServer and clientToServer:FindFirstChild(endpointName)
-    if not remote then
-        return nil, false
-    end
-    local ok, result = pcall(function(...)
-        if remote:IsA("RemoteFunction") then
-            return remote:InvokeServer(...)
-        elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
-            remote:FireServer(...)
-            return nil
+    local client_to_server = endpoints and endpoints:FindFirstChild("client_to_server")
+    if client_to_server then
+        local remote = client_to_server:FindFirstChild(endpointName)
+        if remote then
+            if remote:IsA("RemoteFunction") then
+                return remote:InvokeServer(...)
+            elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+                return remote:FireServer(...)
+            end
         end
-        error("Unsupported endpoint class: " .. remote.ClassName)
-    end, ...)
-    return result, ok
+    end
 end
 
 local function IsInLobby()
@@ -449,8 +444,8 @@ local function IsBuffName(text)
     end
     return id:find("erwin", 1, true)
         or id:find("commander", 1, true)
-        or id:find("windsong", 1, true)
-        or id:find("wenda", 1, true)
+        or id:find("wendy", 1, true)
+        or id:find("wanda", 1, true)
         or id:find("leafa", 1, true)
         or id:find("elfy", 1, true)
 end
@@ -548,8 +543,8 @@ local function GetBuffChainGroup(unit)
     local id = GetUnitId(unit)
     if id:find("erwin", 1, true) or id:find("commander", 1, true) then
         return "erwin"
-    elseif id:find("windsong", 1, true) or id:find("wenda", 1, true) then
-        return "windsong"
+    elseif id:find("wendy", 1, true) or id:find("wanda", 1, true) then
+        return "wendy"
     elseif id:find("leafa", 1, true) or id:find("elfy", 1, true) then
         return "elfy"
     end
@@ -558,6 +553,41 @@ end
 
 local function IsGriffithUnit(unit)
     return IsGriffithName(GetUnitId(unit)) or IsGriffithName(unit and unit.Name)
+end
+
+-- Detect the evolved Griffith unit by its actual unit id/name.
+-- This is the definitive signal that the sacrifice phase has completed.
+local function IsGriffithReincarnation(unit)
+    if not unit then
+        return false
+    end
+
+    local id = GetUnitId(unit)
+    local modelName = NormalizeName(unit.Name)
+    local reincarnated = function(value)
+        local name = NormalizeName(value)
+        return (name:find("griffith", 1, true)
+                or name:find("griffin", 1, true)
+                or name:find("femto", 1, true))
+            and name:find("reincarnation", 1, true) ~= nil
+    end
+
+    if reincarnated(id) or reincarnated(modelName) then
+        return true
+    end
+
+    -- Some game versions expose the display name in stats instead of the model name.
+    local stats = unit:FindFirstChild("_stats")
+    if stats then
+        for _, key in ipairs({ "name", "display_name", "unit_name" }) do
+            local value = stats:FindFirstChild(key)
+            if value and reincarnated(value.Value) then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 local function CanUseActiveAttack(unit)
@@ -573,15 +603,10 @@ local function CanUseActiveAttack(unit)
 
     local lastCast = stats:FindFirstChild("last_active_cast")
     local cd = stats:FindFirstChild("active_attack_cooldown")
-    if not lastCast or not cd then
-        return false -- Missing cooldown data is unknown, not proof that the ability is ready.
+    if lastCast and cd then
+        return (tick() - lastCast.Value) >= cd.Value
     end
-    local lastValue = tonumber(lastCast.Value)
-    local cooldown = tonumber(cd.Value)
-    if not lastValue or not cooldown or cooldown < 0 then
-        return false
-    end
-    return (tick() - lastValue) >= cooldown
+    return true
 end
 
 local function GetEquippedUnitList()
@@ -721,7 +746,7 @@ local function ResolvePlacementKind(unitId)
         elseif ground then
             return "ground"
         end
-        return nil -- Both placement surfaces are disabled.
+        return "hybrid"
     end
     if data and data.hill_unit then
         return "hill"
@@ -731,17 +756,20 @@ end
 
 local function CanPlaceConfigured(info, wave)
     local cfg = GetUnitConfig(info.unitId)
-    if cfg and cfg.placeStartWave ~= nil and wave < cfg.placeStartWave then
+    if not cfg then
+        return true
+    end
+    if cfg.placeStartWave ~= nil and wave < cfg.placeStartWave then
         return false
     end
-
-    -- Always respect the game's unit spawn cap, even when no custom config exists.
-    local limit = tonumber(info.spawnCap)
-    if cfg and tonumber(cfg.maxPlace) then
-        limit = limit and math.min(limit, cfg.maxPlace) or cfg.maxPlace
-    end
-    if limit and CountPlacedUnit(info.unitId) >= limit then
-        return false
+    if cfg.maxPlace ~= nil then
+        local limit = cfg.maxPlace
+        if info.spawnCap and limit > info.spawnCap then
+            limit = info.spawnCap
+        end
+        if CountPlacedUnit(info.unitId) >= limit then
+            return false
+        end
     end
     return true
 end
@@ -989,10 +1017,7 @@ local function GetPlacementCFrame(index, kind)
     local angle = (index * 45) * (math.pi / 180)
     local distance = 6 + math.floor(index / 8) * 5
     local pos = hrp.Position + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
-    local finalPos = PlacementIsClear(pos, kind)
-    if not finalPos then
-        return nil
-    end
+    local finalPos = PlacementIsClear(pos, kind) or pos
     return Finish(finalPos, hrp.CFrame.LookVector)
 end
 
@@ -1025,9 +1050,7 @@ local function GetGriffithSacrificePercent(unit)
         return 100
     end
 
-    -- Avoid generic keys such as "percent", "charge" or "stack" which may
-    -- belong to unrelated stats and falsely report a full sacrifice meter.
-    local keys = { "sacrifice", "sacrificepercent", "eclipse", "eclipsepercent" }
+    local keys = { "sacrifice", "eclipse", "unique", "charge", "meter", "percent", "stack" }
     local fromStats = ReadNumberValue(unit:FindFirstChild("_stats"), keys)
     if fromStats then
         if fromStats <= 1 then
@@ -1046,17 +1069,9 @@ local function GetGriffithSacrificePercent(unit)
     for _, gui in ipairs(unit:GetDescendants()) do
         if gui:IsA("TextLabel") or gui:IsA("TextButton") then
             local text = tostring(gui.Text or "")
-            local context = NormalizeName(text)
-            local ancestor = gui
-            while ancestor and ancestor ~= unit do
-                context = context .. NormalizeName(ancestor.Name)
-                ancestor = ancestor.Parent
-            end
-            if context:find("sacrifice", 1, true) or context:find("eclipse", 1, true) then
-                local pct = text:match("(%d+)%s*%%")
-                if pct then
-                    return math.clamp(tonumber(pct) or 0, 0, 100)
-                end
+            local pct = text:match("(%d+)%s*%%")
+            if pct then
+                return math.clamp(tonumber(pct) or 0, 0, 100)
             end
         end
     end
@@ -1963,7 +1978,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
-CreateToggle(AutoPlayPage, "Auto Buff 100% (Erwin / Windsong / Elfy)", "AutoBuffChain", 6)
+CreateToggle(AutoPlayPage, "Auto Buff 100% (Erwin / Wanda / Elfy)", "AutoBuffChain", 6)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 7)
 
 CreateSection(AutoPlayPage, "Hybrid Units", 8)
@@ -2385,54 +2400,9 @@ end, function(value)
     HubScale.Scale = State.UIScale
 end)
 
-local pendingSpawns = {}
-local pendingUpgrades = {}
-local pendingAbilities = {}
-local lastMatchmakingRequest = 0
-local lastEventQuestClaim = 0
-local lastCardSelection = 0
-local lastCardKey = nil
-
-local function TryUseUnitAbility(unit)
-    if not unit or pendingAbilities[unit] then
-        return false
-    end
-    if not CanUseActiveAttack(unit) then
-        return false
-    end
-    local stats = unit:FindFirstChild("_stats")
-    local lastCast = stats and stats:FindFirstChild("last_active_cast")
-    local baseline = lastCast and tonumber(lastCast.Value) or nil
-    local _, sent = InvokeEndpoint("use_active_attack", unit)
-    if sent then
-        -- Wait for cooldown replication; retain a short timeout as a recovery path.
-        pendingAbilities[unit] = { time = tick(), lastCast = baseline }
-        return true
-    end
-    return false
-end
-
-local function RefreshAbilityReservations(units)
-    local now = tick()
-    for unit, pending in pairs(pendingAbilities) do
-        local stillOwned = unit and unit.Parent ~= nil
-        if not stillOwned or now - pending.time > 4 then
-            pendingAbilities[unit] = nil
-        else
-            local stats = unit:FindFirstChild("_stats")
-            local lastCast = stats and stats:FindFirstChild("last_active_cast")
-            local current = lastCast and tonumber(lastCast.Value) or nil
-            if current and pending.lastCast and current > pending.lastCast then
-                -- Server has registered the cast; cooldown state now prevents repeats.
-                pendingAbilities[unit] = nil
-            end
-        end
-    end
-end
-
 local BuffChains = {
     erwin = { lastCast = 0 },
-    windsong = { lastCast = 0 },
+    wendy = { lastCast = 0 },
     elfy = { lastCast = 0 },
 }
 
@@ -2480,25 +2450,15 @@ end
 
 local function FireGuiButton(button)
     if not button then
-        return false
+        return
     end
     if typeof(firesignal) == "function" then
-        local ok = pcall(firesignal, button.MouseButton1Click)
-        return ok
+        firesignal(button.MouseButton1Click)
     elseif typeof(getconnections) == "function" then
-        local ok, connections = pcall(getconnections, button.MouseButton1Click)
-        if ok and type(connections) == "table" and #connections > 0 then
-            local fired = false
-            for _, connection in ipairs(connections) do
-                if connection and type(connection.Fire) == "function" then
-                    local fireOk = pcall(function() connection:Fire() end)
-                    fired = fired or fireOk
-                end
-            end
-            return fired
+        for _, connection in ipairs(getconnections(button.MouseButton1Click)) do
+            connection:Fire()
         end
     end
-    return false
 end
 
 local function TryAutoStart()
@@ -2523,16 +2483,10 @@ local function TryAutoStart()
                 local lobbyService = Loader.load_client_service(game, "LobbyServiceClient")
                 lobbyId = lobbyService and lobbyService.current_lobby
             end)
-            local started = false
             if lobbyId then
-                local _, sent = InvokeEndpoint("request_start_game", lobbyId)
-                started = sent
-            end
-            if not started then
-                started = FireGuiButton(startBtn)
-            end
-            if not started then
-                lobbyStartSent = false
+                InvokeEndpoint("request_start_game", lobbyId)
+            else
+                FireGuiButton(startBtn)
             end
         else
             lobbyStartSent = false
@@ -2552,13 +2506,10 @@ local function TryAutoStart()
             local yes = voteGui:FindFirstChild("Holder")
                 and voteGui.Holder:FindFirstChild("ButtonHolder")
                 and voteGui.Holder.ButtonHolder:FindFirstChild("Yes")
-            local voted = yes and FireGuiButton(yes) or false
-            if not voted then
-                local _, sent = InvokeEndpoint("vote_start")
-                voted = sent
-            end
-            if not voted then
-                votedStart = false
+            if yes then
+                FireGuiButton(yes)
+            else
+                InvokeEndpoint("vote_start")
             end
         end
     else
@@ -2598,19 +2549,16 @@ local function HandleMatchEnd(gameFinished)
         end
         if action == "next" then
             if nextKind == "room" then
-                local _, sent = InvokeEndpoint("request_start_infinite_tower_from_game")
-                if not sent then matchEndHandled = false end
+                InvokeEndpoint("request_start_infinite_tower_from_game")
                 UpdateEventStatus("Match Finished! Starting Next Room...", Color3.fromRGB(255, 170, 0))
             else
-                local _, sent = InvokeEndpoint("set_game_finished_vote", "next_story")
-                if not sent then matchEndHandled = false end
+                InvokeEndpoint("set_game_finished_vote", "next_story")
                 UpdateEventStatus("Match Finished! Voting Next...", Color3.fromRGB(255, 170, 0))
             end
         elseif action == "replay" then
             UpdateEventStatus("Match Finished! Voting Replay...", Color3.fromRGB(255, 170, 0))
-            local _, sent = InvokeEndpoint("set_game_finished_vote", "replay")
-            if not sent then matchEndHandled = false end
-            if State.AutoFindMatch and sent then
+            InvokeEndpoint("set_game_finished_vote", "replay")
+            if State.AutoFindMatch then
                 task.wait(8)
                 if gameFinished.Parent and gameFinished.Value == true then
                     UpdateEventStatus("Returning to Lobby for Next Match...", Color3.fromRGB(255, 100, 100))
@@ -2619,8 +2567,7 @@ local function HandleMatchEnd(gameFinished)
             end
         elseif action == "leave" then
             UpdateEventStatus("Leaving Match...", Color3.fromRGB(255, 100, 100))
-            local _, sent = InvokeEndpoint("teleport_back_to_lobby")
-            if not sent then matchEndHandled = false end
+            InvokeEndpoint("teleport_back_to_lobby")
         end
     end)
 end
@@ -2630,6 +2577,57 @@ if State.BlackScreen then
     ApplyBlackScreen(true)
 end
 RefreshUnitConfigUI()
+
+-- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+
+        if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            local units = GetPlayerUnits()
+            if #units > 0 then
+                local wave = GetCurrentWave()
+                local upgradable = {}
+
+                for _, u in ipairs(units) do
+                    if u._stats:FindFirstChild("upgrade") and u._stats:FindFirstChild("max_upgrade")
+                        and u._stats.upgrade.Value < u._stats.max_upgrade.Value then
+                        local cfg = GetUnitConfig(GetRawUnitId(u))
+                        local allowed = true
+
+                        if cfg then
+                            if cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave then
+                                allowed = false
+                            end
+                            if cfg.upgradeTarget ~= nil and u._stats.upgrade.Value >= cfg.upgradeTarget then
+                                allowed = false
+                            end
+                        end
+
+                        if allowed then
+                            table.insert(upgradable, u)
+                        end
+                    end
+                end
+
+                if #upgradable > 0 then
+                    if State.AutoUpgradeFarmFirst then
+                        table.sort(upgradable, function(a, b)
+                            local aFarm = IsFarmUnit(a)
+                            local bFarm = IsFarmUnit(b)
+                            if aFarm ~= bFarm then
+                                return aFarm
+                            end
+                            return a._stats.upgrade.Value < b._stats.upgrade.Value
+                        end)
+                    end
+
+                    InvokeEndpoint("upgrade_unit_ingame", upgradable[1])
+                end
+            end
+        end
+    end
+end)
 
 task.spawn(function()
     while true do
@@ -2641,19 +2639,8 @@ task.spawn(function()
             pcall(RefreshUnitConfigUI)
         end
 
-        if IsInLobby() then
-            pendingSpawns = {}
-            pendingUpgrades = {}
-            pendingAbilities = {}
-            farmStall = { count = 0, lastChange = 0 }
-            for _, chain in pairs(BuffChains) do
-                chain.lastCast = 0
-            end
-        end
-
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             local myUnits = GetPlayerUnits()
-            RefreshAbilityReservations(myUnits)
             local wave = GetCurrentWave()
 
             if State.AutoPlace then
@@ -2670,15 +2657,14 @@ task.spawn(function()
                         end
                     end
 
-                    -- Griffith placement priority is automatic whenever Griffith is equipped.
-                    -- AutoBuffGriffith only controls his active ability, not placement order.
-                    local useGriffithOrder = partyHasGriffith
+                    local useGriffithOrder = State.AutoBuffGriffith and partyHasGriffith
                     local farmCount = CountCategory(myUnits, IsFarmUnit)
                     local griffithCount = CountCategory(myUnits, IsGriffithUnit)
-                    local sacrifice = 0
+                    local griffithReincarnated = false
                     for _, u in ipairs(myUnits) do
-                        if IsGriffithUnit(u) then
-                            sacrifice = math.max(sacrifice, GetGriffithSacrificePercent(u))
+                        if IsGriffithReincarnation(u) then
+                            griffithReincarnated = true
+                            break
                         end
                     end
 
@@ -2705,46 +2691,30 @@ task.spawn(function()
                         if griffithCount < 1 then
                             return isGriff
                         end
-                        if sacrifice < 100 then
-                            return isBuff
+
+                        -- Once Griffith visibly evolves, sacrifice is complete:
+                        -- unlock attack units only; do not add more farms/buff units.
+                        if griffithReincarnated then
+                            return not isGriff and not isFarm and not isBuff
                         end
-                        return not isGriff
+
+                        -- Before the evolution, finish the support setup first.
+                        -- Do not let a 100% meter prematurely unlock attack units.
+                        return isBuff
                     end
 
-                    -- Clear spawn reservations once the unit appears, or after a timeout
-                    -- in case the server rejected the request.
-                    local now = tick()
-                    for uuid, pending in pairs(pendingSpawns) do
-                        local appeared = pending.unitId
-                            and CountPlacedUnit(pending.unitId) > pending.countBefore
-                        if appeared or now - pending.time > 6 then
-                            pendingSpawns[uuid] = nil
-                        end
-                    end
-
-                    -- One spawn request per tick prevents burst requests and gives the
-                    -- server time to replicate the new unit before the next cap check.
                     local placeIndex = #myUnits
                     for _, unitInfo in ipairs(equipped) do
-                        local uuidKey = tostring(unitInfo.uuid or "")
-                        if uuidKey ~= "" and not pendingSpawns[uuidKey]
-                            and CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave)
-                            and not (useGriffithOrder and IsGriffithName(unitInfo.name) and griffithCount >= 1) then
-                            local kind = ResolvePlacementKind(unitInfo.unitId)
-                            if kind then
+                        if CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
+                            if not (useGriffithOrder and IsGriffithName(unitInfo.name) and griffithCount >= 1) then
                                 placeIndex = placeIndex + 1
+                                local kind = ResolvePlacementKind(unitInfo.unitId)
                                 local cframe = GetPlacementCFrame(placeIndex, kind)
                                 if cframe then
-                                    local countBefore = CountPlacedUnit(unitInfo.unitId)
-                                    local _, sent = InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
-                                    if sent then
-                                        pendingSpawns[uuidKey] = {
-                                            time = now,
-                                            unitId = unitInfo.unitId,
-                                            countBefore = countBefore,
-                                        }
-                                        break
-                                    end
+                                    InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
+                                end
+                                if useGriffithOrder and IsGriffithName(unitInfo.name) then
+                                    break
                                 end
                             end
                         end
@@ -2754,70 +2724,10 @@ task.spawn(function()
                 farmStall = { count = 0, lastChange = 0 }
             end
 
-            if State.AutoUpgrade and #myUnits > 0 then
-                local upgradable = {}
-                for _, u in ipairs(myUnits) do
-                    if u._stats:FindFirstChild("upgrade") and u._stats:FindFirstChild("max_upgrade") then
-                        if u._stats.upgrade.Value < u._stats.max_upgrade.Value then
-                            local rawId = GetRawUnitId(u)
-                            local cfg = GetUnitConfig(rawId)
-                            local allowed = true
-                            if cfg then
-                                if cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave then
-                                    allowed = false
-                                end
-                                if cfg.upgradeTarget ~= nil and u._stats.upgrade.Value >= cfg.upgradeTarget then
-                                    allowed = false
-                                end
-                            end
-                            if allowed then
-                                table.insert(upgradable, u)
-                            end
-                        end
-                    end
-                end
-
-                -- Expire reservations when the upgrade replicated or timed out.
-                local now = tick()
-                for unit, pending in pairs(pendingUpgrades) do
-                    local stats = unit and unit.Parent and unit:FindFirstChild("_stats")
-                    local level = stats and stats:FindFirstChild("upgrade")
-                    if not level or level.Value > pending.level or now - pending.time > 5 then
-                        pendingUpgrades[unit] = nil
-                    end
-                end
-
-                local readyToUpgrade = {}
-                for _, unit in ipairs(upgradable) do
-                    if not pendingUpgrades[unit] then
-                        table.insert(readyToUpgrade, unit)
-                    end
-                end
-                if #readyToUpgrade > 0 then
-                    if State.AutoUpgradeFarmFirst then
-                        table.sort(readyToUpgrade, function(a, b)
-                            local aFarm, bFarm = IsFarmUnit(a), IsFarmUnit(b)
-                            if aFarm ~= bFarm then
-                                return aFarm
-                            end
-                            if a._stats.upgrade.Value ~= b._stats.upgrade.Value then
-                                return a._stats.upgrade.Value < b._stats.upgrade.Value
-                            end
-                            return tostring(a) < tostring(b)
-                        end)
-                    end
-                    local target = readyToUpgrade[1]
-                    local _, sent = InvokeEndpoint("upgrade_unit_ingame", target)
-                    if sent then
-                        pendingUpgrades[target] = { level = target._stats.upgrade.Value, time = now }
-                    end
-                end
-            end
-
             if State.AutoBuffChain and #myUnits > 0 then
                 local groups = {
                     erwin = {},
-                    windsong = {},
+                    wendy = {},
                     elfy = {},
                 }
 
@@ -2835,11 +2745,10 @@ task.spawn(function()
                         if now - chain.lastCast >= 29.5 then
                             for _, u in ipairs(units) do
                                 if CanUseActiveAttack(u) then
-                                    if TryUseUnitAbility(u) then
-                                        chain.lastCast = now
-                                        UpdateAutoPlayStatus("Buff 100%: Activated " .. groupName, Color3.fromRGB(100, 255, 100))
-                                        break
-                                    end
+                                    InvokeEndpoint("use_active_attack", u)
+                                    chain.lastCast = now
+                                    UpdateAutoPlayStatus("Buff 100%: Activated " .. groupName, Color3.fromRGB(100, 255, 100))
+                                    break
                                 end
                             end
                         end
@@ -2849,9 +2758,9 @@ task.spawn(function()
 
             if State.AutoBuffGriffith and #myUnits > 0 then
                 for _, u in ipairs(myUnits) do
-                    if IsGriffithUnit(u) and TryUseUnitAbility(u) then
+                    if IsGriffithUnit(u) and CanUseActiveAttack(u) then
+                        InvokeEndpoint("use_active_attack", u)
                         UpdateAutoPlayStatus("Griffith Buff 100% Activated!", Color3.fromRGB(255, 215, 0))
-                        break
                     end
                 end
             end
@@ -2861,7 +2770,9 @@ task.spawn(function()
                     local isChain = State.AutoBuffChain and (GetBuffChainGroup(u) ~= nil)
                     local isGriffith = State.AutoBuffGriffith and IsGriffithUnit(u)
                     if not isChain and not isGriffith then
-                        TryUseUnitAbility(u)
+                        if CanUseActiveAttack(u) then
+                            InvokeEndpoint("use_active_attack", u)
+                        end
                     end
                 end
             end
@@ -2889,15 +2800,10 @@ task.spawn(function()
                 HandlePopups()
 
                 if IsMatchmaking() then
-                    lastMatchmakingRequest = tick()
                     UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
                 else
                     UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
-                    local now = tick()
-                    if now - lastMatchmakingRequest >= 8 then
-                        lastMatchmakingRequest = now
-                        InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
-                    end
+                    InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
                 end
             elseif not matchEndHandled then
                 UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
@@ -2906,31 +2812,24 @@ task.spawn(function()
 
         if State.AutoPickCards then
             local roguelike = dataFolder and dataFolder:FindFirstChild("Roguelike")
-            local waiting = roguelike and roguelike:FindFirstChild("WaitingForRoguelikeChoice")
-            local cardGui = playerGui:FindFirstChild("CardSelectRoguelike")
-            if waiting and waiting.Value == true and cardGui and cardGui.Enabled then
-                local pageUI = cardGui:FindFirstChild("main")
-                    and cardGui.main:FindFirstChild("pick")
-                    and cardGui.main.pick:FindFirstChild("inner")
-                    and cardGui.main.pick.inner:FindFirstChild("PageUI")
-                if pageUI then
-                    local card = PickRoguelikeCard(pageUI)
-                    local cardKey = card and (tostring(card.Name) .. ":" .. tostring(waiting.Value))
-                    if card and cardKey ~= lastCardKey and tick() - lastCardSelection >= 4 then
-                        local _, sent = InvokeEndpoint("select_roguelike_option", card.Name)
-                        if sent then
-                            lastCardKey = cardKey
-                            lastCardSelection = tick()
+            if roguelike and roguelike:FindFirstChild("WaitingForRoguelikeChoice") and roguelike.WaitingForRoguelikeChoice.Value == true then
+                local cardGui = playerGui:FindFirstChild("CardSelectRoguelike")
+                if cardGui and cardGui.Enabled then
+                    local pageUI = cardGui:FindFirstChild("main")
+                        and cardGui.main:FindFirstChild("pick")
+                        and cardGui.main.pick:FindFirstChild("inner")
+                        and cardGui.main.pick.inner:FindFirstChild("PageUI")
+                    if pageUI then
+                        local card = PickRoguelikeCard(pageUI)
+                        if card then
+                            InvokeEndpoint("select_roguelike_option", card.Name)
                         end
                     end
                 end
-            else
-                lastCardKey = nil
             end
         end
 
-        if State.AutoEventQuests and tick() - lastEventQuestClaim >= 30 then
-            lastEventQuestClaim = tick()
+        if State.AutoEventQuests then
             InvokeEndpoint("claim_summer2_map_board_lines")
         end
     end
