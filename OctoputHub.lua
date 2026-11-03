@@ -572,13 +572,17 @@ local function GetBuffChainGroup(unit)
     return nil
 end
 
+local IsGriffithReincarnation
 local function IsGriffithUnit(unit)
-    return IsGriffithName(GetUnitId(unit)) or IsGriffithName(unit and unit.Name)
+    -- Count the evolved form as the same Griffith placement, even if its ID changed.
+    return IsGriffithName(GetUnitId(unit))
+        or IsGriffithName(unit and unit.Name)
+        or (IsGriffithReincarnation and IsGriffithReincarnation(unit))
 end
 
 -- Detect the evolved Griffith unit by its actual unit id/name.
 -- This is the definitive signal that the sacrifice phase has completed.
-local function IsGriffithReincarnation(unit)
+IsGriffithReincarnation = function(unit)
     if not unit then
         return false
     end
@@ -951,8 +955,23 @@ local function CanPlaceConfigured(info, wave)
     elseif info.spawnCap and not localLimit then
         localLimit = info.spawnCap
     end
-    if localLimit and CountPlacedUnit(info.unitId) >= localLimit then
-        return false
+    if localLimit then
+        -- Griffith (Reincarnation) is an evolved state of the original placement.
+        -- Count both forms together so Max Place = 1 cannot summon a second copy.
+        local placedCount
+        if IsGriffithName(info.name) or IsGriffithName(info.unitId) then
+            placedCount = 0
+            for _, placedUnit in ipairs(GetPlayerUnits()) do
+                if IsGriffithUnit(placedUnit) then
+                    placedCount = placedCount + 1
+                end
+            end
+        else
+            placedCount = CountPlacedUnit(info.unitId)
+        end
+        if placedCount >= localLimit then
+            return false
+        end
     end
     return true
 end
@@ -3422,9 +3441,13 @@ task.spawn(function()
                         local isGriff = IsGriffithName(info.name) or IsGriffithName(info.unitId)
                         local isBuff = IsBuffName(info.name) or IsBuffName(info.unitId)
 
-                        -- Once Griffith has evolved, the sacrifice sequence is over:
-                        -- do not place more farms, supports, or another Griffith. Release attackers.
+                        -- Once Griffith has evolved, stop the sacrifice/farm phase,
+                        -- but continue placing the required support/buff units first.
+                        -- Only release regular attackers after the buff setup is complete.
                         if griffithReincarnated then
+                            if not buffsReady then
+                                return isBuff
+                            end
                             return not isGriff and not isFarm and not isBuff
                         end
 
@@ -3497,73 +3520,111 @@ task.spawn(function()
                     end
                 end
 
-                local now = tick()
-                for groupName, allUnits in pairs(groups) do
-                    -- Cursed 100% method uses four copies of the SAME buffer.
-                    -- Extra copies are left untouched by this rotation.
-                    local units = {}
-                    for i = 1, math.min(4, #allUnits) do
-                        table.insert(units, allUnits[i])
+                -- Activate buffs only for equipped groups, and wait until each
+                -- equipped group has four placed copies. Groups not equipped by the
+                -- player are ignored completely and cannot block the rotation.
+                local requiredBuffGroups = {}
+                local equippedBuffs = EnrichEquipped(GetEquippedUnitList())
+                for _, info in ipairs(equippedBuffs) do
+                    local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
+                    if unitText:find("commander", 1, true) or unitText:find("erwin", 1, true) then
+                        requiredBuffGroups.commander = true
+                    elseif unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true)
+                        or unitText:find("winddragon", 1, true) or unitText:find("wind_dragon", 1, true) then
+                        requiredBuffGroups.windsong = true
+                    elseif unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true) then
+                        requiredBuffGroups.elfy = true
                     end
+                end
 
-                    local chain = BuffChains[groupName]
-                    if #units == 4 then
-                        local changed = #chain.unitOrder ~= 4
-                        if not changed then
-                            for i, unit in ipairs(units) do
-                                if chain.unitOrder[i] ~= unit then
-                                    changed = true
-                                    break
+                local allRequiredBuffGroupsReady = true
+                for groupName in pairs(requiredBuffGroups) do
+                    if #groups[groupName] < 4 then
+                        allRequiredBuffGroupsReady = false
+                        break
+                    end
+                end
+
+                local now = tick()
+                if allRequiredBuffGroupsReady and next(requiredBuffGroups) ~= nil then
+                    -- Rotate ONLY buff groups that are currently equipped by this player.
+                    -- A disabled/unowned group must never be treated as a requirement or
+                    -- receive casts just because four matching units happen to be present.
+                    for groupName in pairs(requiredBuffGroups) do
+                        local allUnits = groups[groupName] or {}
+                        -- Cursed 100% method uses four copies of the SAME buffer.
+                        -- Extra copies are left untouched by this rotation.
+                        local units = {}
+                        for i = 1, math.min(4, #allUnits) do
+                            table.insert(units, allUnits[i])
+                        end
+
+                        local chain = BuffChains[groupName]
+                        if #units == 4 then
+                            local changed = #chain.unitOrder ~= 4
+                            if not changed then
+                                for i, unit in ipairs(units) do
+                                    if chain.unitOrder[i] ~= unit then
+                                        changed = true
+                                        break
+                                    end
                                 end
                             end
-                        end
 
-                        if changed then
-                            ResetBuffChain(chain, units)
-                        end
-
-                        if now >= chain.nextCastAt then
-                            local phase = chain.phase
-                            local unit = units[phase]
-                            if unit and CanUseActiveAttack(unit) then
-                                InvokeEndpoint("use_active_attack", unit)
-
-                                if phase == 1 then
-                                    chain.cycleStart = now
-                                    chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 2)
-                                    chain.phase = 2
-                                elseif phase == 2 then
-                                    chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 3)
-                                    chain.phase = 3
-                                elseif phase == 3 then
-                                    chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 4)
-                                    chain.phase = 4
-                                else
-                                    -- Start the next cycle when unit 1 is genuinely ready again.
-                                    chain.nextCastAt = chain.cycleStart
-                                        + GetBuffChainCooldown(units, 1)
-                                    chain.phase = 1
-                                end
-
-                                UpdateAutoPlayStatus(
-                                    "Cursed Buff Rotation: " .. groupName
-                                        .. " " .. tostring(phase) .. "/4",
-                                    Color3.fromRGB(100, 255, 100)
-                                )
+                            if changed then
+                                ResetBuffChain(chain, units)
                             end
+
+                            if now >= chain.nextCastAt then
+                                local phase = chain.phase
+                                local unit = units[phase]
+                                if unit and CanUseActiveAttack(unit) then
+                                    InvokeEndpoint("use_active_attack", unit)
+
+                                    if phase == 1 then
+                                        chain.cycleStart = now
+                                        chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 2)
+                                        chain.phase = 2
+                                    elseif phase == 2 then
+                                        chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 3)
+                                        chain.phase = 3
+                                    elseif phase == 3 then
+                                        chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 4)
+                                        chain.phase = 4
+                                    else
+                                        -- Start the next cycle when unit 1 is genuinely ready again.
+                                        chain.nextCastAt = chain.cycleStart
+                                            + GetBuffChainCooldown(units, 1)
+                                        chain.phase = 1
+                                    end
+
+                                    UpdateAutoPlayStatus(
+                                        "Cursed Buff Rotation: " .. groupName
+                                            .. " " .. tostring(phase) .. "/4",
+                                        Color3.fromRGB(100, 255, 100)
+                                    )
+                                end
+                            end
+                        else
+                            chain.unitOrder = {}
+                            chain.phase = 1
+                            chain.cycleStart = 0
+                            chain.nextCastAt = 0
                         end
-                    else
+                    end
+                else
+                    -- Keep every rotation idle until all required groups reach 4 units.
+                    for _, chain in pairs(BuffChains) do
                         chain.unitOrder = {}
                         chain.phase = 1
                         chain.cycleStart = 0
                         chain.nextCastAt = 0
-                        if #units > 0 then
-                            UpdateAutoPlayStatus(
-                                "Cursed Buff Rotation: " .. groupName
-                                    .. " needs 4 units (found " .. tostring(#units) .. ")",
-                                Color3.fromRGB(255, 190, 80)
-                            )
-                        end
+                    end
+                    if next(requiredBuffGroups) ~= nil then
+                        UpdateAutoPlayStatus(
+                            "Waiting for equipped buff groups (4 each)",
+                            Color3.fromRGB(255, 190, 80)
+                        )
                     end
                 end
             end
