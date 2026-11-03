@@ -442,12 +442,12 @@ local function IsBuffName(text)
     if id == "" then
         return false
     end
-    return id:find("erwin", 1, true)
-        or id:find("commander", 1, true)
-        or id:find("wendy", 1, true)
-        or id:find("wanda", 1, true)
-        or id:find("leafa", 1, true)
+    return id:find("commander", 1, true)
+        or id:find("erwin", 1, true) -- legacy alias
+        or id:find("windsong", 1, true)
+        or id:find("wenda", 1, true) -- legacy alias
         or id:find("elfy", 1, true)
+        or id:find("sylph", 1, true) -- evolution/name alias
 end
 
 local UnitsDataCache
@@ -541,13 +541,12 @@ end
 
 local function GetBuffChainGroup(unit)
     local id = GetUnitId(unit)
-    if id:find("erwin", 1, true) or id:find("commander", 1, true) or id:find("commando", 1, true) then
-        return "erwin"
-    elseif id:find("wenda", 1, true) or id:find("windsong", 1, true)
-        or id:find("wendy", 1, true) or id:find("wanda", 1, true)
+    if id:find("commander", 1, true) or id:find("erwin", 1, true) then
+        return "commander"
+    elseif id:find("windsong", 1, true) or id:find("wenda", 1, true)
         or id:find("winddragon", 1, true) or id:find("wind_dragon", 1, true) then
-        return "wendy"
-    elseif id:find("leafa", 1, true) or id:find("elfy", 1, true) then
+        return "windsong"
+    elseif id:find("elfy", 1, true) or id:find("sylph", 1, true) then
         return "elfy"
     end
     return nil
@@ -2002,7 +2001,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
-CreateToggle(AutoPlayPage, "Auto Buff 100% (Commando / Wenda / Elfy)", "AutoBuffChain", 6)
+CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 7)
 
 CreateSection(AutoPlayPage, "Hybrid Units", 8)
@@ -2425,8 +2424,8 @@ end, function(value)
 end)
 
 local BuffChains = {
-    erwin = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
-    wendy = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
+    commander = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
+    windsong = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
     elfy = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
 }
 
@@ -2820,8 +2819,8 @@ task.spawn(function()
 
             if State.AutoBuffChain and #myUnits > 0 then
                 local groups = {
-                    erwin = {},
-                    wendy = {},
+                    commander = {},
+                    windsong = {},
                     elfy = {},
                 }
 
