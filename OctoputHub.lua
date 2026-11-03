@@ -3,6 +3,8 @@ local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -37,7 +39,7 @@ local TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -20, 0, 35)
 TitleLabel.Position = UDim2.new(0, 15, 0, 8)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = "Anime Adventures / Hub v0.4.8"
+TitleLabel.Text = "Anime Adventures / XT Hub v0.4.8"
 TitleLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
 TitleLabel.TextSize = 14
 TitleLabel.Font = Enum.Font.GothamBold
@@ -82,7 +84,63 @@ local State = {
     AutoFindMatch = false,
     AutoEventQuests = false,
     AutoPickCards = false,
+    AutoReplay = true,
 }
+
+-- ID ของ Event Summer Hunt ตามโครงสร้างของเกม Anime Adventures
+local EVENT_LEVEL_ID = "summer2_event"
+
+-- ฟังก์ชันสำหรับส่งคำสั่งผ่าน Endpoint ของเกม
+local function InvokeEndpoint(endpointName, ...)
+    -- วิธีที่ 1: เรียกผ่าน Loader / EndpointsClient (ระบบหลักของเกม)
+    local ok, res = pcall(function(...)
+        local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
+        if loaderModule then
+            local Loader = require(loaderModule)
+            local EndpointsClient = Loader.load_client_service(game, "EndpointsClient")
+            if EndpointsClient and EndpointsClient.invoke_server then
+                return EndpointsClient.invoke_server(endpointName, ...)
+            end
+        end
+    end, ...)
+    if ok and res ~= nil then
+        return res
+    end
+
+    -- วิธีที่ 2: เรียกตรงผ่าน RemoteFunction / RemoteEvent ใน ReplicatedStorage.endpoints.client_to_server
+    local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
+    local client_to_server = endpoints and endpoints:FindFirstChild("client_to_server")
+    if client_to_server then
+        local remote = client_to_server:FindFirstChild(endpointName)
+        if remote then
+            if remote:IsA("RemoteFunction") then
+                return remote:InvokeServer(...)
+            elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+                return remote:FireServer(...)
+            end
+        end
+    end
+end
+
+-- เช็คว่าอยู่ใน Lobby หรือไม่
+local function IsInLobby()
+    return workspace:FindFirstChild("_LOBBIES") ~= nil 
+        or workspace:FindFirstChild("enel_ship") ~= nil 
+        or game.PlaceId == 8304191830
+end
+
+-- เช็คว่ากำลังค้นหาห้องอยู่หรือไม่
+local function IsMatchmaking()
+    local mmUI = playerGui:FindFirstChild("MatchmakingUI")
+    if mmUI and mmUI.Enabled then
+        return true
+    end
+    local alreadyInLobby = player:FindFirstChild("AlreadyInLobby")
+    if alreadyInLobby and alreadyInLobby.Value == true then
+        return true
+    end
+    return false
+end
 
 local tabs = {}
 local function CreateTab(name, layoutOrder)
@@ -131,7 +189,7 @@ local function CreateTab(name, layoutOrder)
     return PageFrame
 end
 
-local function CreateToggle(parent, title, stateKey, layoutOrder)
+local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
     ToggleContainer.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
@@ -187,10 +245,16 @@ local function CreateToggle(parent, title, stateKey, layoutOrder)
             TweenService:Create(SwitchBtn, tweenInfo, {BackgroundColor3 = Color3.fromRGB(45, 45, 58)}):Play()
             TweenService:Create(Indicator, tweenInfo, {Position = UDim2.new(0, 3, 0.5, -8)}):Play()
         end
+
+        if callback then
+            task.spawn(callback, isON)
+        end
     end)
+
+    return ToggleContainer
 end
 
--- สร้างหน้าแท็บต่างๆ ตามภาพตัวอย่าง
+-- สร้างหน้าแท็บต่างๆ
 local AutoPlayPage = CreateTab("Auto Play", 1)
 local EventPage = CreateTab("Event", 2)
 
@@ -203,10 +267,177 @@ tabs["Auto Play"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 CreateToggle(AutoPlayPage, "Auto Place Units", "AutoPlace", 1)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 2)
 
--- เพิ่มปุ่มในหมวด Event (ตามรูปที่ 1 ของคุณ)
-CreateToggle(EventPage, "Auto Find Match", "AutoFindMatch", 1)
+-- แถบแสดงสถานะ Event Matchmaking
+local EventStatusCard = Instance.new("Frame")
+EventStatusCard.Size = UDim2.new(1, -10, 0, 38)
+EventStatusCard.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+EventStatusCard.LayoutOrder = 0
+EventStatusCard.Parent = EventPage
+
+local EventStatusCorner = Instance.new("UICorner")
+EventStatusCorner.CornerRadius = UDim.new(0, 6)
+EventStatusCorner.Parent = EventStatusCard
+
+local EventStatusLabel = Instance.new("TextLabel")
+EventStatusLabel.Size = UDim2.new(1, -20, 1, 0)
+EventStatusLabel.Position = UDim2.new(0, 10, 0, 0)
+EventStatusLabel.BackgroundTransparency = 1
+EventStatusLabel.Text = "Target Event: Summer Hunt (summer2_event) | Status: Idle"
+EventStatusLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
+EventStatusLabel.TextSize = 12
+EventStatusLabel.Font = Enum.Font.GothamMedium
+EventStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+EventStatusLabel.Parent = EventStatusCard
+
+local function UpdateEventStatus(text, color)
+    if EventStatusLabel then
+        EventStatusLabel.Text = "Target: Summer Hunt | " .. text
+        if color then
+            EventStatusLabel.TextColor3 = color
+        end
+    end
+end
+
+-- ตรวจสอบและจัดการหน้าต่างแจ้งเตือน/Captcha ของเกม
+local function HandlePopups()
+    local notifWindows = playerGui:FindFirstChild("NotificationWindows")
+    if not notifWindows then return end
+    
+    local popups = notifWindows:FindFirstChild("Popups")
+    if not popups then return end
+    
+    for _, popup in ipairs(popups:GetChildren()) do
+        if popup:IsA("GuiObject") and popup.Visible then
+            -- 1. ตรวจสอบหน้าต่าง Captcha ของ Matchmaking และพิมพ์ตอบให้อัตโนมัติ
+            local captcha = popup:FindFirstChild("Captcha")
+            local typeBox = popup:FindFirstChild("TypeBox")
+            local btnHolder = popup:FindFirstChild("ButtonHolder")
+            if captcha and typeBox and captcha.Text and captcha.Text ~= "" and typeBox.Text ~= captcha.Text then
+                typeBox.Text = captcha.Text
+                task.wait(0.15)
+                if btnHolder and btnHolder:FindFirstChild("Yes") then
+                    local yesBtn = btnHolder.Yes
+                    if typeof(firesignal) == "function" then
+                        firesignal(yesBtn.MouseButton1Click)
+                    elseif typeof(getconnections) == "function" then
+                        for _, c in ipairs(getconnections(yesBtn.MouseButton1Click)) do
+                            c:Fire()
+                        end
+                    end
+                end
+            end
+            
+            -- 2. ยืนยันปุ่ม Matchmaking กรณีมีหน้าต่างยืนยันเปิดขึ้นมา
+            local main = popup:FindFirstChild("Main")
+            local buttons = main and main:FindFirstChild("Buttons")
+            local mmBtn = buttons and buttons:FindFirstChild("Matchmaking")
+            if mmBtn and mmBtn.Visible then
+                if typeof(firesignal) == "function" then
+                    firesignal(mmBtn.MouseButton1Click)
+                elseif typeof(getconnections) == "function" then
+                    for _, c in ipairs(getconnections(mmBtn.MouseButton1Click)) do
+                        c:Fire()
+                    end
+                else
+                    InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                end
+            end
+        end
+    end
+end
+
+-- เพิ่มปุ่มในหมวด Event (ตั้งค่าให้ Match กับ Summer Hunt โดยตรง)
+CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
+    if isON then
+        UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70))
+        if IsInLobby() and not IsMatchmaking() then
+            InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+        end
+    else
+        UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180))
+        if IsInLobby() and IsMatchmaking() then
+            InvokeEndpoint("leave_matchmaking")
+        end
+    end
+end)
+
 CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 2)
 CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 3)
+CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 4)
+
+-- ระบบ Background Loop สำหรับจัดการ Event Automation ทั้งหมด
+task.spawn(function()
+    while true do
+        task.wait(1.5)
+        
+        -- จัดการ Auto Find Match
+        if State.AutoFindMatch then
+            if IsInLobby() then
+                HandlePopups()
+                
+                if IsMatchmaking() then
+                    UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
+                else
+                    UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
+                    InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                end
+            else
+                -- ผู้เล่นอยู่ในแมตช์การแข่งขัน Summer Hunt
+                UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
+                
+                -- ตรวจสอบเมื่อจบเกม (GameFinished) เพื่อ Replay หรือกลับ Lobby
+                local dataFolder = workspace:FindFirstChild("_DATA")
+                local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
+                if gameFinished and gameFinished.Value == true then
+                    if State.AutoReplay then
+                        UpdateEventStatus("Match Finished! Voting Replay...", Color3.fromRGB(255, 170, 0))
+                        task.wait(2.5)
+                        InvokeEndpoint("set_game_finished_vote", "replay")
+                        
+                        -- หากไม่ Replay ภายใน 8 วินาที ให้พากลับ Lobby เพื่อค้นหาห้องใหม่
+                        task.wait(8)
+                        if gameFinished and gameFinished.Value == true then
+                            UpdateEventStatus("Returning to Lobby for Next Match...", Color3.fromRGB(255, 100, 100))
+                            InvokeEndpoint("teleport_back_to_lobby")
+                        end
+                    else
+                        UpdateEventStatus("Returning to Lobby...", Color3.fromRGB(255, 100, 100))
+                        task.wait(2.5)
+                        InvokeEndpoint("teleport_back_to_lobby")
+                    end
+                end
+            end
+        end
+        
+        -- จัดการ Auto Pick Cards ใน Event Roguelike
+        if State.AutoPickCards then
+            local dataFolder = workspace:FindFirstChild("_DATA")
+            local roguelike = dataFolder and dataFolder:FindFirstChild("Roguelike")
+            if roguelike and roguelike:FindFirstChild("WaitingForRoguelikeChoice") and roguelike.WaitingForRoguelikeChoice.Value == true then
+                local cardGui = playerGui:FindFirstChild("CardSelectRoguelike")
+                if cardGui and cardGui.Enabled then
+                    local pageUI = cardGui:FindFirstChild("main") 
+                        and cardGui.main:FindFirstChild("pick") 
+                        and cardGui.main.pick:FindFirstChild("inner") 
+                        and cardGui.main.pick.inner:FindFirstChild("PageUI")
+                    if pageUI then
+                        for _, card in ipairs(pageUI:GetChildren()) do
+                            if card:IsA("GuiObject") and card.Visible and card.Name ~= "" then
+                                InvokeEndpoint("select_roguelike_option", card.Name)
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- จัดการ Auto Event Quests (เคลม Bingo Board Summer)
+        if State.AutoEventQuests then
+            InvokeEndpoint("claim_summer2_map_board_lines")
+        end
+    end
+end)
 
 -- ปุ่มลัดกดเปิด-ปิด UI ด้วย RightShift
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -215,4 +446,4 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
-print("XT Hub UI Loaded Successfully!")
+print("XT Hub UI Loaded Successfully! Event Matchmaking ready for Summer Hunt.")
