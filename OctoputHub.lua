@@ -114,6 +114,7 @@ local State = {
     WebhookURL = "",
     WebhookOnEnd = false,
     BlackScreen = false,
+    AutoHideGUIOnExecute = false,
     UIScale = 1,
     PlaceHybridGround = true,
     PlaceHybridHill = true,
@@ -235,6 +236,7 @@ local function CopyStateForSave()
         WebhookURL = State.WebhookURL,
         WebhookOnEnd = State.WebhookOnEnd,
         BlackScreen = State.BlackScreen,
+        AutoHideGUIOnExecute = State.AutoHideGUIOnExecute,
         UIScale = State.UIScale,
         PlaceHybridGround = State.PlaceHybridGround,
         PlaceHybridHill = State.PlaceHybridHill,
@@ -274,7 +276,7 @@ local function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoUseAbility", "AutoBuffChain", "AutoBuffGriffith",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen",
+        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave",
     }
     for _, key in ipairs(boolKeys) do
@@ -2416,7 +2418,11 @@ WebhookStatus = CreateHint(WebhookPage, "Test result appears here.", 5, 48)
 CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
     ApplyBlackScreen(isON)
 end)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 2, 50, 150, function()
+CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, function(isON)
+    -- This setting is saved and takes effect on the next script execution.
+end)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 3, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 4, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
@@ -3045,5 +3051,11 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         MainFrame.Visible = not MainFrame.Visible
     end
 end)
+
+-- Hide only the hub window after every feature, connection and hotkey is initialized.
+-- Automation continues running in the background; Right Shift reopens the GUI.
+if State.AutoHideGUIOnExecute then
+    MainFrame.Visible = false
+end
 
 print("XT Hub UI Loaded Successfully! Auto Play, Webhook & Misc are ready.")
