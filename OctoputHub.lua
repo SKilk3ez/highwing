@@ -782,44 +782,63 @@ end
 -- do not expose the same identifier in the loadout and in workspace._UNITS.
 local function CountPlacedInfo(info)
     if not info then return 0 end
+
+    -- Use exact normalized identities only. Partial substring matching can make
+    -- one farm unit (e.g. Bulby) accidentally count as another equipped farm.
     local wanted = {}
-    local function add(value)
+    local function addWanted(value)
         local key = NormalizeName(value)
-        if key ~= "" then wanted[key] = true end
+        if key ~= "" and key ~= "unit" then wanted[key] = true end
     end
-    add(info.unitId)
-    add(info.name)
-    add(info.displayName)
-    local wantedList = {}
-    for key in pairs(wanted) do table.insert(wantedList, key) end
+
+    addWanted(info.unitId)
+    addWanted(info.name)
+    addWanted(info.displayName)
+    local equippedData = LookupUnitData(info.unitId)
+    if type(equippedData) == "table" then
+        addWanted(equippedData.name)
+        addWanted(equippedData.display_name)
+        addWanted(equippedData.displayName)
+    end
+
+    if next(wanted) == nil then return 0 end
 
     local count = 0
     for _, unit in ipairs(GetPlayerUnits()) do
+        local actual = {}
+        local function addActual(value)
+            local key = NormalizeName(value)
+            if key ~= "" and key ~= "unit" then actual[key] = true end
+        end
+
         local rawId = GetRawUnitId(unit)
-        local actual = {
-            NormalizeName(rawId),
-            GetUnitId(unit),
-            NormalizeName(unit.Name),
-            NormalizeName(State.UnitNames[rawId]),
-            NormalizeName(State.UnitNames[GetUnitId(unit)]),
-        }
-        local matched = false
-        for _, a in ipairs(actual) do
-            if a ~= "" and wanted[a] then
-                matched = true
+        addActual(rawId)
+        addActual(GetUnitId(unit))
+        addActual(unit.Name)
+        addActual(State.UnitNames[rawId])
+        addActual(State.UnitNames[GetUnitId(unit)])
+
+        local stats = unit:FindFirstChild("_stats")
+        if stats then
+            for _, fieldName in ipairs({ "name", "display_name", "unit_name" }) do
+                local field = stats:FindFirstChild(fieldName)
+                if field then addActual(field.Value) end
+            end
+        end
+
+        local placedData = LookupUnitData(rawId)
+        if type(placedData) == "table" then
+            addActual(placedData.name)
+            addActual(placedData.display_name)
+            addActual(placedData.displayName)
+        end
+
+        for key in pairs(wanted) do
+            if actual[key] then
+                count = count + 1
                 break
             end
-            if a ~= "" and #a >= 5 then
-                for _, w in ipairs(wantedList) do
-                    if #w >= 5 and (a:find(w, 1, true) or w:find(a, 1, true)) then
-                        matched = true
-                        break
-                    end
-                end
-            end
-            if matched then break end
         end
-        if matched then count = count + 1 end
     end
     return count
 end
@@ -2847,6 +2866,7 @@ local farmStall = { count = 0, lastChange = 0 }
 local matchEndHandled = false
 local votedStart = false
 local lobbyStartSent = false
+local lastLobbyStartAttempt = 0
 local unitRefreshClock = 0
 
 local function ResultsButtons()
@@ -2898,40 +2918,114 @@ local function FireGuiButton(button)
     end
 end
 
+local function GetCurrentLobbyId()
+    local lobbyId = nil
+    pcall(function()
+        local loaderModule = ReplicatedStorage:FindFirstChild("src")
+            and ReplicatedStorage.src:FindFirstChild("Loader")
+        if not loaderModule then return end
+        local Loader = require(loaderModule)
+        local lobbyService = Loader.load_client_service(game, "LobbyServiceClient")
+        if lobbyService then
+            lobbyId = lobbyService.current_lobby
+            if (lobbyId == nil or lobbyId == "") and lobbyService.current_lobby_model then
+                lobbyId = lobbyService.current_lobby_model.Name
+            end
+        end
+    end)
+    return lobbyId
+end
+
+local function RequestLobbyStart(lobbyId)
+    if lobbyId == nil or lobbyId == "" then
+        return false
+    end
+
+    -- Match the game's own Start button handler:
+    -- EndpointsClient.invoke_server("request_start_game", LobbyServiceClient.current_lobby)
+    local ok, result = pcall(function()
+        local loaderModule = ReplicatedStorage:FindFirstChild("src")
+            and ReplicatedStorage.src:FindFirstChild("Loader")
+        if not loaderModule then error("Loader module not found") end
+        local Loader = require(loaderModule)
+        local endpointsClient = Loader.load_client_service(game, "EndpointsClient")
+        if not endpointsClient or type(endpointsClient.invoke_server) ~= "function" then
+            error("EndpointsClient unavailable")
+        end
+        return endpointsClient.invoke_server("request_start_game", lobbyId)
+    end)
+
+    if ok then
+        return result ~= false
+    end
+
+    -- Fallback to the game's client-to-server endpoint if the service wrapper is unavailable.
+    local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
+    local clientToServer = endpoints and endpoints:FindFirstChild("client_to_server")
+    local remote = clientToServer and clientToServer:FindFirstChild("request_start_game")
+    if remote then
+        local fallbackOk, fallbackResult = pcall(function()
+            if remote:IsA("RemoteFunction") then
+                return remote:InvokeServer(lobbyId)
+            elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+                remote:FireServer(lobbyId)
+                return true
+            end
+            return false
+        end)
+        return fallbackOk and fallbackResult ~= false
+    end
+    return false
+end
+
 local function TryAutoStart()
     if not State.AutoStart then
         votedStart = false
         lobbyStartSent = false
+        lastLobbyStartAttempt = 0
         return
     end
-    if IsInLobby() then
+
+    -- The game's MapSelectGui Start button is the authoritative lobby-start state.
+    -- Do not rely on workspace lobby markers, which can be present outside the active lobby UI.
+    local mapGui = playerGui:FindFirstChild("MapSelectGui")
+    local buttons = mapGui and mapGui:FindFirstChild("Buttons")
+    local startBtn = buttons and buttons:FindFirstChild("Start")
+    if mapGui and mapGui.Enabled and buttons and buttons.Visible and startBtn and startBtn.Visible then
         votedStart = false
-        local mapGui = playerGui:FindFirstChild("MapSelectGui")
-        local buttons = mapGui and mapGui:FindFirstChild("Buttons")
-        local startBtn = buttons and buttons:FindFirstChild("Start")
-        if mapGui and mapGui.Enabled and startBtn and startBtn.Visible then
-            if lobbyStartSent then
-                return
-            end
+        if lobbyStartSent then
+            return
+        end
+        if os.clock() - lastLobbyStartAttempt < 3 then
+            return
+        end
+
+        local lobbyId = GetCurrentLobbyId()
+        if not lobbyId then
+            UpdateAutoPlayStatus("Auto Start: Waiting for Lobby ID", Color3.fromRGB(255, 200, 70))
+            return
+        end
+
+        lastLobbyStartAttempt = os.clock()
+        local sent = RequestLobbyStart(lobbyId)
+        if sent then
             lobbyStartSent = true
-            local lobbyId = nil
-            pcall(function()
-                local Loader = require(ReplicatedStorage.src.Loader)
-                local lobbyService = Loader.load_client_service(game, "LobbyServiceClient")
-                lobbyId = lobbyService and lobbyService.current_lobby
-            end)
-            if lobbyId then
-                InvokeEndpoint("request_start_game", lobbyId)
-            else
-                FireGuiButton(startBtn)
-            end
+            UpdateAutoPlayStatus("Auto Start: Start Request Sent", Color3.fromRGB(70, 200, 255))
         else
             lobbyStartSent = false
+            UpdateAutoPlayStatus("Auto Start: Start Request Failed - Retrying", Color3.fromRGB(255, 100, 100))
         end
         return
     end
 
     lobbyStartSent = false
+    lastLobbyStartAttempt = 0
+
+    if IsInLobby() then
+        votedStart = false
+        return
+    end
+
     local voteGui = playerGui:FindFirstChild("VoteStart")
     local data = workspace:FindFirstChild("_DATA")
     local voteFolder = data and data:FindFirstChild("VoteStart")
@@ -3090,6 +3184,7 @@ end)
 task.spawn(function()
     while true do
         task.wait(0.5)
+        local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
         unitRefreshClock = unitRefreshClock + 0.5
         if unitRefreshClock >= 2 then
@@ -3376,6 +3471,14 @@ task.spawn(function()
         else
             farmStall = { count = 0, lastChange = 0 }
             UpdateAutoPlayStatus("Idle (Waiting for Match)", Color3.fromRGB(160, 160, 180))
+        end
+        end)
+        if not workerOk then
+            -- Keep the automation loop alive if one game-state read fails.
+            pcall(function()
+                UpdateAutoPlayStatus("Auto Place Worker Error: " .. tostring(workerError), Color3.fromRGB(255, 100, 100))
+            end)
+            task.wait(0.5)
         end
     end
 end)
