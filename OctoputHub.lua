@@ -2722,21 +2722,6 @@ task.spawn(function()
                     end
 
                     local useGriffithOrder = State.AutoBuffGriffith and partyHasGriffith
-                    local farmCount = CountCategory(myUnits, IsFarmUnit)
-                    -- Also count placed farms by their equipped internal IDs. Some game
-                    -- versions omit farm_amount from the placed model's _stats.
-                    for _, placed in ipairs(myUnits) do
-                        if not IsFarmUnit(placed) then
-                            local placedId = GetUnitId(placed)
-                            for _, equippedFarm in ipairs(equipped) do
-                                if IsFarmInfo(equippedFarm)
-                                    and NormalizeName(equippedFarm.unitId) == placedId then
-                                    farmCount = farmCount + 1
-                                    break
-                                end
-                            end
-                        end
-                    end
                     local griffithCount = CountCategory(myUnits, IsGriffithUnit)
                     local griffithReincarnated = false
                     for _, u in ipairs(myUnits) do
@@ -2746,41 +2731,95 @@ task.spawn(function()
                         end
                     end
 
+                    -- Require every equipped farm type to be placed once. The previous
+                    -- farmCount > 0 check advanced after only Bulby/C.E.O and skipped
+                    -- Weathering Girl for the rest of the match.
+                    local farmRequirements = {}
+                    for _, info in ipairs(equipped) do
+                        if IsFarmInfo(info) then
+                            local key = NormalizeName(info.unitId or info.name)
+                            if key ~= "" then farmRequirements[key] = info end
+                        end
+                    end
+                    local farmsReady = true
+                    for key, info in pairs(farmRequirements) do
+                        if CountPlacedUnit(info.unitId or key) < 1 then
+                            farmsReady = false
+                            break
+                        end
+                    end
+                    local farmCount = CountCategory(myUnits, IsFarmUnit)
                     if farmCount ~= farmStall.count then
                         farmStall.count = farmCount
                         farmStall.lastChange = tick()
                     elseif farmStall.lastChange == 0 then
                         farmStall.lastChange = tick()
                     end
-                    local farmElapsed = tick() - farmStall.lastChange
-                    -- Never let Griffith jump ahead just because the farm detector timed out.
-                    -- Once at least one farm is placed and stable, proceed to Griffith.
-                    local farmComplete = not partyHasFarm or (farmCount > 0 and farmElapsed >= 4)
+
+                    -- Buffs remain eligible after Griffith evolves. Count equipped copies
+                    -- (up to the four required by the cursed rotation) per buff group.
+                    local buffRequired = { commander = 0, windsong = 0, elfy = 0 }
+                    local buffPlaced = { commander = 0, windsong = 0, elfy = 0 }
+                    for _, info in ipairs(equipped) do
+                        local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
+                        local group = nil
+                        if unitText:find("commander", 1, true) or unitText:find("erwin", 1, true) then
+                            group = "commander"
+                        elseif unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true)
+                            or unitText:find("winddragon", 1, true) then
+                            group = "windsong"
+                        elseif unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true) then
+                            group = "elfy"
+                        end
+                        if group then buffRequired[group] = 1 end
+                    end
+                    -- A present buff group must reach four placed copies for the curse loop.
+                    -- Respect a lower configured/spawn cap if the game data defines one.
+                    for group, present in pairs(buffRequired) do
+                        if present > 0 then
+                            local target = 4
+                            for _, info in ipairs(equipped) do
+                                local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
+                                local matches = (group == "commander" and (unitText:find("commander", 1, true) or unitText:find("erwin", 1, true)))
+                                    or (group == "windsong" and (unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true) or unitText:find("winddragon", 1, true)))
+                                    or (group == "elfy" and (unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true)))
+                                if matches then
+                                    local cap = tonumber(info.spawnCap)
+                                    local cfg = GetUnitConfig(info.unitId)
+                                    if cfg and tonumber(cfg.maxPlace) then cap = cap and math.min(cap, cfg.maxPlace) or cfg.maxPlace end
+                                    if cap then target = math.min(target, cap) end
+                                    break
+                                end
+                            end
+                            buffRequired[group] = target
+                        end
+                    end
+                    for _, unit in ipairs(myUnits) do
+                        local group = GetBuffChainGroup(unit)
+                        if group then buffPlaced[group] = buffPlaced[group] + 1 end
+                    end
+                    local buffsReady = true
+                    for group, required in pairs(buffRequired) do
+                        if required > 0 and buffPlaced[group] < required then
+                            buffsReady = false
+                            break
+                        end
+                    end
 
                     local function CanPlaceInfo(info)
-                        if not useGriffithOrder then
-                            return true
-                        end
+                        if not useGriffithOrder then return true end
                         local isFarm = IsFarmInfo(info)
-                        local isGriff = IsGriffithName(info.name)
-                        local isBuff = IsBuffName(info.name)
+                        local isGriff = IsGriffithName(info.name) or IsGriffithName(info.unitId)
+                        local isBuff = IsBuffName(info.name) or IsBuffName(info.unitId)
 
-                        if partyHasFarm and not farmComplete then
-                            return isFarm
-                        end
-                        if griffithCount < 1 then
-                            return isGriff
-                        end
-
-                        -- Once Griffith visibly evolves, sacrifice is complete:
-                        -- unlock attack units only; do not add more farms/buff units.
-                        if griffithReincarnated then
-                            return not isGriff and not isFarm and not isBuff
-                        end
-
-                        -- Before the evolution, finish the support setup first.
-                        -- Do not let a 100% meter prematurely unlock attack units.
-                        return isBuff
+                        -- Phase 1: every equipped farm type at least once.
+                        if partyHasFarm and not farmsReady then return isFarm end
+                        -- Phase 2: Griffith only after the farm setup is complete.
+                        if griffithCount < 1 then return isGriff end
+                        -- Phase 3: finish missing supports, even after reincarnation.
+                        if not buffsReady then return isBuff end
+                        -- Phase 4: release regular attack units.
+                        return not isGriff and not isFarm and not isBuff
                     end
 
                     -- In Griffith mode, explicitly prioritize farms regardless of the
