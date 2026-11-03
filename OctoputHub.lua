@@ -777,6 +777,53 @@ local function CountPlacedUnit(unitId)
     return n
 end
 
+-- Match equipped units against the actual placed model using both internal IDs
+-- and display names. Some units (notably farm units with renamed/evolved IDs)
+-- do not expose the same identifier in the loadout and in workspace._UNITS.
+local function CountPlacedInfo(info)
+    if not info then return 0 end
+    local wanted = {}
+    local function add(value)
+        local key = NormalizeName(value)
+        if key ~= "" then wanted[key] = true end
+    end
+    add(info.unitId)
+    add(info.name)
+    add(info.displayName)
+    local wantedList = {}
+    for key in pairs(wanted) do table.insert(wantedList, key) end
+
+    local count = 0
+    for _, unit in ipairs(GetPlayerUnits()) do
+        local rawId = GetRawUnitId(unit)
+        local actual = {
+            NormalizeName(rawId),
+            GetUnitId(unit),
+            NormalizeName(unit.Name),
+            NormalizeName(State.UnitNames[rawId]),
+            NormalizeName(State.UnitNames[GetUnitId(unit)]),
+        }
+        local matched = false
+        for _, a in ipairs(actual) do
+            if a ~= "" and wanted[a] then
+                matched = true
+                break
+            end
+            if a ~= "" and #a >= 5 then
+                for _, w in ipairs(wantedList) do
+                    if #w >= 5 and (a:find(w, 1, true) or w:find(a, 1, true)) then
+                        matched = true
+                        break
+                    end
+                end
+            end
+            if matched then break end
+        end
+        if matched then count = count + 1 end
+    end
+    return count
+end
+
 local function ResolvePlacementKind(unitId)
     local data = LookupUnitData(unitId)
     if data and data.hybrid_placement then
@@ -1062,6 +1109,28 @@ local function GetPlacementCFrame(index, kind)
     local pos = hrp.Position + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
     local finalPos = PlacementIsClear(pos, kind) or pos
     return Finish(finalPos, hrp.CFrame.LookVector)
+end
+
+-- Farm units can be ground or hill units depending on the game's unit data.
+-- If the unit database lookup misses an entry, try every valid placement surface
+-- instead of silently skipping the farm because the guessed surface was wrong.
+local function GetPlacementCFrameForInfo(index, info)
+    local primary = ResolvePlacementKind(info and info.unitId)
+    local kinds = { primary }
+    if IsFarmInfo(info) then
+        for _, candidate in ipairs({ "ground", "hill", "hybrid" }) do
+            local exists = false
+            for _, current in ipairs(kinds) do
+                if current == candidate then exists = true break end
+            end
+            if not exists then table.insert(kinds, candidate) end
+        end
+    end
+    for _, kind in ipairs(kinds) do
+        local cf = GetPlacementCFrame(index, kind)
+        if cf then return cf, kind end
+    end
+    return nil, primary
 end
 
 local function ReadNumberValue(container, keywords)
@@ -2121,28 +2190,178 @@ CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
-CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 7)
+CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 8)
 
-CreateSection(AutoPlayPage, "Auto Buff Delay Settings", 8)
-CreateHint(AutoPlayPage, "Delay for the next unit in the 4-unit buff rotation. Values are seconds; defaults copied from your XT Hub notes.", 9, 38)
+-- Compact inline Auto Buff Delay Settings (inside a small frame under Auto Buff 100%).
 local function SetBuffDelay(group, index, value)
     local number = tonumber(value)
     if not number or number < 0 or number > 30 then return end
     State.BuffDelays[group][index] = number
     SaveConfig()
 end
-CreateSection(AutoPlayPage, "Commander", 10)
-CreateTextBox(AutoPlayPage, "Commander 2 - Delay", "3", 11, function(v) SetBuffDelay("commander", 2, v) end, tostring(State.BuffDelays.commander[2]))
-CreateTextBox(AutoPlayPage, "Commander 3 - Delay", "0.7", 12, function(v) SetBuffDelay("commander", 3, v) end, tostring(State.BuffDelays.commander[3]))
-CreateTextBox(AutoPlayPage, "Commander 4 - Delay", "0.7", 13, function(v) SetBuffDelay("commander", 4, v) end, tostring(State.BuffDelays.commander[4]))
-CreateSection(AutoPlayPage, "Windsong", 14)
-CreateTextBox(AutoPlayPage, "Windsong 2 - Delay", "3.5", 15, function(v) SetBuffDelay("windsong", 2, v) end, tostring(State.BuffDelays.windsong[2]))
-CreateTextBox(AutoPlayPage, "Windsong 3 - Delay", "0.7", 16, function(v) SetBuffDelay("windsong", 3, v) end, tostring(State.BuffDelays.windsong[3]))
-CreateTextBox(AutoPlayPage, "Windsong 4 - Delay", "0.7", 17, function(v) SetBuffDelay("windsong", 4, v) end, tostring(State.BuffDelays.windsong[4]))
-CreateSection(AutoPlayPage, "Elfy (Sylph)", 18)
-CreateTextBox(AutoPlayPage, "Elfy (Sylph) 2 - Delay", "3.5", 19, function(v) SetBuffDelay("elfy", 2, v) end, tostring(State.BuffDelays.elfy[2]))
-CreateTextBox(AutoPlayPage, "Elfy (Sylph) 3 - Delay", "0.7", 20, function(v) SetBuffDelay("elfy", 3, v) end, tostring(State.BuffDelays.elfy[3]))
-CreateTextBox(AutoPlayPage, "Elfy (Sylph) 4 - Delay", "0.7", 21, function(v) SetBuffDelay("elfy", 4, v) end, tostring(State.BuffDelays.elfy[4]))
+
+local DelayContainer = Instance.new("Frame")
+DelayContainer.Name = "AutoBuffDelayContainer"
+DelayContainer.Size = UDim2.new(1, -10, 0, 30)
+DelayContainer.BackgroundTransparency = 1
+DelayContainer.BorderSizePixel = 0
+DelayContainer.LayoutOrder = 7
+DelayContainer.ZIndex = 12
+DelayContainer.Parent = AutoPlayPage
+
+local DelayOpenButton = Instance.new("TextButton")
+DelayOpenButton.Name = "AutoBuffDelaySettingsButton"
+DelayOpenButton.Size = UDim2.new(1, 0, 0, 28)
+DelayOpenButton.Position = UDim2.new(0, 0, 0, 0)
+DelayOpenButton.BackgroundColor3 = Color3.fromRGB(30, 38, 52)
+DelayOpenButton.Text = "⚙  Auto Buff Delay Settings  ▾"
+DelayOpenButton.TextColor3 = Color3.fromRGB(175, 205, 245)
+DelayOpenButton.TextSize = 11
+DelayOpenButton.Font = Enum.Font.GothamSemibold
+DelayOpenButton.ZIndex = 13
+DelayOpenButton.Parent = DelayContainer
+local DelayButtonCorner = Instance.new("UICorner")
+DelayButtonCorner.CornerRadius = UDim.new(0, 6)
+DelayButtonCorner.Parent = DelayOpenButton
+
+-- This is an inline expandable frame, not a screen overlay or separate window.
+local DelayInlineFrame = Instance.new("Frame")
+DelayInlineFrame.Name = "AutoBuffDelayInlineFrame"
+DelayInlineFrame.Position = UDim2.new(0, 0, 0, 34)
+DelayInlineFrame.Size = UDim2.new(1, 0, 0, 154)
+DelayInlineFrame.BackgroundColor3 = Color3.fromRGB(22, 26, 37)
+DelayInlineFrame.BorderSizePixel = 0
+DelayInlineFrame.Visible = false
+DelayInlineFrame.ZIndex = 13
+DelayInlineFrame.Parent = DelayContainer
+local DelayInlineCorner = Instance.new("UICorner")
+DelayInlineCorner.CornerRadius = UDim.new(0, 6)
+DelayInlineCorner.Parent = DelayInlineFrame
+local DelayInlineStroke = Instance.new("UIStroke")
+DelayInlineStroke.Color = Color3.fromRGB(55, 70, 95)
+DelayInlineStroke.Thickness = 1
+DelayInlineStroke.Parent = DelayInlineFrame
+
+local DelayInlineHint = Instance.new("TextLabel")
+DelayInlineHint.Size = UDim2.new(1, -16, 0, 18)
+DelayInlineHint.Position = UDim2.new(0, 8, 0, 4)
+DelayInlineHint.BackgroundTransparency = 1
+DelayInlineHint.Text = "Delay ก่อนใช้บัฟยูนิตถัดไป (วินาที)"
+DelayInlineHint.TextColor3 = Color3.fromRGB(145, 155, 175)
+DelayInlineHint.TextSize = 10
+DelayInlineHint.Font = Enum.Font.Gotham
+DelayInlineHint.TextXAlignment = Enum.TextXAlignment.Left
+DelayInlineHint.ZIndex = 14
+DelayInlineHint.Parent = DelayInlineFrame
+
+local DelayRowsHolder = Instance.new("Frame")
+DelayRowsHolder.Size = UDim2.new(1, -12, 0, 126)
+DelayRowsHolder.Position = UDim2.new(0, 6, 0, 24)
+DelayRowsHolder.BackgroundTransparency = 1
+DelayRowsHolder.ZIndex = 14
+DelayRowsHolder.Parent = DelayInlineFrame
+local DelayRowsLayout = Instance.new("UIListLayout")
+DelayRowsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+DelayRowsLayout.Padding = UDim.new(0, 3)
+DelayRowsLayout.Parent = DelayRowsHolder
+
+local function CreateDelayGroupRow(groupKey, groupTitle, order)
+    local Row = Instance.new("Frame")
+    Row.Name = groupKey .. "DelayRow"
+    Row.Size = UDim2.new(1, 0, 0, 40)
+    Row.BackgroundColor3 = Color3.fromRGB(29, 33, 46)
+    Row.BorderSizePixel = 0
+    Row.LayoutOrder = order
+    Row.ZIndex = 14
+    Row.Parent = DelayRowsHolder
+    local RowCorner = Instance.new("UICorner")
+    RowCorner.CornerRadius = UDim.new(0, 5)
+    RowCorner.Parent = Row
+
+    local GroupLabel = Instance.new("TextLabel")
+    GroupLabel.Size = UDim2.new(0, 94, 1, 0)
+    GroupLabel.Position = UDim2.new(0, 8, 0, 0)
+    GroupLabel.BackgroundTransparency = 1
+    GroupLabel.Text = groupTitle
+    GroupLabel.TextColor3 = Color3.fromRGB(160, 195, 245)
+    GroupLabel.TextSize = 10
+    GroupLabel.Font = Enum.Font.GothamBold
+    GroupLabel.TextXAlignment = Enum.TextXAlignment.Left
+    GroupLabel.ZIndex = 15
+    GroupLabel.Parent = Row
+
+    for unitIndex = 2, 4 do
+        local column = unitIndex - 2
+        local Cell = Instance.new("Frame")
+        Cell.Size = UDim2.new(0, 66, 0, 36)
+        Cell.Position = UDim2.new(0, 104 + column * 72, 0, 2)
+        Cell.BackgroundTransparency = 1
+        Cell.ZIndex = 15
+        Cell.Parent = Row
+
+        local CellLabel = Instance.new("TextLabel")
+        CellLabel.Size = UDim2.new(1, 0, 0, 13)
+        CellLabel.BackgroundTransparency = 1
+        CellLabel.Text = "Unit " .. unitIndex
+        CellLabel.TextColor3 = Color3.fromRGB(165, 165, 185)
+        CellLabel.TextSize = 9
+        CellLabel.Font = Enum.Font.Gotham
+        CellLabel.ZIndex = 16
+        CellLabel.Parent = Cell
+
+        local Input = Instance.new("TextBox")
+        Input.Size = UDim2.new(1, 0, 0, 21)
+        Input.Position = UDim2.new(0, 0, 0, 14)
+        Input.BackgroundColor3 = Color3.fromRGB(39, 43, 57)
+        Input.Text = tostring(State.BuffDelays[groupKey][unitIndex])
+        Input.PlaceholderText = "sec"
+        Input.TextColor3 = Color3.fromRGB(240, 240, 250)
+        Input.TextSize = 10
+        Input.Font = Enum.Font.Gotham
+        Input.ClearTextOnFocus = false
+        Input.ZIndex = 16
+        Input.Parent = Cell
+        local InputCorner = Instance.new("UICorner")
+        InputCorner.CornerRadius = UDim.new(0, 4)
+        InputCorner.Parent = Input
+        Input.FocusLost:Connect(function()
+            local value = tonumber(Input.Text)
+            if value and value >= 0 and value <= 30 then
+                SetBuffDelay(groupKey, unitIndex, value)
+                Input.Text = tostring(value)
+            else
+                Input.Text = tostring(State.BuffDelays[groupKey][unitIndex])
+            end
+        end)
+    end
+end
+
+CreateDelayGroupRow("commander", "Commander", 1)
+CreateDelayGroupRow("windsong", "Windsong", 2)
+CreateDelayGroupRow("elfy", "Elfy (Sylph)", 3)
+
+local DelayInlineFooter = Instance.new("TextLabel")
+DelayInlineFooter.Size = UDim2.new(1, -16, 0, 14)
+DelayInlineFooter.Position = UDim2.new(0, 8, 1, -16)
+DelayInlineFooter.BackgroundTransparency = 1
+DelayInlineFooter.Text = "บันทึกอัตโนมัติเมื่อกด Enter หรือคลิกออกจากช่อง"
+DelayInlineFooter.TextColor3 = Color3.fromRGB(115, 125, 145)
+DelayInlineFooter.TextSize = 9
+DelayInlineFooter.Font = Enum.Font.Gotham
+DelayInlineFooter.TextXAlignment = Enum.TextXAlignment.Left
+DelayInlineFooter.ZIndex = 14
+DelayInlineFooter.Parent = DelayInlineFrame
+
+local DelaySettingsExpanded = false
+local function SetDelaySettingsExpanded(expanded)
+    DelaySettingsExpanded = expanded
+    DelayInlineFrame.Visible = expanded
+    DelayContainer.Size = UDim2.new(1, -10, 0, expanded and 192 or 30)
+    DelayOpenButton.Text = expanded and "⚙  Auto Buff Delay Settings  ▴" or "⚙  Auto Buff Delay Settings  ▾"
+end
+DelayOpenButton.MouseButton1Click:Connect(function()
+    SetDelaySettingsExpanded(not DelaySettingsExpanded)
+end)
 
 CreateSection(AutoPlayPage, "Hybrid Units", 22)
 CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
@@ -2919,11 +3138,20 @@ task.spawn(function()
                     end
                     local farmsReady = true
                     for key, info in pairs(farmRequirements) do
-                        if CountPlacedUnit(info.unitId or key) < 1 then
+                        if CountPlacedInfo(info) < 1 then
                             farmsReady = false
                             break
                         end
                     end
+
+                    -- During farm setup, skip farm types that are already placed.
+                    -- Without this check the first farm in the equipped list (e.g. Bulby)
+                    -- can be selected repeatedly and block the next farm (Weathering Girl).
+                    local function FarmNeedsPlacement(info)
+                        if not IsFarmInfo(info) then return false end
+                        return CountPlacedInfo(info) < 1
+                    end
+
                     local farmCount = CountCategory(myUnits, IsFarmUnit)
                     if farmCount ~= farmStall.count then
                         farmStall.count = farmCount
@@ -2995,7 +3223,8 @@ task.spawn(function()
                         end
 
                         -- Phase 1: every equipped farm type at least once.
-                        if partyHasFarm and not farmsReady then return isFarm end
+                        -- Only the farm types still missing a placement are eligible.
+                        if partyHasFarm and not farmsReady then return isFarm and FarmNeedsPlacement(info) end
                         -- Phase 2: Griffith only after the farm setup is complete.
                         if griffithCount < 1 then return isGriff end
                         -- Phase 3: finish the required cursed support copies before attackers.
@@ -3008,8 +3237,8 @@ task.spawn(function()
                     -- equipped-list order (which may put Griffith at index 1).
                     if useGriffithOrder and partyHasFarm then
                         table.sort(equipped, function(a, b)
-                            local aFarm = IsFarmInfo(a)
-                            local bFarm = IsFarmInfo(b)
+                            local aFarm = FarmNeedsPlacement(a)
+                            local bFarm = FarmNeedsPlacement(b)
                             if aFarm ~= bFarm then
                                 return aFarm
                             end
@@ -3022,8 +3251,7 @@ task.spawn(function()
                         if CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
                             if not (useGriffithOrder and IsGriffithName(unitInfo.name) and griffithCount >= 1) then
                                 placeIndex = placeIndex + 1
-                                local kind = ResolvePlacementKind(unitInfo.unitId)
-                                local cframe = GetPlacementCFrame(placeIndex, kind)
+                                local cframe, kind = GetPlacementCFrameForInfo(placeIndex, unitInfo)
                                 if cframe then
                                     InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
                                     -- Place only one unit per scan. This guarantees the
