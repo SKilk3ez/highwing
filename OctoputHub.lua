@@ -104,7 +104,7 @@ local State = {
     AutoUseAbility = false,
     AutoBuffChain = false,
     AutoBuffGriffith = false,
-    GriffithBuddyUnitId = "",
+    GriffithBuddyUnitIds = {},
     BuffDelays = {
         commander = { [2] = 3, [3] = 0.7, [4] = 0.7 },
         windsong = { [2] = 3.5, [3] = 0.7, [4] = 0.7 },
@@ -234,7 +234,7 @@ local function CopyStateForSave()
         AutoUseAbility = State.AutoUseAbility,
         AutoBuffChain = State.AutoBuffChain,
         AutoBuffGriffith = State.AutoBuffGriffith,
-        GriffithBuddyUnitId = State.GriffithBuddyUnitId,
+        GriffithBuddyUnitIds = State.GriffithBuddyUnitIds,
         BuffDelays = State.BuffDelays,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
@@ -292,8 +292,19 @@ local function ApplySavedTable(saved)
             State[key] = saved[key]
         end
     end
-    if type(saved.GriffithBuddyUnitId) == "string" then
-        State.GriffithBuddyUnitId = saved.GriffithBuddyUnitId
+    -- Multi-select list; migrate the previous single-selection config automatically.
+    State.GriffithBuddyUnitIds = {}
+    local savedBuddyIds = saved.GriffithBuddyUnitIds
+    if type(savedBuddyIds) == "table" then
+        local seenBuddyIds = {}
+        for _, id in ipairs(savedBuddyIds) do
+            if type(id) == "string" and id ~= "" and not seenBuddyIds[id] then
+                seenBuddyIds[id] = true
+                table.insert(State.GriffithBuddyUnitIds, id)
+            end
+        end
+    elseif type(saved.GriffithBuddyUnitId) == "string" and saved.GriffithBuddyUnitId ~= "" then
+        table.insert(State.GriffithBuddyUnitIds, saved.GriffithBuddyUnitId)
     end
     if type(saved.BuffDelays) == "table" then
         for _, group in ipairs({ "commander", "windsong", "elfy" }) do
@@ -1264,8 +1275,17 @@ local function GetPlacementCFrameForInfo(index, info)
     return nil, primary
 end
 
+local function IsGriffithBuddySelected(unitId)
+    local wanted = tostring(unitId or "")
+    if wanted == "" then return false end
+    for _, selectedId in ipairs(State.GriffithBuddyUnitIds or {}) do
+        if tostring(selectedId) == wanted then return true end
+    end
+    return false
+end
+
 local function GetPlacementCFrameNearGriffith(info, myUnits)
-    if not info or not State.GriffithBuddyUnitId or State.GriffithBuddyUnitId == "" then
+    if not info or not IsGriffithBuddySelected(info.unitId) then
         return nil
     end
     local griffith
@@ -2366,7 +2386,7 @@ CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 8)
 
--- Expandable selector: choose one equipped unit type to place beside Griffith.
+-- Expandable selector: multi-select equipped unit types to place beside Griffith.
 local BuddyContainer = Instance.new("Frame")
 BuddyContainer.Name = "GriffithBuddySelector"
 BuddyContainer.Size = UDim2.new(1, -10, 0, 30)
@@ -2473,15 +2493,31 @@ local function RefreshGriffithBuddyList()
         button.Parent = BuddyList
         Instance.new("UICorner", button).CornerRadius = UDim.new(0, 4)
         button.MouseButton1Click:Connect(function()
-            State.GriffithBuddyUnitId = id or ""
+            if id == "" then
+                table.clear(State.GriffithBuddyUnitIds)
+            else
+                local foundIndex
+                for index, selectedId in ipairs(State.GriffithBuddyUnitIds) do
+                    if selectedId == id then foundIndex = index break end
+                end
+                if foundIndex then
+                    table.remove(State.GriffithBuddyUnitIds, foundIndex)
+                else
+                    table.insert(State.GriffithBuddyUnitIds, id)
+                end
+            end
             SaveConfig()
             RefreshGriffithBuddyList()
         end)
     end
 
-    AddOption("None (ปิดการเลือก)", "", State.GriffithBuddyUnitId == "")
+    local selectedSet = {}
+    for _, selectedId in ipairs(State.GriffithBuddyUnitIds or {}) do
+        selectedSet[selectedId] = true
+    end
+    AddOption("None (ล้างการเลือกทั้งหมด)", "", next(selectedSet) == nil)
     for _, option in ipairs(options) do
-        AddOption(option.name, option.id, State.GriffithBuddyUnitId == option.id)
+        AddOption(option.name, option.id, selectedSet[option.id] == true)
     end
     if #options == 0 then
         local empty = Instance.new("TextLabel")
@@ -3751,7 +3787,7 @@ task.spawn(function()
                         local chosen = eligible[math.random(1, #eligible)]
                         local placeIndex = #myUnits + math.random(1, 12)
                         local cframe, kind
-                        if State.GriffithBuddyUnitId ~= "" and tostring(chosen.unitId) == State.GriffithBuddyUnitId then
+                        if IsGriffithBuddySelected(chosen.unitId) then
                             cframe, kind = GetPlacementCFrameNearGriffith(chosen, myUnits)
                         end
                         if not cframe then cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen) end
