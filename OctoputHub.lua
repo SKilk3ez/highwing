@@ -104,6 +104,11 @@ local State = {
     AutoUseAbility = false,
     AutoBuffChain = false,
     AutoBuffGriffith = false,
+    BuffDelays = {
+        commander = { [2] = 3, [3] = 0.7, [4] = 0.7 },
+        windsong = { [2] = 3.5, [3] = 0.7, [4] = 0.7 },
+        elfy = { [2] = 3.5, [3] = 0.7, [4] = 0.7 },
+    },
     PlacePercent = 0,
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
@@ -228,6 +233,7 @@ local function CopyStateForSave()
         AutoUseAbility = State.AutoUseAbility,
         AutoBuffChain = State.AutoBuffChain,
         AutoBuffGriffith = State.AutoBuffGriffith,
+        BuffDelays = State.BuffDelays,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
         AutoEventQuests = State.AutoEventQuests,
@@ -282,6 +288,18 @@ local function ApplySavedTable(saved)
     for _, key in ipairs(boolKeys) do
         if type(saved[key]) == "boolean" then
             State[key] = saved[key]
+        end
+    end
+    if type(saved.BuffDelays) == "table" then
+        for _, group in ipairs({ "commander", "windsong", "elfy" }) do
+            if type(saved.BuffDelays[group]) == "table" then
+                for _, index in ipairs({ 2, 3, 4 }) do
+                    local value = tonumber(saved.BuffDelays[group][index] or saved.BuffDelays[group][tostring(index)])
+                    if value and value >= 0 and value <= 30 then
+                        State.BuffDelays[group][index] = value
+                    end
+                end
+            end
         end
     end
     if type(saved.PlacePercent) == "number" then
@@ -1168,12 +1186,103 @@ local function DescribeWebhookResult(ok, result)
     return true, "Test message sent."
 end
 
+local function ReadPlayerCurrencies()
+    local values = {}
+    local stats = player:FindFirstChild("_stats")
+    if not stats then
+        return values
+    end
+
+    for _, child in ipairs(stats:GetChildren()) do
+        if child:IsA("ValueBase") and type(child.Value) == "number" then
+            local name = child.Name
+            if name == "gold_amount" then
+                values.Gold = child.Value
+            elseif name == "gem_amount" then
+                values.Gems = child.Value
+            elseif name == "trophies" then
+                values.Trophies = child.Value
+            elseif name == "player_xp" then
+                values.XP = child.Value
+            elseif name:sub(1, 9) == "_resource" then
+                values[name:sub(10)] = child.Value
+            end
+        end
+    end
+    return values
+end
+
+local function FormatNumber(value)
+    local n = tonumber(value) or 0
+    local sign = n < 0 and "-" or ""
+    local digits = tostring(math.floor(math.abs(n)))
+    local formatted = digits:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+    return sign .. formatted
+end
+
+local function BuildCurrencyLines(before, after)
+    local lines = {}
+    local names = {}
+    for name in pairs(before or {}) do names[name] = true end
+    for name in pairs(after or {}) do names[name] = true end
+
+    local ordered = {"Gold", "Gems", "Trophies", "XP"}
+    local used = {}
+    for _, name in ipairs(ordered) do
+        if names[name] then
+            table.insert(lines, string.format("**%s:** %s → %s (%s%s)", name,
+                FormatNumber(before[name] or 0), FormatNumber(after[name] or 0),
+                ((after[name] or 0) - (before[name] or 0)) >= 0 and "+" or "",
+                FormatNumber((after[name] or 0) - (before[name] or 0))))
+            used[name] = true
+        end
+    end
+    for name in pairs(names) do
+        if not used[name] then
+            local delta = (after[name] or 0) - (before[name] or 0)
+            table.insert(lines, string.format("**%s:** %s → %s (%s%s)", name,
+                FormatNumber(before[name] or 0), FormatNumber(after[name] or 0),
+                delta >= 0 and "+" or "", FormatNumber(delta)))
+        end
+    end
+    if #lines == 0 then
+        table.insert(lines, "Currency data unavailable")
+    end
+    return table.concat(lines, "\n")
+end
+
+local function GetResultDetails()
+    local details = {}
+    local results = playerGui:FindFirstChild("ResultsUI")
+    if not results then return details end
+
+    local holder = results:FindFirstChild("Holder")
+    if holder then
+        local levelName = holder:FindFirstChild("LevelName")
+        if levelName and levelName:IsA("TextLabel") then
+            details.level = levelName.Text
+        end
+        local title = holder:FindFirstChild("Title")
+        if title and title:IsA("TextLabel") then
+            details.result = title.Text
+        end
+    end
+    return details
+end
+
+local webhookCurrencyBefore = nil
+local function CaptureWebhookCurrencyBaseline()
+    webhookCurrencyBefore = ReadPlayerCurrencies()
+end
+
 local function SendEndWebhook()
     local url = NormalizeWebhookUrl(State.WebhookURL)
     if WebhookProblem(url) then
         return
     end
 
+    -- Allow the game's result/reward updates to reach the player's stats first.
+    task.wait(2)
     local data = workspace:FindFirstChild("_DATA")
     local result = "Ended"
     if data then
@@ -1187,18 +1296,26 @@ local function SendEndWebhook()
         end
     end
 
+    local currentCurrencies = ReadPlayerCurrencies()
+    local currencyText = BuildCurrencyLines(webhookCurrencyBefore or currentCurrencies, currentCurrencies)
+    local resultDetails = GetResultDetails()
+    local level = resultDetails.level or "Unknown stage"
+    if resultDetails.result and resultDetails.result ~= "" then
+        result = resultDetails.result .. " | " .. result
+    end
+
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
-            title = "Stage Ended",
-            description = string.format("**Player:** %s\n**Result:** %s", player.Name, result),
-            color = 5814783,
+            title = "Stage Ended — " .. tostring(level),
+            description = string.format("**Player:** %s\n**Result:** %s\n\n**Currency (Before → After | Change)**\n%s",
+                player.Name, result, currencyText),
+            color = result:find("Victory", 1, true) and 5763719 or 15548997,
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
     pcall(HttpPost, url, body)
 end
-
 local function IsGoodEffectColor(color)
     return color and color.G > 0.55 and color.R < 0.45 and color.B < 0.55
 end
@@ -2006,21 +2123,42 @@ CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 7)
 
-CreateSection(AutoPlayPage, "Hybrid Units", 8)
-CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 9, 28)
-CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 10)
-CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 11)
-local HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 12, 32)
+CreateSection(AutoPlayPage, "Auto Buff Delay Settings", 8)
+CreateHint(AutoPlayPage, "Delay for the next unit in the 4-unit buff rotation. Values are seconds; defaults copied from your XT Hub notes.", 9, 38)
+local function SetBuffDelay(group, index, value)
+    local number = tonumber(value)
+    if not number or number < 0 or number > 30 then return end
+    State.BuffDelays[group][index] = number
+    SaveConfig()
+end
+CreateSection(AutoPlayPage, "Commander", 10)
+CreateTextBox(AutoPlayPage, "Commander 2 - Delay", "3", 11, function(v) SetBuffDelay("commander", 2, v) end, tostring(State.BuffDelays.commander[2]))
+CreateTextBox(AutoPlayPage, "Commander 3 - Delay", "0.7", 12, function(v) SetBuffDelay("commander", 3, v) end, tostring(State.BuffDelays.commander[3]))
+CreateTextBox(AutoPlayPage, "Commander 4 - Delay", "0.7", 13, function(v) SetBuffDelay("commander", 4, v) end, tostring(State.BuffDelays.commander[4]))
+CreateSection(AutoPlayPage, "Windsong", 14)
+CreateTextBox(AutoPlayPage, "Windsong 2 - Delay", "3.5", 15, function(v) SetBuffDelay("windsong", 2, v) end, tostring(State.BuffDelays.windsong[2]))
+CreateTextBox(AutoPlayPage, "Windsong 3 - Delay", "0.7", 16, function(v) SetBuffDelay("windsong", 3, v) end, tostring(State.BuffDelays.windsong[3]))
+CreateTextBox(AutoPlayPage, "Windsong 4 - Delay", "0.7", 17, function(v) SetBuffDelay("windsong", 4, v) end, tostring(State.BuffDelays.windsong[4]))
+CreateSection(AutoPlayPage, "Elfy (Sylph)", 18)
+CreateTextBox(AutoPlayPage, "Elfy (Sylph) 2 - Delay", "3.5", 19, function(v) SetBuffDelay("elfy", 2, v) end, tostring(State.BuffDelays.elfy[2]))
+CreateTextBox(AutoPlayPage, "Elfy (Sylph) 3 - Delay", "0.7", 20, function(v) SetBuffDelay("elfy", 3, v) end, tostring(State.BuffDelays.elfy[3]))
+CreateTextBox(AutoPlayPage, "Elfy (Sylph) 4 - Delay", "0.7", 21, function(v) SetBuffDelay("elfy", 4, v) end, tostring(State.BuffDelays.elfy[4]))
 
-CreateSection(AutoPlayPage, "Unit Configuration", 13)
-CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 14, 28)
+CreateSection(AutoPlayPage, "Hybrid Units", 22)
+CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
+CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
+CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 25)
+local HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 26, 32)
+
+CreateSection(AutoPlayPage, "Unit Configuration", 27)
+CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 28, 28)
 
 local UnitConfigHolder = Instance.new("Frame")
 UnitConfigHolder.Name = "UnitConfigHolder"
 UnitConfigHolder.Size = UDim2.new(1, -10, 0, 0)
 UnitConfigHolder.AutomaticSize = Enum.AutomaticSize.Y
 UnitConfigHolder.BackgroundTransparency = 1
-UnitConfigHolder.LayoutOrder = 15
+UnitConfigHolder.LayoutOrder = 29
 UnitConfigHolder.ZIndex = 12
 UnitConfigHolder.Parent = AutoPlayPage
 local UnitConfigList = Instance.new("UIListLayout")
@@ -2356,7 +2494,11 @@ local function HandlePopups()
     end
 end
 
+local eventAutomationStopped = false
+
 CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
+    -- Manually toggling Auto Find Match back on resumes event automation.
+    eventAutomationStopped = false
     if isON then
         UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70))
         if IsInLobby() and not IsMatchmaking() then
@@ -2447,8 +2589,7 @@ local function GetBuffChainCooldown(units, index)
 end
 
 local function GetBuffChainCurseOffset(units)
-    -- Cursed four-unit loop: use the unit's displayed SPA integer digit
-    -- as the initial offset (e.g. 14.9 -> 4s, 16.1 -> 6s).
+    -- Legacy SPA-derived offset retained as a fallback/reference for diagnostics.
     local unit = units and units[1]
     local stats = unit and unit:FindFirstChild("_stats")
     if stats then
@@ -2467,6 +2608,13 @@ local function GetBuffChainCurseOffset(units)
         -- from that value; use a conservative 5s offset if SPA is unavailable.
     end
     return 5
+end
+
+local function GetConfiguredBuffDelay(groupName, nextUnitIndex)
+    local group = State.BuffDelays and State.BuffDelays[groupName]
+    local value = group and tonumber(group[nextUnitIndex])
+    if value == nil then return 0.7 end
+    return math.clamp(value, 0, 30)
 end
 
 local function ResetBuffChain(chain, units)
@@ -2596,15 +2744,22 @@ local function HandleMatchEnd(gameFinished)
         return
     end
 
+    -- Priority: Main tab controls always win over Event tab automation.
+    -- Main order: Next (when available) > Main Replay > Main Leave.
+    -- Event Replay is only a fallback when no Main action is selected.
     local nextKind = State.AutoNext and NextActionAvailable() or nil
-    local wantReplay = State.MainAutoReplay or (State.AutoFindMatch and State.AutoReplay)
-    local summerLeave = State.AutoFindMatch and not State.AutoReplay and not State.MainAutoReplay and not State.AutoNext and not State.AutoLeave
+    local mainActionSelected = State.AutoNext or State.MainAutoReplay or State.AutoLeave
     local action = nil
+
     if nextKind then
         action = "next"
-    elseif wantReplay then
+    elseif State.MainAutoReplay then
         action = "replay"
-    elseif State.AutoLeave or summerLeave then
+    elseif State.AutoLeave then
+        action = "leave"
+    elseif not mainActionSelected and State.AutoFindMatch and State.AutoReplay then
+        action = "replay"
+    elseif not mainActionSelected and State.AutoFindMatch and not State.AutoReplay then
         action = "leave"
     end
     if not action then
@@ -2636,8 +2791,22 @@ local function HandleMatchEnd(gameFinished)
                 end
             end
         elseif action == "leave" then
-            UpdateEventStatus("Leaving Match...", Color3.fromRGB(255, 100, 100))
-            InvokeEndpoint("teleport_back_to_lobby")
+            -- Leave the finished Event match, but keep Auto Find Match enabled.
+            -- Once the player is back in the lobby, the matchmaking worker below
+            -- will detect the lobby state and queue the next Event automatically.
+            eventAutomationStopped = false
+            UpdateEventStatus("Leaving Match... (Auto Queue Will Resume In Lobby)", Color3.fromRGB(255, 100, 100))
+
+            -- Retry the leave request in case the first endpoint call is ignored.
+            for attempt = 1, 3 do
+                if not gameFinished.Parent or gameFinished.Value ~= true then
+                    break
+                end
+                InvokeEndpoint("teleport_back_to_lobby")
+                if attempt < 3 then
+                    task.wait(2)
+                end
+            end
         end
     end)
 end
@@ -2719,7 +2888,7 @@ task.spawn(function()
                     local partyHasGriffith = false
                     local partyHasFarm = false
                     for _, info in ipairs(equipped) do
-                        if IsGriffithName(info.name) then
+                        if IsGriffithName(info.name) or IsGriffithName(info.unitId) then
                             partyHasGriffith = true
                         end
                         if IsFarmInfo(info) then
@@ -2727,7 +2896,8 @@ task.spawn(function()
                         end
                     end
 
-                    local useGriffithOrder = State.AutoBuffGriffith and partyHasGriffith
+                    -- Placement order is automatic whenever Griffith is equipped; the toggle controls only skill activation.
+                    local useGriffithOrder = partyHasGriffith
                     local griffithCount = CountCategory(myUnits, IsGriffithUnit)
                     local griffithReincarnated = false
                     for _, u in ipairs(myUnits) do
@@ -2818,11 +2988,17 @@ task.spawn(function()
                         local isGriff = IsGriffithName(info.name) or IsGriffithName(info.unitId)
                         local isBuff = IsBuffName(info.name) or IsBuffName(info.unitId)
 
+                        -- Once Griffith has evolved, the sacrifice sequence is over:
+                        -- do not place more farms, supports, or another Griffith. Release attackers.
+                        if griffithReincarnated then
+                            return not isGriff and not isFarm and not isBuff
+                        end
+
                         -- Phase 1: every equipped farm type at least once.
                         if partyHasFarm and not farmsReady then return isFarm end
                         -- Phase 2: Griffith only after the farm setup is complete.
                         if griffithCount < 1 then return isGriff end
-                        -- Phase 3: finish missing supports, even after reincarnation.
+                        -- Phase 3: finish the required cursed support copies before attackers.
                         if not buffsReady then return isBuff end
                         -- Phase 4: release regular attack units.
                         return not isGriff and not isFarm and not isBuff
@@ -2909,16 +3085,13 @@ task.spawn(function()
 
                                 if phase == 1 then
                                     chain.cycleStart = now
-                                    chain.nextCastAt = now + GetBuffChainCurseOffset(units)
+                                    chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 2)
                                     chain.phase = 2
                                 elseif phase == 2 then
-                                    -- The first buff expires at 30s; then pass it to unit 3.
-                                    chain.nextCastAt = chain.cycleStart + 30
+                                    chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 3)
                                     chain.phase = 3
                                 elseif phase == 3 then
-                                    -- The second-stage buff expires 30s after unit 2.
-                                    chain.nextCastAt = chain.cycleStart + 30
-                                        + GetBuffChainCurseOffset(units)
+                                    chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 4)
                                     chain.phase = 4
                                 else
                                     -- Start the next cycle when unit 1 is genuinely ready again.
@@ -2952,7 +3125,7 @@ task.spawn(function()
 
             if State.AutoBuffGriffith and #myUnits > 0 then
                 for _, u in ipairs(myUnits) do
-                    if IsGriffithUnit(u) and CanUseActiveAttack(u) then
+                    if IsGriffithUnit(u) and not IsGriffithReincarnation(u) and CanUseActiveAttack(u) then
                         InvokeEndpoint("use_active_attack", u)
                         UpdateAutoPlayStatus("Griffith Buff 100% Activated!", Color3.fromRGB(255, 215, 0))
                     end
@@ -2989,7 +3162,7 @@ task.spawn(function()
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         HandleMatchEnd(gameFinished)
 
-        if State.AutoFindMatch then
+        if State.AutoFindMatch and not eventAutomationStopped then
             if IsInLobby() then
                 HandlePopups()
 
@@ -3030,18 +3203,29 @@ task.spawn(function()
 end)
 
 local webhookSent = false
+local webhookGameWasActive = false
 task.spawn(function()
     while true do
         task.wait(1)
         local dataFolder = workspace:FindFirstChild("_DATA")
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
-        if gameFinished and gameFinished.Value == true then
+        local inGame = dataFolder ~= nil and gameFinished ~= nil
+
+        if inGame and gameFinished.Value ~= true then
+            if not webhookGameWasActive then
+                CaptureWebhookCurrencyBaseline()
+                webhookGameWasActive = true
+            end
+            webhookSent = false
+        elseif gameFinished and gameFinished.Value == true then
             if not webhookSent and State.WebhookOnEnd then
                 webhookSent = true
                 task.spawn(SendEndWebhook)
             end
         else
+            webhookGameWasActive = false
             webhookSent = false
+            webhookCurrencyBefore = nil
         end
     end
 end)
