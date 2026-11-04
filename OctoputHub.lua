@@ -292,7 +292,7 @@ local function ApplySavedTable(saved)
             State[key] = saved[key]
         end
     end
-    -- Multi-select list; migrate the previous single-selection config automatically.
+    -- Stored as a list for backward compatibility, but limited to a single selection.
     State.GriffithBuddyUnitIds = {}
     local savedBuddyIds = saved.GriffithBuddyUnitIds
     if type(savedBuddyIds) == "table" then
@@ -305,6 +305,10 @@ local function ApplySavedTable(saved)
         end
     elseif type(saved.GriffithBuddyUnitId) == "string" and saved.GriffithBuddyUnitId ~= "" then
         table.insert(State.GriffithBuddyUnitIds, saved.GriffithBuddyUnitId)
+    end
+    -- Only ONE unit type may be chosen for the Griffith nearby placement.
+    while #State.GriffithBuddyUnitIds > 1 do
+        table.remove(State.GriffithBuddyUnitIds)
     end
     if type(saved.BuffDelays) == "table" then
         for _, group in ipairs({ "commander", "windsong", "elfy" }) do
@@ -397,18 +401,25 @@ HubScale.Scale = State.UIScale
 local EVENT_LEVEL_ID = "summer2_event"
 
 local function InvokeEndpoint(endpointName, ...)
+    -- Only fall back to the raw remote when the client service was not usable.
+    -- A nil return from a successful call must not trigger a second request.
+    local attempted = false
     local ok, res = pcall(function(...)
         local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
         if loaderModule then
             local Loader = require(loaderModule)
             local EndpointsClient = Loader.load_client_service(game, "EndpointsClient")
             if EndpointsClient and EndpointsClient.invoke_server then
+                attempted = true
                 return EndpointsClient.invoke_server(endpointName, ...)
             end
         end
     end, ...)
-    if ok and res ~= nil then
-        return res
+    if attempted then
+        if ok then
+            return res
+        end
+        return nil
     end
 
     local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
@@ -444,7 +455,7 @@ local function IsMatchmaking()
 end
 
 local function NormalizeName(text)
-    return tostring(text or ""):lower():gsub("[%.%s_%-]", "")
+    return (tostring(text or ""):lower():gsub("[%.%s_%-]", ""))
 end
 
 local function IsFarmName(text)
@@ -452,7 +463,7 @@ local function IsFarmName(text)
     if id == "" then
         return false
     end
-    return id:find("speedwagon", 1, true)
+    return (id:find("speedwagon", 1, true)
         or id:find("ceo", 1, true)
         or id:find("bulma", 1, true)
         or id:find("bulby", 1, true)
@@ -460,7 +471,7 @@ local function IsFarmName(text)
         or id:find("nami", 1, true)
         or id:find("weathergirl", 1, true)
         or id:find("weathering", 1, true)
-        or id:find("weather", 1, true)
+        or id:find("weather", 1, true)) ~= nil
 end
 
 local function IsGriffithName(text)
@@ -572,7 +583,7 @@ local function IsFarmUnit(unit)
             return true
         end
     end
-    return IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)
+    return (IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)) and true or false
 end
 
 local function GetBuffChainGroupFromText(...)
@@ -1409,11 +1420,11 @@ local function HttpPost(url, body)
     if fn then
         return fn(payload)
     end
-    return HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
+    error("No HTTP request function available in this executor")
 end
 
 local function NormalizeWebhookUrl(url)
-    return tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return (tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
 local function WebhookProblem(url)
@@ -1733,13 +1744,28 @@ end
 
 local blackscreenConn
 local savedQuality
+local savedSavedQuality
+local hiddenOriginals = setmetatable({}, { __mode = "k" })
+
 local function SetInstanceHidden(inst, hidden)
     if inst:IsA("BasePart") then
         inst.LocalTransparencyModifier = hidden and 1 or 0
     elseif inst:IsA("Decal") or inst:IsA("Texture") then
-        inst.Transparency = hidden and 1 or 0
+        if hidden then
+            if hiddenOriginals[inst] == nil then hiddenOriginals[inst] = inst.Transparency end
+            inst.Transparency = 1
+        elseif hiddenOriginals[inst] ~= nil then
+            inst.Transparency = hiddenOriginals[inst]
+            hiddenOriginals[inst] = nil
+        end
     elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles") then
-        inst.Enabled = not hidden
+        if hidden then
+            if hiddenOriginals[inst] == nil then hiddenOriginals[inst] = inst.Enabled end
+            inst.Enabled = false
+        elseif hiddenOriginals[inst] ~= nil then
+            inst.Enabled = hiddenOriginals[inst]
+            hiddenOriginals[inst] = nil
+        end
     end
 end
 
@@ -1752,12 +1778,19 @@ local function ApplyBlackScreen(enabled)
 
     pcall(function()
         if enabled then
-            savedQuality = settings().Rendering.QualityLevel
-            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
             local gs = UserSettings():GetService("UserGameSettings")
+            if savedQuality == nil then
+                savedQuality = settings().Rendering.QualityLevel
+                savedSavedQuality = gs.SavedQualityLevel
+            end
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
             gs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
         elseif savedQuality then
+            local gs = UserSettings():GetService("UserGameSettings")
             settings().Rendering.QualityLevel = savedQuality
+            if savedSavedQuality ~= nil then gs.SavedQualityLevel = savedSavedQuality end
+            savedQuality = nil
+            savedSavedQuality = nil
         end
     end)
 
@@ -2424,7 +2457,7 @@ local BuddyHint = Instance.new("TextLabel")
 BuddyHint.Size = UDim2.new(1, -90, 0, 24)
 BuddyHint.Position = UDim2.new(0, 8, 0, 3)
 BuddyHint.BackgroundTransparency = 1
-BuddyHint.Text = "เลือกยูนิตในทีมที่จะให้วางใกล้ Griffith"
+BuddyHint.Text = "เลือก 1 ประเภทที่จะให้วางใกล้ Griffith"
 BuddyHint.TextColor3 = Color3.fromRGB(155, 165, 185)
 BuddyHint.TextSize = 10
 BuddyHint.Font = Enum.Font.Gotham
@@ -2493,18 +2526,12 @@ local function RefreshGriffithBuddyList()
         button.Parent = BuddyList
         Instance.new("UICorner", button).CornerRadius = UDim.new(0, 4)
         button.MouseButton1Click:Connect(function()
-            if id == "" then
-                table.clear(State.GriffithBuddyUnitIds)
-            else
-                local foundIndex
-                for index, selectedId in ipairs(State.GriffithBuddyUnitIds) do
-                    if selectedId == id then foundIndex = index break end
-                end
-                if foundIndex then
-                    table.remove(State.GriffithBuddyUnitIds, foundIndex)
-                else
-                    table.insert(State.GriffithBuddyUnitIds, id)
-                end
+            -- Single selection: picking a unit replaces the previous choice,
+            -- picking the same unit again (or "None") clears it.
+            local alreadySelected = State.GriffithBuddyUnitIds[1] == id
+            table.clear(State.GriffithBuddyUnitIds)
+            if id ~= "" and not alreadySelected then
+                table.insert(State.GriffithBuddyUnitIds, id)
             end
             SaveConfig()
             RefreshGriffithBuddyList()
@@ -2515,7 +2542,7 @@ local function RefreshGriffithBuddyList()
     for _, selectedId in ipairs(State.GriffithBuddyUnitIds or {}) do
         selectedSet[selectedId] = true
     end
-    AddOption("None (ล้างการเลือกทั้งหมด)", "", next(selectedSet) == nil)
+    AddOption("None (ไม่เลือก)", "", next(selectedSet) == nil)
     for _, option in ipairs(options) do
         AddOption(option.name, option.id, selectedSet[option.id] == true)
     end
@@ -3520,12 +3547,160 @@ end
 
 local pendingUpgradeRequests = {}
 local pendingSpawnRequests = {}
-local abilityCursor = 1
+
+-- In-game cash (same value the game HUD uses for upgrade/placement affordability).
+local function GetInGameCash()
+    local stats = player:FindFirstChild("_stats")
+    local resource = stats and stats:FindFirstChild("resource")
+    return resource and tonumber(resource.Value) or nil
+end
+
+-- Cheapest next upgrade among farm units that still have farm upgrades pending.
+local function GetNextFarmUpgradeCost(myUnits)
+    local best = nil
+    for _, unit in ipairs(myUnits or {}) do
+        if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
+            local stats = unit._stats
+            local current = stats:FindFirstChild("upgrade")
+            local maximum = stats:FindFirstChild("max_upgrade")
+            if current and maximum then
+                local target = tonumber(maximum.Value) or 0
+                local cfg = GetUnitConfig(GetRawUnitId(unit))
+                if cfg and tonumber(cfg.upgradeTarget) then
+                    target = math.min(target, math.max(0, math.floor(cfg.upgradeTarget)))
+                end
+                if current.Value < target then
+                    local cost = GetNextUpgradeCost(unit)
+                    if cost ~= math.huge and (best == nil or cost < best) then best = cost end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- Auto Use Ability rotation. Units take turns in a fixed order and casts are spaced
+-- by (cooldown / number of units), so a 3-unit or 4-unit squad completes exactly one
+-- full loop per cooldown. Readiness also honours the game's global cooldowns.
+local AbilityRotation = {
+    cursor = 1,
+    lastCast = 0,
+    waitingSince = nil,
+    seq = 0,
+    order = setmetatable({}, { __mode = "k" }),
+    modules = nil,
+}
+
+function AbilityRotation.Modules()
+    if AbilityRotation.modules ~= nil then
+        return AbilityRotation.modules or nil
+    end
+    local ok, mods = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return {
+            Attacks = Loader.load_client_service(game, "AttacksReplicate"),
+            Core = Loader.load_core_service(game, "UnitServiceCore"),
+        }
+    end)
+    if ok and type(mods) == "table" and mods.Attacks and mods.Core then
+        AbilityRotation.modules = mods
+    else
+        AbilityRotation.modules = false
+    end
+    return AbilityRotation.modules or nil
+end
+
+-- Returns hasActive, ready, remainingSeconds
+function AbilityRotation.Status(unit)
+    local stats = unit and unit:FindFirstChild("_stats")
+    if not stats then return false, false, nil end
+    local mods = AbilityRotation.Modules()
+    if mods then
+        local ok, hasActive, queued, ready, remaining = pcall(function()
+            local id = mods.Core.get_active_id(unit)
+            if not id then return false end
+            local q, r, _, rem = mods.Attacks.get_current_active_attack_cooldown(unit, id)
+            return true, q, r, rem
+        end)
+        if ok then
+            if not hasActive then return false, false, nil end
+            if queued then return true, false, 0.5 end
+            if ready then return true, true, 0 end
+            return true, false, tonumber(remaining)
+        end
+    end
+    -- Fallback: own cooldown stats only.
+    local cd = stats:FindFirstChild("active_attack_cooldown")
+    local last = stats:FindFirstChild("last_active_cast")
+    if not cd then return false, false, nil end
+    if not CanUseActiveAttack(unit) then
+        local remain = last and (cd.Value - (tick() - last.Value)) or nil
+        return true, false, remain and math.max(remain, 0) or nil
+    end
+    return true, true, 0
+end
+
+function AbilityRotation.Reset()
+    AbilityRotation.cursor = 1
+    AbilityRotation.waitingSince = nil
+end
+
+function AbilityRotation.Step(units)
+    local list = {}
+    local cooldownSum, cooldownCount = 0, 0
+    for _, unit in ipairs(units) do
+        local hasActive = AbilityRotation.Status(unit)
+        if hasActive then
+            if not AbilityRotation.order[unit] then
+                AbilityRotation.seq = AbilityRotation.seq + 1
+                AbilityRotation.order[unit] = AbilityRotation.seq
+            end
+            table.insert(list, unit)
+            local cd = unit._stats:FindFirstChild("active_attack_cooldown")
+            if cd and tonumber(cd.Value) then
+                cooldownSum = cooldownSum + cd.Value
+                cooldownCount = cooldownCount + 1
+            end
+        end
+    end
+    local count = #list
+    if count == 0 then
+        AbilityRotation.Reset()
+        return
+    end
+    table.sort(list, function(a, b) return AbilityRotation.order[a] < AbilityRotation.order[b] end)
+
+    local now = tick()
+    local averageCooldown = cooldownCount > 0 and (cooldownSum / cooldownCount) or 10
+    local gap = math.max(0.5, averageCooldown / count)
+    if now - AbilityRotation.lastCast < gap then return end
+
+    AbilityRotation.cursor = ((AbilityRotation.cursor - 1) % count) + 1
+    local unit = list[AbilityRotation.cursor]
+    local _, ready, remaining = AbilityRotation.Status(unit)
+    if ready then
+        InvokeEndpoint("use_active_attack", unit)
+        AbilityRotation.lastCast = now
+        AbilityRotation.waitingSince = nil
+        AbilityRotation.cursor = (AbilityRotation.cursor % count) + 1
+        return
+    end
+
+    -- Keep strict order: wait for this unit unless it is far from ready or has
+    -- been blocked for too long, then move on so one stuck unit cannot freeze the loop.
+    AbilityRotation.waitingSince = AbilityRotation.waitingSince or now
+    local maxWait = math.max(averageCooldown, 5)
+    if (remaining and remaining > maxWait) or (now - AbilityRotation.waitingSince) > maxWait + 2 then
+        AbilityRotation.cursor = (AbilityRotation.cursor % count) + 1
+        AbilityRotation.waitingSince = nil
+    end
+end
 
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
         task.wait(0.5)
+        local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             local units = GetPlayerUnits()
             local now = tick()
@@ -3552,7 +3727,7 @@ task.spawn(function()
                         if cfg.upgradeTarget ~= nil and level.Value >= cfg.upgradeTarget then allowed = false end
                     end
                     if allowed then
-                        table.insert(candidates, { unit = unit, cost = GetNextUpgradeCost(unit), farm = IsFarmUnit(unit) })
+                        table.insert(candidates, { unit = unit, cost = GetNextUpgradeCost(unit), farm = IsFarmUnit(unit) and true or false, level = level.Value })
                     end
                 end
             end
@@ -3562,17 +3737,26 @@ task.spawn(function()
                 table.sort(candidates, function(a, b)
                     if farmPriority and a.farm ~= b.farm then return a.farm end
                     if a.cost ~= b.cost then return a.cost < b.cost end
-                    local aLevel = a.unit._stats.upgrade.Value
-                    local bLevel = b.unit._stats.upgrade.Value
+                    local aLevel = a.level
+                    local bLevel = b.level
                     if aLevel ~= bLevel then return aLevel < bLevel end
                     return tostring(a.unit) < tostring(b.unit)
                 end)
                 local target = candidates[1].unit
+                local targetStats = target:FindFirstChild("_stats")
+                local targetLevel = targetStats and targetStats:FindFirstChild("upgrade")
+                local levelBefore = targetLevel and targetLevel.Value or 0
+                -- Record before yielding so the unit can disappear mid-request safely.
+                pendingUpgradeRequests[target] = { level = levelBefore, time = now }
                 InvokeEndpoint("upgrade_unit_ingame", target)
-                pendingUpgradeRequests[target] = { level = target._stats.upgrade.Value, time = now }
             end
         else
             table.clear(pendingUpgradeRequests)
+        end
+        end)
+        if not upgradeOk then
+            warn("[OctoputHub] Upgrade worker error: " .. tostring(upgradeErr))
+            task.wait(1)
         end
     end
 end)
@@ -3702,6 +3886,19 @@ task.spawn(function()
                         end
                     end
 
+                    -- Sacrifice phase: after the single Griffith is down, buff units keep being
+                    -- placed until Griffith turns into Reincarnation. If no buff unit can be
+                    -- placed any more, release the other units so the run never deadlocks.
+                    local sacrificeBuffAvailable = false
+                    if useGriffithOrder and griffithCount >= 1 and not griffithReincarnated then
+                        for _, info in ipairs(equipped) do
+                            if (IsBuffName(info.name) or IsBuffName(info.unitId)) and CanPlaceConfigured(info, wave) then
+                                sacrificeBuffAvailable = true
+                                break
+                            end
+                        end
+                    end
+
                     local function CanPlaceInfo(info)
                         if not useGriffithOrder then return true end
                         local isFarm = IsFarmInfo(info)
@@ -3723,8 +3920,8 @@ task.spawn(function()
                         if partyHasFarm and not farmsReady then return isFarm and FarmNeedsPlacement(info) end
                         -- Phase 2: Griffith only after the farm setup is complete.
                         if griffithCount < 1 then return isGriff end
-                        -- Phase 3: finish the required cursed support copies before attackers.
-                        if not buffsReady then return isBuff end
+                        -- Phase 3: keep placing buff units (sacrifice) until Griffith evolves.
+                        if sacrificeBuffAvailable then return isBuff end
                         -- Phase 4: release regular attack units.
                         return not isGriff and not isFarm and not isBuff
                     end
@@ -3751,6 +3948,15 @@ task.spawn(function()
                         UpdateAutoPlayStatus("Farm upgrades first - saving for farm upgrades", Color3.fromRGB(255, 200, 80))
                     end
 
+                    -- Auto Upgrade Farm First (without Griffith mode): other units may only be
+                    -- placed with money left over after the next farm upgrade is covered.
+                    local farmReserve = 0
+                    local currentCash = nil
+                    if State.AutoUpgradeFarmFirst and not useGriffithOrder then
+                        farmReserve = GetNextFarmUpgradeCost(myUnits) or 0
+                        if farmReserve > 0 then currentCash = GetInGameCash() end
+                    end
+
                     local eligible = {}
                     local now = tick()
                     for uuid, pending in pairs(pendingSpawnRequests) do
@@ -3767,6 +3973,12 @@ task.spawn(function()
                     for _, unitInfo in ipairs(equipped) do
                         local uuidKey = tostring(unitInfo.uuid or "")
                         local farmUpgradeAllowsPlacement = not farmUpgradePending or IsFarmInfo(unitInfo)
+                        if farmUpgradeAllowsPlacement and farmReserve > 0 and not IsFarmInfo(unitInfo) then
+                            local unitCost = tonumber(unitInfo.cost) or 0
+                            if currentCash ~= nil and currentCash - unitCost < farmReserve then
+                                farmUpgradeAllowsPlacement = false
+                            end
+                        end
                         local isSecondGriffith = useGriffithOrder
                             and (IsGriffithName(unitInfo.name) or IsGriffithName(unitInfo.unitId))
                             and griffithCount >= 1
@@ -3939,24 +4151,9 @@ task.spawn(function()
                     local isGriffithBuff = State.AutoBuffGriffith and IsGriffithUnit(unit)
                     if not isChain and not isGriffithBuff then table.insert(abilityUnits, unit) end
                 end
-                if #abilityUnits > 0 then
-                    abilityCursor = ((abilityCursor - 1) % #abilityUnits) + 1
-                    -- Cast at most one ability per scan, advancing the cursor so a 3-unit
-                    -- or 4-unit squad receives a complete, even rotation without burst casts.
-                    for offset = 0, #abilityUnits - 1 do
-                        local index = ((abilityCursor + offset - 1) % #abilityUnits) + 1
-                        local unit = abilityUnits[index]
-                        if CanUseActiveAttack(unit) then
-                            InvokeEndpoint("use_active_attack", unit)
-                            abilityCursor = (index % #abilityUnits) + 1
-                            break
-                        end
-                    end
-                else
-                    abilityCursor = 1
-                end
+                AbilityRotation.Step(abilityUnits)
             else
-                abilityCursor = 1
+                AbilityRotation.Reset()
             end
 
             UpdateAutoPlayStatus("Active in Match", Color3.fromRGB(70, 200, 255))
@@ -3975,9 +4172,12 @@ task.spawn(function()
     end
 end)
 
+local lastMatchmakingRequest = 0
+local lastQuestClaim = 0
 task.spawn(function()
     while true do
         task.wait(1.5)
+        local mmOk, mmErr = pcall(function()
 
         TryAutoStart()
 
@@ -3993,7 +4193,10 @@ task.spawn(function()
                     UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
                 else
                     UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
-                    InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                    if os.clock() - lastMatchmakingRequest >= 5 then
+                        lastMatchmakingRequest = os.clock()
+                        InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                    end
                 end
             elseif not matchEndHandled then
                 UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
@@ -4019,8 +4222,14 @@ task.spawn(function()
             end
         end
 
-        if State.AutoEventQuests then
+        if State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
+            lastQuestClaim = os.clock()
             InvokeEndpoint("claim_summer2_map_board_lines")
+        end
+        end)
+        if not mmOk then
+            warn("[OctoputHub] Match/Start worker error: " .. tostring(mmErr))
+            task.wait(1)
         end
     end
 end)
@@ -4030,6 +4239,7 @@ local webhookGameWasActive = false
 task.spawn(function()
     while true do
         task.wait(1)
+        local whOk, whErr = pcall(function()
         local dataFolder = workspace:FindFirstChild("_DATA")
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         local inGame = dataFolder ~= nil and gameFinished ~= nil
@@ -4049,6 +4259,10 @@ task.spawn(function()
             webhookGameWasActive = false
             webhookSent = false
             webhookCurrencyBefore = nil
+        end
+        end)
+        if not whOk then
+            warn("[OctoputHub] Webhook worker error: " .. tostring(whErr))
         end
     end
 end)
