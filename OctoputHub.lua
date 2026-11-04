@@ -123,6 +123,7 @@ local State = {
     MainAutoReplay = false,
     AutoNext = false,
     AutoLeave = false,
+    AntiAFK = true,
 }
 
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
@@ -242,6 +243,7 @@ local function CopyStateForSave()
         MainAutoReplay = State.MainAutoReplay,
         AutoNext = State.AutoNext,
         AutoLeave = State.AutoLeave,
+        AntiAFK = State.AntiAFK,
     }
 end
 
@@ -271,7 +273,7 @@ local function ApplySavedTable(saved)
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst",
         "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
-        "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave",
+        "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
         if type(saved[key]) == "boolean" then
@@ -553,70 +555,62 @@ local function IsFarmUnit(unit)
 end
 
 local function GetEquippedUnitList()
-    local unitsByUuid = {}
+    local unitsList = {}
 
-    -- Prefer the game's collection service: it works in the lobby before the
-    -- in-match spawn GUI has finished creating its unit frames.
-    pcall(function()
+    -- Unit Configuration must read ONLY the six actual equipped slots (1-6).
+    -- Do not merge GUI leftovers or previously saved UnitConfigs into this list.
+    local ok, err = pcall(function()
         local Loader = require(ReplicatedStorage.src.Loader)
         local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
-        if ucs and ucs.get_equipped_units then
-            local equipped = ucs.get_equipped_units()
-            if type(equipped) == "table" then
-                for slot, uuid in pairs(equipped) do
-                    if uuid ~= nil then
-                        local item = nil
-                        if ucs.get_equipped_unit_by_uuid then
-                            item = ucs.get_equipped_unit_by_uuid(uuid)
-                        end
-                        local unitId = type(item) == "table" and (item.unit_id or item.unitId or item.id) or nil
-                        local data = unitId and LookupUnitData(unitId) or nil
-                        local displayName = type(item) == "table" and (item.name or item.display_name or item.displayName) or nil
-                        if (not displayName or displayName == "") and type(data) == "table" then
-                            displayName = data.name
-                        end
-                        unitsByUuid[tostring(uuid)] = {
-                            uuid = uuid,
-                            cost = type(data) == "table" and tonumber(data.cost) or 0,
-                            name = displayName or unitId or "Unit",
-                            unitId = unitId,
-                            slot = tostring(slot),
-                        }
-                    end
+        if not ucs or type(ucs.get_equipped_units) ~= "function" then
+            return
+        end
+
+        local equipped = ucs.get_equipped_units()
+        if type(equipped) ~= "table" then
+            return
+        end
+
+        for slot = 1, 6 do
+            local slotKey = tostring(slot)
+            local uuid = equipped[slotKey]
+            if uuid == nil then
+                uuid = equipped[slot]
+            end
+
+            if uuid ~= nil then
+                local item = nil
+                if type(ucs.get_equipped_unit_by_uuid) == "function" then
+                    item = ucs.get_equipped_unit_by_uuid(uuid)
                 end
+
+                local unitId = type(item) == "table"
+                    and (item.unit_id or item.unitId or item.id)
+                    or nil
+                local data = unitId and LookupUnitData(unitId) or nil
+                local displayName = type(item) == "table"
+                    and (item.name or item.display_name or item.displayName)
+                    or nil
+
+                if (not displayName or displayName == "") and type(data) == "table" then
+                    displayName = data.name
+                end
+
+                table.insert(unitsList, {
+                    uuid = uuid,
+                    cost = type(data) == "table" and tonumber(data.cost) or 0,
+                    name = displayName or unitId or "Unit",
+                    unitId = unitId,
+                    slot = slotKey,
+                })
             end
         end
     end)
 
-    -- Merge GUI slot data as a fallback/refresh source, without discarding the
-    -- service's canonical unit IDs when the GUI text is still loading.
-    local spawnGui = playerGui:FindFirstChild("spawn_units")
-    local frame = spawnGui and spawnGui:FindFirstChild("Lives") and spawnGui.Lives:FindFirstChild("Frame")
-    local unitsGrid = frame and frame:FindFirstChild("Units")
-    if unitsGrid then
-        for _, slotFrame in ipairs(unitsGrid:GetChildren()) do
-            local uuid = slotFrame:GetAttribute("_equipped_frame_unit_uuid")
-            if uuid then
-                local key = tostring(uuid)
-                local existing = unitsByUuid[key] or { uuid = uuid, slot = slotFrame.Name }
-                local guiName = slotFrame:FindFirstChild("name") and slotFrame.name.Text or nil
-                local guiCost = slotFrame:FindFirstChild("Cost") and slotFrame.Cost:FindFirstChild("text")
-                    and tonumber(slotFrame.Cost.text.Text) or nil
-                if guiName and guiName ~= "" and guiName ~= "Unit" then existing.name = guiName end
-                if guiCost then existing.cost = guiCost end
-                existing.slot = slotFrame.Name
-                unitsByUuid[key] = existing
-            end
-        end
+    if not ok then
+        warn("[OctoputHub] Could not read equipped slots 1-6: " .. tostring(err))
     end
 
-    local unitsList = {}
-    for _, info in pairs(unitsByUuid) do
-        table.insert(unitsList, info)
-    end
-    table.sort(unitsList, function(a, b)
-        return tostring(a.slot) < tostring(b.slot)
-    end)
     return unitsList
 end
 
@@ -2324,24 +2318,8 @@ local function RefreshUnitConfigUI()
             end
         end
     end
-    for id, cfg in pairs(State.UnitConfigs or {}) do
-        if not byId[id] then
-            local data = LookupUnitData(id)
-            local info = {
-                unitId = id,
-                name = (cfg and cfg.displayName) or State.UnitNames[id] or (data and data.name) or id,
-                spawnCap = data and tonumber(data.spawn_cap) or nil,
-                maxUpgrade = data and type(data.upgrade) == "table" and #data.upgrade or nil,
-                hybrid = data and data.hybrid_placement == true or false,
-                hill = data and data.hill_unit == true or false,
-            }
-            byId[id] = info
-            table.insert(ordered, info)
-        end
-    end
-    table.sort(ordered, function(a, b)
-        return tostring(a.name) < tostring(b.name)
-    end)
+    -- Do not append saved configs here. Only equipped slots 1-6 are shown.
+    -- Keep the game's slot order rather than sorting by display name.
 
     if #hybridNames > 0 then
         HybridInfo.Text = "Equipped hybrid: " .. table.concat(hybridNames, ", ")
@@ -2637,8 +2615,10 @@ end)
 CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 3, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 4, 50, 150, function()
+CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 4, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 5, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 6, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
@@ -2939,6 +2919,23 @@ local function HandleMatchEnd(gameFinished)
     end)
 end
 
+-- Roblox's standard idle timeout is around 20 minutes. The game source
+-- does not implement a separate AFK timer; handle the Player.Idled event here.
+local antiAfkConnection
+pcall(function()
+    antiAfkConnection = player.Idled:Connect(function()
+        if not State.AntiAFK then
+            return
+        end
+
+        pcall(function()
+            local VirtualUser = game:GetService("VirtualUser")
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end)
+end)
+
 AllowSave = true
 if State.BlackScreen then
     ApplyBlackScreen(true)
@@ -3032,9 +3029,8 @@ task.spawn(function()
                 end
             end
 
-            local farmUpgradePending = false
+            local pendingFarmUpgradeRequest = false
             local wave = GetCurrentWave()
-            local farmUnits = {}
             for _, unit in ipairs(units) do
                 local stats = unit:FindFirstChild("_stats")
                 local level = stats and stats:FindFirstChild("upgrade")
@@ -3049,16 +3045,18 @@ task.spawn(function()
                     if cfg and tonumber(cfg.upgradeTarget) then
                         targetLevel = math.min(targetLevel, math.max(0, math.floor(tonumber(cfg.upgradeTarget))))
                     end
-                    if isFarm and level.Value < targetLevel then
-                        farmUpgradePending = true
-                        table.insert(farmUnits, { unit = unit, level = level, target = targetLevel, cfg = cfg })
+                    local pendingRequest = pendingUpgradeRequests[unit]
+                    if isFarm and pendingRequest then
+                        pendingFarmUpgradeRequest = true
                     end
-                    if level.Value < targetLevel and not pendingUpgradeRequests[unit] then
+                    if level.Value < targetLevel and not pendingRequest then
                         local allowed = not (cfg and cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave)
                         if allowed then
                             local cost = GetNextUpgradeCost(unit)
                             local cash = GetInGameCash()
-                            if cash == nil or cost == math.huge or cost <= cash then
+                            -- Only affordable upgrades enter the queue. An unaffordable
+                            -- Farm upgrade must not block other units from using spare cash.
+                            if cash == nil or (cost ~= math.huge and cost <= cash) then
                                 table.insert(candidates, { unit = unit, cost = cost, farm = isFarm, level = level.Value })
                             end
                         end
@@ -3066,21 +3064,37 @@ task.spawn(function()
                 end
             end
 
-            -- Strict Farm First: while ANY detected Farm unit is below its own
-            -- configured target, only Farm candidates may receive upgrade calls.
-            if State.AutoUpgradeFarmFirst and farmUpgradePending then
-                local farmOnly = {}
-                for _, candidate in ipairs(candidates) do
-                    if candidate.farm then table.insert(farmOnly, candidate) end
-                end
-                candidates = farmOnly
-                if #candidates == 0 then
-                    UpdateAutoPlayStatus("Waiting for Farm Upgrade", Color3.fromRGB(255, 190, 80))
+            -- Dynamic Farm First:
+            -- 1) If a Farm upgrade is affordable, it always wins over non-Farm units.
+            -- 2) If no Farm upgrade is affordable, other affordable units may upgrade.
+            -- 3) Wait for an issued Farm request to resolve before spending the same
+            --    budget on another unit; then re-read cash and priorities next cycle.
+            if State.AutoUpgradeFarmFirst then
+                if pendingFarmUpgradeRequest then
+                    local farmOnly = {}
+                    for _, candidate in ipairs(candidates) do
+                        if candidate.farm then table.insert(farmOnly, candidate) end
+                    end
+                    candidates = farmOnly
+                    if #candidates == 0 then
+                        UpdateAutoPlayStatus("Waiting for Farm Upgrade", Color3.fromRGB(255, 190, 80))
+                    end
+                else
+                    local affordableFarm = {}
+                    for _, candidate in ipairs(candidates) do
+                        if candidate.farm then table.insert(affordableFarm, candidate) end
+                    end
+                    if #affordableFarm > 0 then
+                        candidates = affordableFarm
+                    end
                 end
             end
 
             if #candidates > 0 then
                 table.sort(candidates, function(a, b)
+                    if State.AutoUpgradeFarmFirst and a.farm ~= b.farm then
+                        return a.farm
+                    end
                     if a.cost ~= b.cost then return a.cost < b.cost end
                     local aLevel = a.level
                     local bLevel = b.level
