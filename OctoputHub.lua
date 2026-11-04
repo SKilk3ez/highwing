@@ -1254,26 +1254,28 @@ local function DescribeWebhookResult(ok, result)
     return true, "Test message sent."
 end
 
+
 local function ReadPlayerCurrencies()
     local values = {}
     local stats = player:FindFirstChild("_stats")
-    if not stats then
-        return values
-    end
-
-    for _, child in ipairs(stats:GetChildren()) do
-        if child:IsA("ValueBase") and type(child.Value) == "number" then
-            local name = child.Name
-            if name == "gold_amount" then
-                values.Gold = child.Value
-            elseif name == "gem_amount" then
-                values.Gems = child.Value
-            elseif name == "trophies" then
-                values.Trophies = child.Value
-            elseif name == "player_xp" then
-                values.XP = child.Value
-            elseif name:sub(1, 9) == "_resource" then
-                values[name:sub(10)] = child.Value
+    if stats then
+        for _, child in ipairs(stats:GetChildren()) do
+            if child:IsA("ValueBase") and type(child.Value) == "number" then
+                local name = child.Name
+                if name == "gold_amount" then
+                    values.Gold = child.Value
+                elseif name == "gem_amount" then
+                    values.Gems = child.Value
+                elseif name == "trophies" then
+                    values.Trophies = child.Value
+                elseif name == "player_xp" then
+                    values.XP = child.Value
+                elseif name:sub(1, 9) == "_resource" then
+                    local resourceName = name:sub(10):gsub("^_+", "")
+                    values[resourceName] = child.Value
+                elseif name:lower():find("summerpearls", 1, true) then
+                    values.SummerPearls = child.Value
+                end
             end
         end
     end
@@ -1288,146 +1290,317 @@ local function FormatNumber(value)
     return sign .. formatted
 end
 
-local function BuildCurrencyLines(before, after)
-    local lines = {}
-    local names = {}
-    for name in pairs(before or {}) do names[name] = true end
-    for name in pairs(after or {}) do names[name] = true end
+local function FormatCompact(value)
+    local n = tonumber(value) or 0
+    local abs = math.abs(n)
+    local suffix = ""
+    local divisor = 1
+    if abs >= 1e12 then suffix, divisor = "T", 1e12
+    elseif abs >= 1e9 then suffix, divisor = "B", 1e9
+    elseif abs >= 1e6 then suffix, divisor = "M", 1e6
+    elseif abs >= 1e3 then suffix, divisor = "K", 1e3 end
+    if divisor == 1 then return FormatNumber(n) end
+    local valueText = string.format("%.2f", n / divisor):gsub("%.?0+$", "")
+    return valueText .. suffix
+end
 
-    local ordered = {"Gold", "Gems", "Trophies", "XP"}
-    local used = {}
-    for _, name in ipairs(ordered) do
-        if names[name] then
-            table.insert(lines, string.format("**%s:** %s → %s (%s%s)", name,
-                FormatNumber(before[name] or 0), FormatNumber(after[name] or 0),
-                ((after[name] or 0) - (before[name] or 0)) >= 0 and "+" or "",
-                FormatNumber((after[name] or 0) - (before[name] or 0))))
-            used[name] = true
+local function ReadTraitRerolls()
+    local ok, amount = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
+        local session = inventoryService and inventoryService.session
+        local profile = session and session.profile_data
+        if profile and profile.trait_reroll_tokens ~= nil then
+            return tonumber(profile.trait_reroll_tokens)
+        end
+        local inventory = session and session.inventory
+        if inventory and type(inventory.get_number_of_owned_item) == "function" then
+            return tonumber(inventory:get_number_of_owned_item("trait_reroll_tokens__MOCK"))
+        end
+        return nil
+    end)
+    return ok and tonumber(amount) or nil
+end
+
+local function BuildPlayerStatsText(currencies)
+    local traitCount = ReadTraitRerolls()
+    local lines = {}
+    local gemEmoji = "<:GemAA:1563613761544392794>"
+    local goldEmoji = "<:GoldAA:1566642394412220508>"
+    local summerEmoji = "<:SummerAA:1566642524636840128>"
+    local traitEmoji = "<:TraitAA:1566642609479360642>"
+    table.insert(lines, gemEmoji .. " **Gem:** " .. FormatNumber(currencies.Gems or 0))
+    table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold or 0))
+    local summer = currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls
+    if summer == nil then
+        for key, value in pairs(currencies) do
+            if tostring(key):lower():find("summerpearls", 1, true) then summer = value break end
         end
     end
-    for name in pairs(names) do
-        if not used[name] then
-            local delta = (after[name] or 0) - (before[name] or 0)
-            table.insert(lines, string.format("**%s:** %s → %s (%s%s)", name,
-                FormatNumber(before[name] or 0), FormatNumber(after[name] or 0),
-                delta >= 0 and "+" or "", FormatNumber(delta)))
-        end
-    end
-    if #lines == 0 then
-        table.insert(lines, "Currency data unavailable")
+    table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer or 0))
+    if traitCount ~= nil then
+        table.insert(lines, traitEmoji .. " **Trait:** " .. FormatNumber(traitCount))
     end
     return table.concat(lines, "\n")
+end
+
+local function BuildRewardText(before, after)
+    local ordered = {"XP", "SummerPearls", "Gold", "Gems", "Trophies"}
+    local labels = {XP = "XP", SummerPearls = "Summer Pearls", Gold = "Gold", Gems = "Gems", Trophies = "Trophies"}
+    local parts, used = {}, {}
+    for _, key in ipairs(ordered) do
+        local delta = (tonumber(after[key]) or 0) - (tonumber(before[key]) or 0)
+        if delta > 0 then
+            table.insert(parts, "+" .. FormatNumber(delta) .. " " .. (labels[key] or key))
+            used[key] = true
+        end
+    end
+    for key, value in pairs(after) do
+        if not used[key] and key ~= "Trait" and key ~= "Trophies" then
+            local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
+            if delta > 0 then
+                table.insert(parts, "+" .. FormatNumber(delta) .. " " .. tostring(key))
+            end
+        end
+    end
+    if #parts == 0 then return "No currency or XP gained detected." end
+    return table.concat(parts, " · ")
 end
 
 local function GetResultDetails()
     local details = {}
     local results = playerGui:FindFirstChild("ResultsUI")
-    if not results then return details end
-
-    local holder = results:FindFirstChild("Holder")
+    local holder = results and results:FindFirstChild("Holder")
     if holder then
         local levelName = holder:FindFirstChild("LevelName")
-        if levelName and levelName:IsA("TextLabel") then
-            details.level = levelName.Text
-        end
+        if levelName and levelName:IsA("TextLabel") then details.level = levelName.Text end
         local title = holder:FindFirstChild("Title")
-        if title and title:IsA("TextLabel") then
-            details.result = title.Text
+        if title and title:IsA("TextLabel") then details.result = title.Text end
+        local difficulty = holder:FindFirstChild("Difficulty")
+        if difficulty and difficulty:IsA("TextLabel") then details.difficulty = difficulty.Text end
+        local middle = holder:FindFirstChild("Middle")
+        if middle then
+            for _, childName in ipairs({"Timer", "WavesCompleted"}) do
+                local child = middle:FindFirstChild(childName)
+                if child and child:IsA("TextLabel") then details[childName] = child.Text end
+            end
         end
     end
     return details
 end
 
+local function ReadMatchCounters()
+    local stats = player:FindFirstChild("_stats")
+    local function read(name)
+        local value = stats and stats:FindFirstChild(name)
+        return value and tonumber(value.Value) or 0
+    end
+    return {Kills = read("kills"), Damage = read("damage_dealt")}
+end
+
 local webhookCurrencyBefore = nil
 local webhookSecretPortalBefore = nil
+local webhookMatchCountersBefore = nil
 
--- The game data identifies the Summer Hunt Secret Portal as
--- portal_summer2_secret (display name: Explosion Mage's Portal).
+-- Summer Hunt Secret Portal item id from the game's item data.
 local function ReadSecretPortalCount()
     local ok, count = pcall(function()
         local srcFolder = ReplicatedStorage:FindFirstChild("src")
         local loaderModule = srcFolder and srcFolder:FindFirstChild("Loader")
         if not loaderModule then return nil end
-
         local Loader = require(loaderModule)
         local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
         local session = inventoryService and inventoryService.session
         local inventory = session and session.inventory
-        if not inventory or type(inventory.get_number_of_owned_item) ~= "function" then
-            return nil
-        end
-
+        if not inventory or type(inventory.get_number_of_owned_item) ~= "function" then return nil end
         return inventory:get_number_of_owned_item("portal_summer2_secret")
     end)
-
-    if ok then
-        return tonumber(count)
-    end
-    return nil
+    return ok and tonumber(count) or nil
 end
 
 local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretPortalBefore = ReadSecretPortalCount()
+    webhookMatchCountersBefore = ReadMatchCounters()
+end
+
+local function GetUnitTraits(unit)
+    local traits = nil
+    pcall(function()
+        local stats = unit:FindFirstChild("_stats")
+        local uuidValue = stats and stats:FindFirstChild("uuid")
+        if uuidValue then
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local collection = Loader.load_client_service(game, "UnitCollectionServiceClient")
+            local owned = collection and collection.get_equipped_unit_by_uuid and collection.get_equipped_unit_by_uuid(uuidValue.Value)
+            if type(owned) == "table" then traits = owned.traits end
+        end
+    end)
+    if type(traits) ~= "table" then
+        local encoded = unit:GetAttribute("_traits_string")
+        if type(encoded) == "string" then
+            local ok, decoded = pcall(function() return HttpService:JSONDecode(encoded) end)
+            if ok and type(decoded) == "table" then traits = decoded end
+        end
+    end
+    local names = {}
+    for _, trait in ipairs(traits or {}) do
+        local id = type(trait) == "table" and (trait.trait or trait.id or trait.name) or trait
+        if id then
+            local name = tostring(id):gsub("_", " "):gsub("(%a)([%w']*)", function(a, b) return string.upper(a) .. b end)
+            table.insert(names, name)
+        end
+    end
+    table.sort(names)
+    return table.concat(names, ", ")
+end
+
+local function GetPlacedUnitLines()
+    local groups = {}
+    local seen = {}
+    local unitFolders = {}
+    local activeFolder = workspace:FindFirstChild("_UNITS")
+    local deadFolder = ReplicatedStorage:FindFirstChild("_DEAD_UNITS")
+    if activeFolder then table.insert(unitFolders, activeFolder) end
+    if deadFolder then table.insert(unitFolders, deadFolder) end
+    for _, folder in ipairs(unitFolders) do
+        if folder then
+            for _, unit in ipairs(folder:GetChildren()) do
+                if unit:IsA("Model") and not seen[unit] then
+                    seen[unit] = true
+                    local stats = unit:FindFirstChild("_stats")
+                    local owner = stats and stats:FindFirstChild("player")
+                    local idValue = stats and stats:FindFirstChild("id")
+                    if owner and owner.Value == player and idValue then
+                        local unitId = tostring(idValue.Value)
+                        local unitData = LookupUnitData(unitId)
+                        local unitName = (type(unitData) == "table" and unitData.name) or unit.Name or unitId
+                        local upgradeValue = stats:FindFirstChild("upgrade")
+                        local upgrade = upgradeValue and tonumber(upgradeValue.Value) or 0
+                        local upgradeList = type(unitData) == "table" and (unitData.upgrades or unitData.upgrade) or nil
+                        local maxUpgrade = type(upgradeList) == "table" and #upgradeList or 0
+                        local damageValue = stats:FindFirstChild("total_damage")
+                        local damage = damageValue and tonumber(damageValue.Value) or 0
+                        local traitText = GetUnitTraits(unit)
+                        local key = table.concat({unitId, traitText, tostring(upgrade), tostring(maxUpgrade)}, "|")
+                        if not groups[key] then
+                            groups[key] = {count = 0, name = unitName, traits = traitText, upgrade = upgrade, maxUpgrade = maxUpgrade, damage = 0}
+                        end
+                        groups[key].count = groups[key].count + 1
+                        groups[key].damage = groups[key].damage + damage
+                    end
+                end
+            end
+        end
+    end
+    local rows = {}
+    for _, group in pairs(groups) do
+        local displayName = group.name .. (group.traits ~= "" and (" (" .. group.traits .. ")") or "")
+        table.insert(rows, string.format("[ %d ] %s = %s [⚔️](https://discord.com/assets/fa2c28d64be33d41.svg) - [Upg %d/%d]", group.count, displayName, FormatCompact(group.damage), group.upgrade, group.maxUpgrade))
+    end
+    table.sort(rows)
+    return rows
+end
+
+local function AppendEmbedField(fields, name, value)
+    value = tostring(value or "")
+    if value == "" then value = "Unavailable" end
+    local part, index = "", 1
+    for line in (value .. "\n"):gmatch("(.-)\n") do
+        if #part + #line + 1 > 950 then
+            table.insert(fields, {name = index == 1 and name or (name .. " (cont.)"), value = part, inline = false})
+            part, index = "", index + 1
+        end
+        part = part == "" and line or (part .. "\n" .. line)
+    end
+    if part ~= "" then table.insert(fields, {name = index == 1 and name or (name .. " (cont.)"), value = part, inline = false}) end
 end
 
 local function SendEndWebhook()
     local url = NormalizeWebhookUrl(State.WebhookURL)
-    if WebhookProblem(url) then
-        return
-    end
-
-    -- Allow the game's result/reward updates to reach the player's stats first.
-    task.wait(2)
-    local data = workspace:FindFirstChild("_DATA")
-    local result = "Ended"
-    if data then
-        local won = data:FindFirstChild("Won") or data:FindFirstChild("Victory") or data:FindFirstChild("GameWon")
-        if won then
-            result = (won.Value == true) and "Victory" or "Defeat"
-        end
-        local wave = data:FindFirstChild("Wave") or data:FindFirstChild("CurrentWave")
-        if wave then
-            result = result .. " | Wave " .. tostring(wave.Value)
-        end
-    end
+    if WebhookProblem(url) then return end
+    -- Give result UI, rewards and inventory replication time to update.
+    task.wait(4)
 
     local currentCurrencies = ReadPlayerCurrencies()
-    local currencyText = BuildCurrencyLines(webhookCurrencyBefore or currentCurrencies, currentCurrencies)
+    local beforeCurrencies = webhookCurrencyBefore or currentCurrencies
     local resultDetails = GetResultDetails()
-    local level = resultDetails.level or "Unknown stage"
-    if resultDetails.result and resultDetails.result ~= "" then
-        result = resultDetails.result .. " | " .. result
+    local resultText = resultDetails.result or "MATCH ENDED"
+    local isVictory = tostring(resultText):lower():find("victory", 1, true) ~= nil
+        or tostring(resultText):lower():find("win", 1, true) ~= nil
+    local levelName = resultDetails.level or "Unknown Map"
+    local difficulty = resultDetails.difficulty or "Unknown Mode"
+    local gameMode = nil
+    pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local levelData = Loader.LevelData
+        if levelData then
+            local mode = tostring(levelData._gamemode or "")
+            if mode == "summer2_event" then
+                gameMode = "Summer Hunt"
+            elseif mode ~= "" then
+                gameMode = mode:gsub("_", " "):gsub("(%a)([%w']*)", function(a, b) return string.upper(a) .. b end)
+            end
+        end
+    end)
+    if gameMode and gameMode ~= "" then
+        difficulty = gameMode .. " - " .. tostring(difficulty)
+    end
+    local timerText = resultDetails.Timer or "Time unavailable"
+    local timerMinutes, timerSeconds = tostring(timerText):match("(%d+):(%d+)")
+    if timerMinutes and timerSeconds then
+        local totalSeconds = tonumber(timerMinutes) * 60 + tonumber(timerSeconds)
+        timerText = string.format("%02d:%02d:%02d", math.floor(totalSeconds / 3600), math.floor(totalSeconds / 60) % 60, totalSeconds % 60)
+    end
+    local waveText = resultDetails.WavesCompleted or ""
+    local waveNumber = waveText:match("(%d+)")
+    if not waveNumber then
+        local data = workspace:FindFirstChild("_DATA")
+        local wave = data and (data:FindFirstChild("Wave") or data:FindFirstChild("CurrentWave"))
+        waveNumber = wave and tostring(wave.Value) or "?"
     end
 
-    local embed = {
-        title = "Stage Ended — " .. tostring(level),
-        description = string.format("**Player:** %s\n**Result:** %s\n\n**Currency (Before → After | Change)**\n%s",
-            player.Name, result, currencyText),
-        color = result:find("Victory", 1, true) and 5763719 or 15548997,
-        timestamp = DateTime.now():ToIsoDate(),
-    }
+    local currentCounters = ReadMatchCounters()
+    local beforeCounters = webhookMatchCountersBefore or currentCounters
+    local kills = math.max(0, currentCounters.Kills - beforeCounters.Kills)
+    local damage = math.max(0, currentCounters.Damage - beforeCounters.Damage)
+    local playerXp = tonumber(currentCurrencies.XP) or 0
+    local playerLevel = math.floor((math.sqrt(56 * playerXp + 37249) - 179) / 14)
 
-    -- Only announce a Secret Portal when the owned count increased during this match.
+    local fields = {}
+    AppendEmbedField(fields, "💰 Player Stats", BuildPlayerStatsText(currentCurrencies))
+    AppendEmbedField(fields, "🎁 Rewards", BuildRewardText(beforeCurrencies, currentCurrencies))
+    local unitRows = GetPlacedUnitLines()
+    AppendEmbedField(fields, "⚔️ Units", #unitRows > 0 and table.concat(unitRows, "\n") or "No placed units detected.")
+
+    local resultIcon = isVictory and "🟢" or "🔴"
+    local matchResult = string.format("%s %s - %s - Wave %s\n%s - %s\n%s kills - %s dmg",
+        resultIcon, tostring(resultText), tostring(timerText), tostring(waveNumber), tostring(levelName), tostring(difficulty),
+        FormatNumber(kills), FormatCompact(damage))
+    AppendEmbedField(fields, "🏁 Match Result", matchResult)
+
     local secretPortalAfter = ReadSecretPortalCount()
     local secretPortalGained = nil
     if webhookSecretPortalBefore ~= nil and secretPortalAfter ~= nil then
         secretPortalGained = math.max(0, secretPortalAfter - webhookSecretPortalBefore)
     end
     if secretPortalGained and secretPortalGained > 0 then
-        embed.fields = {{
-            name = "✨ SECRET PORTAL RECEIVED!",
-            value = string.format("**Explosion Mage's Portal** x%d\nRarity: **Secret**", secretPortalGained),
-            inline = false,
-        }}
+        AppendEmbedField(fields, "✨ SECRET PORTAL RECEIVED!", string.format("**Explosion Mage's Portal** x%d\nRarity: **Secret**", secretPortalGained))
     end
 
-    local body = HttpService:JSONEncode({
-        username = "Octoput Hub",
-        embeds = {embed},
-    })
+    local embed = {
+        title = "Anime Adventures",
+        description = string.format("**User:** %s\n**Level:** %s (XP: %s)", player.Name, FormatNumber(playerLevel), FormatNumber(playerXp)),
+        color = isVictory and 5763719 or 15548997,
+        fields = fields,
+        thumbnail = {url = "https://images-ext-1.discordapp.net/external/DVc3xEVX1AAauF_ZPUJEj5F_BV0BzqOFeIzbIZ3fNuc/https/raw.githubusercontent.com/weziiotez-dev/by/5ea57a7821ff35dc8e7997a2d767431cc5370a3b/xt_hub_webhook_512.png?format=webp&quality=lossless&width=80&height=80"},
+        timestamp = DateTime.now():ToIsoDate(),
+    }
+    local body = HttpService:JSONEncode({username = "Octoput Hub", embeds = {embed}})
     pcall(HttpPost, url, body)
 end
+
+
 local function IsGoodEffectColor(color)
     return color and color.G > 0.55 and color.R < 0.45 and color.B < 0.55
 end
@@ -1787,7 +1960,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local SwitchBtn = Instance.new("TextButton")
     SwitchBtn.Size = UDim2.new(0, 44, 0, 22)
     SwitchBtn.Position = UDim2.new(1, -54, 0.5, -11)
-    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
+    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
     SwitchBtn.Text = ""
     SwitchBtn.ZIndex = 13
     SwitchBtn.Parent = ToggleContainer
@@ -1814,7 +1987,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
 
         local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
         if isON then
-            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(0, 168, 255) }):Play()
+            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(210, 70, 170) }):Play()
             TweenService:Create(Indicator, tweenInfo, { Position = UDim2.new(1, -19, 0.5, -8) }):Play()
         else
             TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(45, 45, 58) }):Play()
@@ -1889,7 +2062,7 @@ end
 local function CreateButton(parent, title, layoutOrder, onClick)
     local Button = Instance.new("TextButton")
     Button.Size = UDim2.new(1, -10, 0, 36)
-    Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
+    Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
     Button.Text = title
     Button.TextColor3 = Color3.fromRGB(255, 255, 255)
     Button.TextSize = 13
@@ -1949,7 +2122,7 @@ local function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, ma
 
     local Fill = Instance.new("Frame")
     Fill.Name = "Fill"
-    Fill.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
+    Fill.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
     Fill.BorderSizePixel = 0
     Fill.ZIndex = 14
     Fill.Parent = Bar
@@ -2119,7 +2292,7 @@ local function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutO
             local Box = Instance.new("TextButton")
             Box.Size = UDim2.new(0, 18, 0, 18)
             Box.Position = UDim2.new(0, 8, 0.5, -9)
-            Box.BackgroundColor3 = rank and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
+            Box.BackgroundColor3 = rank and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
             Box.Text = rank and "✓" or ""
             Box.TextColor3 = Color3.fromRGB(255, 255, 255)
             Box.TextSize = 12
@@ -2204,7 +2377,7 @@ local WebhookPage = CreateTab("Webhook", 4)
 local MiscPage = CreateTab("Misc", 5)
 
 tabs["Auto Play"].Page.Visible = true
-tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
+tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
 tabs["Auto Play"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 
 CreateHint(MainPage, "When a match ends: Next runs if it is enabled and a next stage is available. Otherwise Replay runs if it is enabled. Otherwise Leave runs if it is enabled.", 0, 44)
@@ -3366,6 +3539,7 @@ task.spawn(function()
             webhookSent = false
             webhookCurrencyBefore = nil
             webhookSecretPortalBefore = nil
+            webhookMatchCountersBefore = nil
         end
         end)
         if not whOk then
