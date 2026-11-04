@@ -397,25 +397,18 @@ HubScale.Scale = State.UIScale
 local EVENT_LEVEL_ID = "summer2_event"
 
 local function InvokeEndpoint(endpointName, ...)
-    -- Only fall back to the raw remote when the client service was not usable.
-    -- A nil return from a successful call must not trigger a second request.
-    local attempted = false
     local ok, res = pcall(function(...)
         local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
         if loaderModule then
             local Loader = require(loaderModule)
             local EndpointsClient = Loader.load_client_service(game, "EndpointsClient")
             if EndpointsClient and EndpointsClient.invoke_server then
-                attempted = true
                 return EndpointsClient.invoke_server(endpointName, ...)
             end
         end
     end, ...)
-    if attempted then
-        if ok then
-            return res
-        end
-        return nil
+    if ok and res ~= nil then
+        return res
     end
 
     local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
@@ -451,7 +444,7 @@ local function IsMatchmaking()
 end
 
 local function NormalizeName(text)
-    return (tostring(text or ""):lower():gsub("[%.%s_%-]", ""))
+    return tostring(text or ""):lower():gsub("[%.%s_%-]", "")
 end
 
 local function IsFarmName(text)
@@ -459,7 +452,7 @@ local function IsFarmName(text)
     if id == "" then
         return false
     end
-    return (id:find("speedwagon", 1, true)
+    return id:find("speedwagon", 1, true)
         or id:find("ceo", 1, true)
         or id:find("bulma", 1, true)
         or id:find("bulby", 1, true)
@@ -467,7 +460,7 @@ local function IsFarmName(text)
         or id:find("nami", 1, true)
         or id:find("weathergirl", 1, true)
         or id:find("weathering", 1, true)
-        or id:find("weather", 1, true)) ~= nil
+        or id:find("weather", 1, true)
 end
 
 local function IsGriffithName(text)
@@ -579,7 +572,7 @@ local function IsFarmUnit(unit)
             return true
         end
     end
-    return (IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)) and true or false
+    return IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)
 end
 
 local function GetBuffChainGroupFromText(...)
@@ -1416,11 +1409,11 @@ local function HttpPost(url, body)
     if fn then
         return fn(payload)
     end
-    error("No HTTP request function available in this executor")
+    return HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
 end
 
 local function NormalizeWebhookUrl(url)
-    return (tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    return tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
 local function WebhookProblem(url)
@@ -1740,28 +1733,13 @@ end
 
 local blackscreenConn
 local savedQuality
-local savedSavedQuality
-local hiddenOriginals = setmetatable({}, { __mode = "k" })
-
 local function SetInstanceHidden(inst, hidden)
     if inst:IsA("BasePart") then
         inst.LocalTransparencyModifier = hidden and 1 or 0
     elseif inst:IsA("Decal") or inst:IsA("Texture") then
-        if hidden then
-            if hiddenOriginals[inst] == nil then hiddenOriginals[inst] = inst.Transparency end
-            inst.Transparency = 1
-        elseif hiddenOriginals[inst] ~= nil then
-            inst.Transparency = hiddenOriginals[inst]
-            hiddenOriginals[inst] = nil
-        end
+        inst.Transparency = hidden and 1 or 0
     elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles") then
-        if hidden then
-            if hiddenOriginals[inst] == nil then hiddenOriginals[inst] = inst.Enabled end
-            inst.Enabled = false
-        elseif hiddenOriginals[inst] ~= nil then
-            inst.Enabled = hiddenOriginals[inst]
-            hiddenOriginals[inst] = nil
-        end
+        inst.Enabled = not hidden
     end
 end
 
@@ -1774,19 +1752,12 @@ local function ApplyBlackScreen(enabled)
 
     pcall(function()
         if enabled then
-            local gs = UserSettings():GetService("UserGameSettings")
-            if savedQuality == nil then
-                savedQuality = settings().Rendering.QualityLevel
-                savedSavedQuality = gs.SavedQualityLevel
-            end
+            savedQuality = settings().Rendering.QualityLevel
             settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+            local gs = UserSettings():GetService("UserGameSettings")
             gs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
         elseif savedQuality then
-            local gs = UserSettings():GetService("UserGameSettings")
             settings().Rendering.QualityLevel = savedQuality
-            if savedSavedQuality ~= nil then gs.SavedQualityLevel = savedSavedQuality end
-            savedQuality = nil
-            savedSavedQuality = nil
         end
     end)
 
@@ -3555,7 +3526,6 @@ local abilityCursor = 1
 task.spawn(function()
     while true do
         task.wait(0.5)
-        local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             local units = GetPlayerUnits()
             local now = tick()
@@ -3582,7 +3552,7 @@ task.spawn(function()
                         if cfg.upgradeTarget ~= nil and level.Value >= cfg.upgradeTarget then allowed = false end
                     end
                     if allowed then
-                        table.insert(candidates, { unit = unit, cost = GetNextUpgradeCost(unit), farm = IsFarmUnit(unit) and true or false, level = level.Value })
+                        table.insert(candidates, { unit = unit, cost = GetNextUpgradeCost(unit), farm = IsFarmUnit(unit) })
                     end
                 end
             end
@@ -3592,26 +3562,17 @@ task.spawn(function()
                 table.sort(candidates, function(a, b)
                     if farmPriority and a.farm ~= b.farm then return a.farm end
                     if a.cost ~= b.cost then return a.cost < b.cost end
-                    local aLevel = a.level
-                    local bLevel = b.level
+                    local aLevel = a.unit._stats.upgrade.Value
+                    local bLevel = b.unit._stats.upgrade.Value
                     if aLevel ~= bLevel then return aLevel < bLevel end
                     return tostring(a.unit) < tostring(b.unit)
                 end)
                 local target = candidates[1].unit
-                local targetStats = target:FindFirstChild("_stats")
-                local targetLevel = targetStats and targetStats:FindFirstChild("upgrade")
-                local levelBefore = targetLevel and targetLevel.Value or 0
-                -- Record before yielding so the unit can disappear mid-request safely.
-                pendingUpgradeRequests[target] = { level = levelBefore, time = now }
                 InvokeEndpoint("upgrade_unit_ingame", target)
+                pendingUpgradeRequests[target] = { level = target._stats.upgrade.Value, time = now }
             end
         else
             table.clear(pendingUpgradeRequests)
-        end
-        end)
-        if not upgradeOk then
-            warn("[OctoputHub] Upgrade worker error: " .. tostring(upgradeErr))
-            task.wait(1)
         end
     end
 end)
@@ -4014,12 +3975,9 @@ task.spawn(function()
     end
 end)
 
-local lastMatchmakingRequest = 0
-local lastQuestClaim = 0
 task.spawn(function()
     while true do
         task.wait(1.5)
-        local mmOk, mmErr = pcall(function()
 
         TryAutoStart()
 
@@ -4035,10 +3993,7 @@ task.spawn(function()
                     UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
                 else
                     UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
-                    if os.clock() - lastMatchmakingRequest >= 5 then
-                        lastMatchmakingRequest = os.clock()
-                        InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
-                    end
+                    InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
                 end
             elseif not matchEndHandled then
                 UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
@@ -4064,14 +4019,8 @@ task.spawn(function()
             end
         end
 
-        if State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
-            lastQuestClaim = os.clock()
+        if State.AutoEventQuests then
             InvokeEndpoint("claim_summer2_map_board_lines")
-        end
-        end)
-        if not mmOk then
-            warn("[OctoputHub] Match/Start worker error: " .. tostring(mmErr))
-            task.wait(1)
         end
     end
 end)
@@ -4081,7 +4030,6 @@ local webhookGameWasActive = false
 task.spawn(function()
     while true do
         task.wait(1)
-        local whOk, whErr = pcall(function()
         local dataFolder = workspace:FindFirstChild("_DATA")
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         local inGame = dataFolder ~= nil and gameFinished ~= nil
@@ -4101,10 +4049,6 @@ task.spawn(function()
             webhookGameWasActive = false
             webhookSent = false
             webhookCurrencyBefore = nil
-        end
-        end)
-        if not whOk then
-            warn("[OctoputHub] Webhook worker error: " .. tostring(whErr))
         end
     end
 end)
