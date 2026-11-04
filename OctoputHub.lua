@@ -132,6 +132,7 @@ local State = {
     AutoLeave = false,
 }
 
+-- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
 local BUFF_DEFS = {
     { id = "attack", label = "Attack" },
     { id = "range", label = "Range" },
@@ -378,6 +379,8 @@ HubScale.Scale = State.UIScale
 local EVENT_LEVEL_ID = "summer2_event"
 
 local function InvokeEndpoint(endpointName, ...)
+    -- Only fall back to the raw remote when the client service was not usable.
+    -- A nil return from a successful call must not trigger a second request.
     local attempted = false
     local ok, res = pcall(function(...)
         local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
@@ -447,6 +450,29 @@ local function IsFarmName(text)
         or id:find("weathergirl", 1, true)
         or id:find("weathering", 1, true)
         or id:find("weather", 1, true)) ~= nil
+end
+
+local function IsGriffithName(text)
+    local id = NormalizeName(text)
+    if id == "" then
+        return false
+    end
+    return id:find("griffith", 1, true)
+        or id:find("griffin", 1, true)
+        or id:find("femto", 1, true)
+end
+
+local function IsBuffName(text)
+    local id = NormalizeName(text)
+    if id == "" then
+        return false
+    end
+    return id:find("commander", 1, true)
+        or id:find("erwin", 1, true) -- legacy alias
+        or id:find("windsong", 1, true)
+        or id:find("wenda", 1, true) -- legacy alias
+        or id:find("elfy", 1, true)
+        or id:find("sylph", 1, true) -- evolution/name alias
 end
 
 local UnitsDataCache
@@ -538,6 +564,95 @@ local function IsFarmUnit(unit)
     return (IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)) and true or false
 end
 
+local function GetBuffChainGroupFromText(...)
+    -- Match canonical IDs and displayed/evolved names across game versions.
+    local text = ""
+    for i = 1, select("#", ...) do
+        text = text .. NormalizeName(select(i, ...))
+    end
+    if text:find("commander", 1, true) or text:find("erwin", 1, true) then
+        return "commander"
+    elseif text:find("windsong", 1, true) or text:find("wenda", 1, true)
+        or text:find("winddragon", 1, true) then
+        return "windsong"
+    elseif text:find("elfy", 1, true) or text:find("sylph", 1, true) then
+        return "elfy"
+    end
+    return nil
+end
+
+local function GetBuffChainGroup(unit)
+    if not unit then return nil end
+    local statsId = ""
+    if unit:FindFirstChild("_stats") then
+        local idValue = unit._stats:FindFirstChild("id")
+        statsId = idValue and tostring(idValue.Value) or ""
+    end
+    return GetBuffChainGroupFromText(GetUnitId(unit), statsId, unit.Name)
+end
+
+local IsGriffithReincarnation
+local function IsGriffithUnit(unit)
+    -- Count the evolved form as the same Griffith placement, even if its ID changed.
+    return IsGriffithName(GetUnitId(unit))
+        or IsGriffithName(unit and unit.Name)
+        or (IsGriffithReincarnation and IsGriffithReincarnation(unit))
+end
+
+-- Detect the evolved Griffith unit by its actual unit id/name.
+-- This is the definitive signal that the sacrifice phase has completed.
+IsGriffithReincarnation = function(unit)
+    if not unit then
+        return false
+    end
+
+    local id = GetUnitId(unit)
+    local modelName = NormalizeName(unit.Name)
+    local reincarnated = function(value)
+        local name = NormalizeName(value)
+        return (name:find("griffith", 1, true)
+                or name:find("griffin", 1, true)
+                or name:find("femto", 1, true))
+            and name:find("reincarnation", 1, true) ~= nil
+    end
+
+    if reincarnated(id) or reincarnated(modelName) then
+        return true
+    end
+
+    -- Some game versions expose the display name in stats instead of the model name.
+    local stats = unit:FindFirstChild("_stats")
+    if stats then
+        for _, key in ipairs({ "name", "display_name", "unit_name" }) do
+            local value = stats:FindFirstChild(key)
+            if value and reincarnated(value.Value) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function CanUseActiveAttack(unit)
+    if not unit or not unit:FindFirstChild("_stats") then
+        return false
+    end
+    local stats = unit._stats
+
+    local isQueued = stats:FindFirstChild("active_queued_or_using")
+    if isQueued and isQueued.Value == true then
+        return false
+    end
+
+    local lastCast = stats:FindFirstChild("last_active_cast")
+    local cd = stats:FindFirstChild("active_attack_cooldown")
+    if lastCast and cd then
+        return (tick() - lastCast.Value) >= cd.Value
+    end
+    return true
+end
+
 local function GetEquippedUnitList()
     local unitsList = {}
 
@@ -621,6 +736,28 @@ local function EnrichEquipped(list)
     return list
 end
 
+-- Detect farm units from both their displayed name and unit database metadata.
+-- Some equipped-unit records use an internal ID that does not contain the display name.
+local function IsFarmInfo(info)
+    if not info then
+        return false
+    end
+    local farmText = NormalizeName(info.name) .. NormalizeName(info.displayName) .. NormalizeName(info.unitId)
+    if IsFarmName(info.name) or IsFarmName(info.displayName) or IsFarmName(info.unitId)
+        or farmText:find("farm", 1, true) then
+        return true
+    end
+    local data = LookupUnitData(info.unitId)
+    if type(data) == "table" then
+        if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
+            or data._show_as_farm_unit == true or data.show_as_farm_unit == true
+            or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
+            return true
+        end
+    end
+    return false
+end
+
 local function GetCurrentWave()
     local waveNum = workspace:FindFirstChild("_wave_num")
     if waveNum and tonumber(waveNum.Value) then
@@ -664,8 +801,14 @@ local function CountPlacedUnit(unitId)
     return n
 end
 
+-- Match equipped units against the actual placed model using both internal IDs
+-- and display names. Some units (notably farm units with renamed/evolved IDs)
+-- do not expose the same identifier in the loadout and in workspace._UNITS.
 local function CountPlacedInfo(info)
     if not info then return 0 end
+
+    -- Use exact normalized identities only. Partial substring matching can make
+    -- one farm unit (e.g. Bulby) accidentally count as another equipped farm.
     local wanted = {}
     local function addWanted(value)
         local key = NormalizeName(value)
@@ -724,8 +867,11 @@ local function CountPlacedInfo(info)
     return count
 end
 
+-- Count a unit across the entire match, not just the local player.
+-- Some units (e.g. Windsong) use global_spawn_cap shared by the whole party.
 local function CountGlobalPlacedInfo(info)
     if not info then return 0 end
+
     local wanted = {}
     local function addWanted(value)
         local key = NormalizeName(value)
@@ -813,6 +959,8 @@ local function CanPlaceConfigured(info, wave)
         return false
     end
 
+    -- Enforce the game's shared party-wide cap before sending spawn_unit.
+    -- Returning false lets the Auto Place loop continue to the next equipped unit.
     local data = LookupUnitData(info.unitId)
     local globalCap = tonumber(info.globalSpawnCap)
         or (type(data) == "table" and tonumber(data.global_spawn_cap))
@@ -827,7 +975,19 @@ local function CanPlaceConfigured(info, wave)
         localLimit = info.spawnCap
     end
     if localLimit then
-        local placedCount = CountPlacedUnit(info.unitId)
+        -- Griffith (Reincarnation) is an evolved state of the original placement.
+        -- Count both forms together so Max Place = 1 cannot summon a second copy.
+        local placedCount
+        if IsGriffithName(info.name) or IsGriffithName(info.unitId) then
+            placedCount = 0
+            for _, placedUnit in ipairs(GetPlayerUnits()) do
+                if IsGriffithUnit(placedUnit) then
+                    placedCount = placedCount + 1
+                end
+            end
+        else
+            placedCount = CountPlacedUnit(info.unitId)
+        end
         if placedCount >= localLimit then
             return false
         end
@@ -1010,6 +1170,9 @@ local function GetPlacementCFrame(index, kind)
     end
 
     if #points >= 2 then
+        -- Keep the whole formation around one point on the actual path.
+        -- GetPointOnPolyline uses total segment length, so different map/path
+        -- lengths still place the cluster at the selected percentage.
         local center, look = GetPointOnPolyline(points, preferred)
         local right = look:Cross(Vector3.new(0, 1, 0))
         if right.Magnitude < 0.01 then
@@ -1024,6 +1187,9 @@ local function GetPlacementCFrame(index, kind)
             forward = forward.Unit
         end
 
+        -- Hexagonal cluster: neighboring slots are 3.8 studs apart.
+        -- PlacementIsClear still enforces the game's existing 3.4-stud
+        -- minimum-distance check and terrain / road restrictions.
         local spacing = 3.8
         local offsets = { Vector2.new(0, 0) }
         local maxRing = 5
@@ -1047,6 +1213,8 @@ local function GetPlacementCFrame(index, kind)
             end
         end
 
+        -- Prefer this unit's stable slot. If terrain, road, or an existing
+        -- unit blocks it, try the remaining nearby cluster slots.
         local preferredSlot = ((math.max(1, math.floor(index)) - 1) % #offsets) + 1
         for pass = 1, #offsets do
             local slot = ((preferredSlot + pass - 2) % #offsets) + 1
@@ -1060,6 +1228,8 @@ local function GetPlacementCFrame(index, kind)
         return nil
     end
 
+    -- Preserve the previous fallback for maps where lane path points
+    -- are not exposed by the client.
     local char = player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then
@@ -1072,15 +1242,20 @@ local function GetPlacementCFrame(index, kind)
     return Finish(finalPos, hrp.CFrame.LookVector)
 end
 
+-- Farm units can be ground or hill units depending on the game's unit data.
+-- If the unit database lookup misses an entry, try every valid placement surface
+-- instead of silently skipping the farm because the guessed surface was wrong.
 local function GetPlacementCFrameForInfo(index, info)
     local primary = ResolvePlacementKind(info and info.unitId)
     local kinds = { primary }
-    for _, candidate in ipairs({ "ground", "hill", "hybrid" }) do
-        local exists = false
-        for _, current in ipairs(kinds) do
-            if current == candidate then exists = true break end
+    if IsFarmInfo(info) then
+        for _, candidate in ipairs({ "ground", "hill", "hybrid" }) do
+            local exists = false
+            for _, current in ipairs(kinds) do
+                if current == candidate then exists = true break end
+            end
+            if not exists then table.insert(kinds, candidate) end
         end
-        if not exists then table.insert(kinds, candidate) end
     end
     for _, kind in ipairs(kinds) do
         local cf = GetPlacementCFrame(index, kind)
@@ -1107,6 +1282,53 @@ local function ReadNumberValue(container, keywords)
         end
     end
     return nil
+end
+
+local function GetGriffithSacrificePercent(unit)
+    if not unit then
+        return 0
+    end
+    local id = GetUnitId(unit)
+    if id == "femto" or id:find("femtoegg", 1, true) then
+        return 100
+    end
+
+    local keys = { "sacrifice", "eclipse", "unique", "charge", "meter", "percent", "stack" }
+    local fromStats = ReadNumberValue(unit:FindFirstChild("_stats"), keys)
+    if fromStats then
+        if fromStats <= 1 then
+            return fromStats * 100
+        end
+        return math.clamp(fromStats, 0, 100)
+    end
+    local fromBuffs = ReadNumberValue(unit:FindFirstChild("_buffs"), keys)
+    if fromBuffs then
+        if fromBuffs <= 1 then
+            return fromBuffs * 100
+        end
+        return math.clamp(fromBuffs, 0, 100)
+    end
+
+    for _, gui in ipairs(unit:GetDescendants()) do
+        if gui:IsA("TextLabel") or gui:IsA("TextButton") then
+            local text = tostring(gui.Text or "")
+            local pct = text:match("(%d+)%s*%%")
+            if pct then
+                return math.clamp(tonumber(pct) or 0, 0, 100)
+            end
+        end
+    end
+    return 0
+end
+
+local function CountCategory(myUnits, pred)
+    local n = 0
+    for _, u in ipairs(myUnits) do
+        if pred(u) then
+            n = n + 1
+        end
+    end
+    return n
 end
 
 local function HttpPost(url, body)
@@ -1259,6 +1481,7 @@ local function SendEndWebhook()
         return
     end
 
+    -- Allow the game's result/reward updates to reach the player's stats first.
     task.wait(2)
     local data = workspace:FindFirstChild("_DATA")
     local result = "Ended"
@@ -1293,7 +1516,6 @@ local function SendEndWebhook()
     })
     pcall(HttpPost, url, body)
 end
-
 local function IsGoodEffectColor(color)
     return color and color.G > 0.55 and color.R < 0.45 and color.B < 0.55
 end
@@ -2122,6 +2344,15 @@ CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
 CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
 
+
+-- Compact inline Auto Buff Delay Settings (inside a small frame under Auto Buff 100%).
+local function SetBuffDelay(group, index, value)
+    local number = tonumber(value)
+    if not number or number < 0 or number > 30 then return end
+    State.BuffDelays[group][index] = number
+    SaveConfig()
+end
+
 local DelayContainer = Instance.new("Frame")
 DelayContainer.Name = "AutoBuffDelayContainer"
 DelayContainer.Size = UDim2.new(1, -10, 0, 30)
@@ -2146,6 +2377,7 @@ local DelayButtonCorner = Instance.new("UICorner")
 DelayButtonCorner.CornerRadius = UDim.new(0, 6)
 DelayButtonCorner.Parent = DelayOpenButton
 
+-- This is an inline expandable frame, not a screen overlay or separate window.
 local DelayInlineFrame = Instance.new("Frame")
 DelayInlineFrame.Name = "AutoBuffDelayInlineFrame"
 DelayInlineFrame.Position = UDim2.new(0, 0, 0, 34)
@@ -2248,8 +2480,7 @@ local function CreateDelayGroupRow(groupKey, groupTitle, order)
         Input.FocusLost:Connect(function()
             local value = tonumber(Input.Text)
             if value and value >= 0 and value <= 30 then
-                State.BuffDelays[groupKey][unitIndex] = value
-                SaveConfig()
+                SetBuffDelay(groupKey, unitIndex, value)
                 Input.Text = tostring(value)
             else
                 Input.Text = tostring(State.BuffDelays[groupKey][unitIndex])
@@ -2262,12 +2493,27 @@ CreateDelayGroupRow("commander", "Commander", 1)
 CreateDelayGroupRow("windsong", "Windsong", 2)
 CreateDelayGroupRow("elfy", "Elfy (Sylph)", 3)
 
+local DelayInlineFooter = Instance.new("TextLabel")
+DelayInlineFooter.Size = UDim2.new(1, -16, 0, 14)
+DelayInlineFooter.Position = UDim2.new(0, 8, 1, -16)
+DelayInlineFooter.BackgroundTransparency = 1
+DelayInlineFooter.Text = "บันทึกอัตโนมัติเมื่อกด Enter หรือคลิกออกจากช่อง"
+DelayInlineFooter.TextColor3 = Color3.fromRGB(115, 125, 145)
+DelayInlineFooter.TextSize = 9
+DelayInlineFooter.Font = Enum.Font.Gotham
+DelayInlineFooter.TextXAlignment = Enum.TextXAlignment.Left
+DelayInlineFooter.ZIndex = 14
+DelayInlineFooter.Parent = DelayInlineFrame
+
 local DelaySettingsExpanded = false
+local function SetDelaySettingsExpanded(expanded)
+    DelaySettingsExpanded = expanded
+    DelayInlineFrame.Visible = expanded
+    DelayContainer.Size = UDim2.new(1, -10, 0, expanded and 192 or 30)
+    DelayOpenButton.Text = expanded and "⚙  Auto Buff Delay Settings  ▴" or "⚙  Auto Buff Delay Settings  ▾"
+end
 DelayOpenButton.MouseButton1Click:Connect(function()
-    DelaySettingsExpanded = not DelaySettingsExpanded
-    DelayInlineFrame.Visible = DelaySettingsExpanded
-    DelayContainer.Size = UDim2.new(1, -10, 0, DelaySettingsExpanded and 192 or 30)
-    DelayOpenButton.Text = DelaySettingsExpanded and "⚙  Auto Buff Delay Settings  ▴" or "⚙  Auto Buff Delay Settings  ▾"
+    SetDelaySettingsExpanded(not DelaySettingsExpanded)
 end)
 
 CreateSection(AutoPlayPage, "Hybrid Units", 22)
@@ -2623,6 +2869,7 @@ end
 local eventAutomationStopped = false
 
 CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
+    -- Manually toggling Auto Find Match back on resumes event automation.
     eventAutomationStopped = false
     if isON then
         UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70))
@@ -2686,6 +2933,7 @@ CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, funct
     ApplyBlackScreen(isON)
 end)
 CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, function(isON)
+    -- This setting is saved and takes effect on the next script execution.
 end)
 CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 3, 34)
 CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 4, 50, 150, function()
@@ -2712,6 +2960,28 @@ local function GetBuffChainCooldown(units, index)
     return 60
 end
 
+local function GetBuffChainCurseOffset(units)
+    -- Legacy SPA-derived offset retained as a fallback/reference for diagnostics.
+    local unit = units and units[1]
+    local stats = unit and unit:FindFirstChild("_stats")
+    if stats then
+        local candidates = {
+            "attack_cooldown", "base_attack_cooldown",
+            "cooldown", "spa", "base_spa"
+        }
+        for _, name in ipairs(candidates) do
+            local value = stats:FindFirstChild(name)
+            local number = value and tonumber(value.Value)
+            if number and number > 0 then
+                return math.clamp(math.floor(number) % 10, 3, 7)
+            end
+        end
+        -- Some versions expose only the active cooldown. Do not derive SPA
+        -- from that value; use a conservative 5s offset if SPA is unavailable.
+    end
+    return 5
+end
+
 local function GetConfiguredBuffDelay(groupName, nextUnitIndex)
     local group = State.BuffDelays and State.BuffDelays[groupName]
     local value = group and tonumber(group[nextUnitIndex])
@@ -2729,6 +2999,9 @@ end
 local farmStall = { count = 0, lastChange = 0 }
 local matchEndHandled = false
 
+-- Farm-first means all placed farm units must reach their configured upgrade
+-- target before Auto Place spends resources on Griffith, buffers, or attackers.
+-- The upgrade worker above remains responsible for performing the upgrades.
 local function HasPendingFarmUpgrade(myUnits)
     for _, unit in ipairs(myUnits or {}) do
         if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
@@ -2749,7 +3022,6 @@ local function HasPendingFarmUpgrade(myUnits)
     end
     return false
 end
-
 local votedStart = false
 local lastVoteAttempt = 0
 local lobbyStartSent = false
@@ -2792,6 +3064,19 @@ local function NextActionAvailable()
     return nil
 end
 
+local function FireGuiButton(button)
+    if not button then
+        return
+    end
+    if typeof(firesignal) == "function" then
+        firesignal(button.MouseButton1Click)
+    elseif typeof(getconnections) == "function" then
+        for _, connection in ipairs(getconnections(button.MouseButton1Click)) do
+            connection:Fire()
+        end
+    end
+end
+
 local function GetCurrentLobbyId()
     local lobbyId = nil
     pcall(function()
@@ -2814,6 +3099,9 @@ local function RequestLobbyStart(lobbyId)
     if lobbyId == nil or lobbyId == "" then
         return false
     end
+
+    -- Match the game's own Start button handler:
+    -- EndpointsClient.invoke_server("request_start_game", LobbyServiceClient.current_lobby)
     local ok, result = pcall(function()
         local loaderModule = ReplicatedStorage:FindFirstChild("src")
             and ReplicatedStorage.src:FindFirstChild("Loader")
@@ -2830,6 +3118,7 @@ local function RequestLobbyStart(lobbyId)
         return result ~= false
     end
 
+    -- Fallback to the game's client-to-server endpoint if the service wrapper is unavailable.
     local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
     local clientToServer = endpoints and endpoints:FindFirstChild("client_to_server")
     local remote = clientToServer and clientToServer:FindFirstChild("request_start_game")
@@ -2857,6 +3146,8 @@ local function TryAutoStart()
         return
     end
 
+    -- The game's MapSelectGui Start button is the authoritative lobby-start state.
+    -- Do not rely on workspace lobby markers, which can be present outside the active lobby UI.
     local mapGui = playerGui:FindFirstChild("MapSelectGui")
     local buttons = mapGui and mapGui:FindFirstChild("Buttons")
     local startBtn = buttons and buttons:FindFirstChild("Start")
@@ -2900,6 +3191,8 @@ local function TryAutoStart()
     local voteFolder = data and data:FindFirstChild("VoteStart")
     local finished = voteFolder and voteFolder:FindFirstChild("VotingFinished")
 
+    -- The vote is open while the server says VotingFinished == false. The Yes button
+    -- GUI can be hidden or its signal not hookable by the executor, so do not depend on it.
     local open
     if finished then
         open = finished.Value == false
@@ -2908,6 +3201,8 @@ local function TryAutoStart()
     end
 
     if open then
+        -- The game's own Yes button only calls EndpointsClient.invoke_server("vote_start"),
+        -- so send that directly and retry every 2s until the vote closes.
         if os.clock() - lastVoteAttempt >= 2 then
             lastVoteAttempt = os.clock()
             InvokeEndpoint("vote_start")
@@ -2929,6 +3224,9 @@ local function HandleMatchEnd(gameFinished)
         return
     end
 
+    -- Priority: Main tab controls always win over Event tab automation.
+    -- Main order: Next (when available) > Main Replay > Main Leave.
+    -- Event Replay is only a fallback when no Main action is selected.
     local nextKind = State.AutoNext and NextActionAvailable() or nil
     local mainActionSelected = State.AutoNext or State.MainAutoReplay or State.AutoLeave
     local action = nil
@@ -2973,8 +3271,13 @@ local function HandleMatchEnd(gameFinished)
                 end
             end
         elseif action == "leave" then
+            -- Leave the finished Event match, but keep Auto Find Match enabled.
+            -- Once the player is back in the lobby, the matchmaking worker below
+            -- will detect the lobby state and queue the next Event automatically.
             eventAutomationStopped = false
             UpdateEventStatus("Leaving Match... (Auto Queue Will Resume In Lobby)", Color3.fromRGB(255, 100, 100))
+
+            -- Retry the leave request in case the first endpoint call is ignored.
             for attempt = 1, 3 do
                 if not gameFinished.Parent or gameFinished.Value ~= true then
                     break
@@ -2994,6 +3297,8 @@ if State.BlackScreen then
 end
 RefreshUnitConfigUI()
 
+-- Estimate the next upgrade price from live unit stats first, then unit data.
+-- Unknown prices sort last instead of being mistaken for free upgrades.
 local function GetNextUpgradeCost(unit)
     if not unit or not unit:FindFirstChild("_stats") then return math.huge end
     local stats = unit._stats
@@ -3030,12 +3335,14 @@ end
 local pendingUpgradeRequests = {}
 local pendingSpawnRequests = {}
 
+-- In-game cash (same value the game HUD uses for upgrade/placement affordability).
 local function GetInGameCash()
     local stats = player:FindFirstChild("_stats")
     local resource = stats and stats:FindFirstChild("resource")
     return resource and tonumber(resource.Value) or nil
 end
 
+-- Cheapest next upgrade among farm units that still have farm upgrades pending.
 local function GetNextFarmUpgradeCost(myUnits)
     local best = nil
     for _, unit in ipairs(myUnits or {}) do
@@ -3059,6 +3366,9 @@ local function GetNextFarmUpgradeCost(myUnits)
     return best
 end
 
+-- Auto Use Ability rotation. Units take turns in a fixed order and casts are spaced
+-- by (cooldown / number of units), so a 3-unit or 4-unit squad completes exactly one
+-- full loop per cooldown. Readiness also honours the game's global cooldowns.
 local AbilityRotation = {
     cursor = 1,
     lastCast = 0,
@@ -3087,6 +3397,7 @@ function AbilityRotation.Modules()
     return AbilityRotation.modules or nil
 end
 
+-- Returns hasActive, ready, remainingSeconds
 function AbilityRotation.Status(unit)
     local stats = unit and unit:FindFirstChild("_stats")
     if not stats then return false, false, nil end
@@ -3105,6 +3416,7 @@ function AbilityRotation.Status(unit)
             return true, false, tonumber(remaining)
         end
     end
+    -- Fallback: own cooldown stats only.
     local cd = stats:FindFirstChild("active_attack_cooldown")
     local last = stats:FindFirstChild("last_active_cast")
     if not cd then return false, false, nil end
@@ -3161,6 +3473,8 @@ function AbilityRotation.Step(units)
         return
     end
 
+    -- Keep strict order: wait for this unit unless it is far from ready or has
+    -- been blocked for too long, then move on so one stuck unit cannot freeze the loop.
     AbilityRotation.waitingSince = AbilityRotation.waitingSince or now
     local maxWait = math.max(averageCooldown, 5)
     if (remaining and remaining > maxWait) or (now - AbilityRotation.waitingSince) > maxWait + 2 then
@@ -3169,6 +3483,7 @@ function AbilityRotation.Step(units)
     end
 end
 
+-- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
         task.wait(0.5)
@@ -3218,6 +3533,7 @@ task.spawn(function()
                 local targetStats = target:FindFirstChild("_stats")
                 local targetLevel = targetStats and targetStats:FindFirstChild("upgrade")
                 local levelBefore = targetLevel and targetLevel.Value or 0
+                -- Record before yielding so the unit can disappear mid-request safely.
                 pendingUpgradeRequests[target] = { level = levelBefore, time = now }
                 InvokeEndpoint("upgrade_unit_ingame", target)
             end
@@ -3226,6 +3542,7 @@ task.spawn(function()
         end
         end)
         if not upgradeOk then
+            warn("[OctoputHub] Upgrade worker error: " .. tostring(upgradeErr))
             task.wait(1)
         end
     end
@@ -3249,6 +3566,8 @@ task.spawn(function()
             if State.AutoPlace then
                 local equipped = EnrichEquipped(GetEquippedUnitList())
                 if #equipped > 0 then
+                    -- Auto Upgrade Farm First: other units may only be placed with money
+                    -- left over after the next farm upgrade is covered.
                     local farmReserve = 0
                     local currentCash = nil
                     if State.AutoUpgradeFarmFirst then
@@ -3256,7 +3575,10 @@ task.spawn(function()
                         if farmReserve > 0 then currentCash = GetInGameCash() end
                     end
 
+                    -- Only consider units we can currently afford, so an expensive unit
+                    -- never blocks cheaper ones from being placed.
                     local cashNow = GetInGameCash()
+
                     local eligible = {}
                     local now = tick()
                     for uuid, pending in pairs(pendingSpawnRequests) do
@@ -3273,7 +3595,7 @@ task.spawn(function()
                     for _, unitInfo in ipairs(equipped) do
                         local uuidKey = tostring(unitInfo.uuid or "")
                         local farmUpgradeAllowsPlacement = true
-                        if farmUpgradeAllowsPlacement and farmReserve > 0 and not IsFarmUnit(unitInfo) then
+                        if farmUpgradeAllowsPlacement and farmReserve > 0 and not IsFarmInfo(unitInfo) then
                             local unitCost = tonumber(unitInfo.cost) or 0
                             if currentCash ~= nil and currentCash - unitCost < farmReserve then
                                 farmUpgradeAllowsPlacement = false
@@ -3290,6 +3612,8 @@ task.spawn(function()
                         end
                     end
 
+                    -- First guarantee one placement for every equipped unit type; after
+                    -- that, randomly fill remaining allowed copies until each cap is met.
                     if #missingFirst > 0 then eligible = missingFirst end
                     if #eligible > 0 then
                         local chosen = eligible[math.random(1, #eligible)]
@@ -3312,7 +3636,12 @@ task.spawn(function()
             end
 
             if State.AutoBuffChain and #myUnits > 0 then
-                local groups = { commander = {}, windsong = {}, elfy = {} }
+                local groups = {
+                    commander = {},
+                    windsong = {},
+                    elfy = {},
+                }
+
                 for _, u in ipairs(myUnits) do
                     local g = GetBuffChainGroup(u)
                     if g and groups[g] then
@@ -3320,6 +3649,9 @@ task.spawn(function()
                     end
                 end
 
+                -- Activate buffs only for equipped groups, and wait until each
+                -- equipped group has four placed copies. Groups not equipped by the
+                -- player are ignored completely and cannot block the rotation.
                 local requiredBuffGroups = {}
                 local equippedBuffs = EnrichEquipped(GetEquippedUnitList())
                 for _, info in ipairs(equippedBuffs) do
@@ -3337,8 +3669,13 @@ task.spawn(function()
 
                 local now = tick()
                 if allRequiredBuffGroupsReady and next(requiredBuffGroups) ~= nil then
+                    -- Rotate ONLY buff groups that are currently equipped by this player.
+                    -- A disabled/unowned group must never be treated as a requirement or
+                    -- receive casts just because four matching units happen to be present.
                     for groupName in pairs(requiredBuffGroups) do
                         local allUnits = groups[groupName] or {}
+                        -- Cursed 100% method uses four copies of the SAME buffer.
+                        -- Extra copies are left untouched by this rotation.
                         local units = {}
                         for i = 1, math.min(4, #allUnits) do
                             table.insert(units, allUnits[i])
@@ -3377,11 +3714,17 @@ task.spawn(function()
                                         chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 4)
                                         chain.phase = 4
                                     else
-                                        chain.nextCastAt = chain.cycleStart + GetBuffChainCooldown(units, 1)
+                                        -- Start the next cycle when unit 1 is genuinely ready again.
+                                        chain.nextCastAt = chain.cycleStart
+                                            + GetBuffChainCooldown(units, 1)
                                         chain.phase = 1
                                     end
 
-                                    UpdateAutoPlayStatus("Cursed Buff Rotation: " .. groupName .. " " .. tostring(phase) .. "/4", Color3.fromRGB(100, 255, 100))
+                                    UpdateAutoPlayStatus(
+                                        "Cursed Buff Rotation: " .. groupName
+                                            .. " " .. tostring(phase) .. "/4",
+                                        Color3.fromRGB(100, 255, 100)
+                                    )
                                 end
                             end
                         else
@@ -3392,11 +3735,18 @@ task.spawn(function()
                         end
                     end
                 else
+                    -- Keep every rotation idle until all required groups reach 4 units.
                     for _, chain in pairs(BuffChains) do
                         chain.unitOrder = {}
                         chain.phase = 1
                         chain.cycleStart = 0
                         chain.nextCastAt = 0
+                    end
+                    if next(requiredBuffGroups) ~= nil then
+                        UpdateAutoPlayStatus(
+                            "Waiting for equipped buff groups (4 each)",
+                            Color3.fromRGB(255, 190, 80)
+                        )
                     end
                 end
             end
@@ -3419,6 +3769,10 @@ task.spawn(function()
         end
         end)
         if not workerOk then
+            -- Keep the automation loop alive if one game-state read fails.
+            pcall(function()
+                UpdateAutoPlayStatus("Auto Place Worker Error: " .. tostring(workerError), Color3.fromRGB(255, 100, 100))
+            end)
             task.wait(0.5)
         end
     end
@@ -3430,6 +3784,7 @@ task.spawn(function()
     while true do
         task.wait(1.5)
         local mmOk, mmErr = pcall(function()
+
         TryAutoStart()
 
         local dataFolder = workspace:FindFirstChild("_DATA")
@@ -3439,6 +3794,7 @@ task.spawn(function()
         if State.AutoFindMatch and not eventAutomationStopped then
             if IsInLobby() then
                 HandlePopups()
+
                 if IsMatchmaking() then
                     UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
                 else
@@ -3478,6 +3834,7 @@ task.spawn(function()
         end
         end)
         if not mmOk then
+            warn("[OctoputHub] Match/Start worker error: " .. tostring(mmErr))
             task.wait(1)
         end
     end
@@ -3511,6 +3868,7 @@ task.spawn(function()
         end
         end)
         if not whOk then
+            warn("[OctoputHub] Webhook worker error: " .. tostring(whErr))
         end
     end
 end)
@@ -3521,6 +3879,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
+-- Hide only the hub window after every feature, connection and hotkey is initialized.
+-- Automation continues running in the background; Right Shift reopens the GUI.
 if State.AutoHideGUIOnExecute then
     MainFrame.Visible = false
 end
