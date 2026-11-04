@@ -1339,8 +1339,36 @@ local function GetResultDetails()
 end
 
 local webhookCurrencyBefore = nil
+local webhookSecretPortalBefore = nil
+
+-- The game data identifies the Summer Hunt Secret Portal as
+-- portal_summer2_secret (display name: Explosion Mage's Portal).
+local function ReadSecretPortalCount()
+    local ok, count = pcall(function()
+        local srcFolder = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = srcFolder and srcFolder:FindFirstChild("Loader")
+        if not loaderModule then return nil end
+
+        local Loader = require(loaderModule)
+        local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
+        local session = inventoryService and inventoryService.session
+        local inventory = session and session.inventory
+        if not inventory or type(inventory.get_number_of_owned_item) ~= "function" then
+            return nil
+        end
+
+        return inventory:get_number_of_owned_item("portal_summer2_secret")
+    end)
+
+    if ok then
+        return tonumber(count)
+    end
+    return nil
+end
+
 local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
+    webhookSecretPortalBefore = ReadSecretPortalCount()
 end
 
 local function SendEndWebhook()
@@ -1372,15 +1400,31 @@ local function SendEndWebhook()
         result = resultDetails.result .. " | " .. result
     end
 
+    local embed = {
+        title = "Stage Ended — " .. tostring(level),
+        description = string.format("**Player:** %s\n**Result:** %s\n\n**Currency (Before → After | Change)**\n%s",
+            player.Name, result, currencyText),
+        color = result:find("Victory", 1, true) and 5763719 or 15548997,
+        timestamp = DateTime.now():ToIsoDate(),
+    }
+
+    -- Only announce a Secret Portal when the owned count increased during this match.
+    local secretPortalAfter = ReadSecretPortalCount()
+    local secretPortalGained = nil
+    if webhookSecretPortalBefore ~= nil and secretPortalAfter ~= nil then
+        secretPortalGained = math.max(0, secretPortalAfter - webhookSecretPortalBefore)
+    end
+    if secretPortalGained and secretPortalGained > 0 then
+        embed.fields = {{
+            name = "✨ SECRET PORTAL RECEIVED!",
+            value = string.format("**Explosion Mage's Portal** x%d\nRarity: **Secret**", secretPortalGained),
+            inline = false,
+        }}
+    end
+
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
-        embeds = {{
-            title = "Stage Ended — " .. tostring(level),
-            description = string.format("**Player:** %s\n**Result:** %s\n\n**Currency (Before → After | Change)**\n%s",
-                player.Name, result, currencyText),
-            color = result:find("Victory", 1, true) and 5763719 or 15548997,
-            timestamp = DateTime.now():ToIsoDate(),
-        }},
+        embeds = {embed},
     })
     pcall(HttpPost, url, body)
 end
@@ -1743,7 +1787,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local SwitchBtn = Instance.new("TextButton")
     SwitchBtn.Size = UDim2.new(0, 44, 0, 22)
     SwitchBtn.Position = UDim2.new(1, -54, 0.5, -11)
-    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
+    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
     SwitchBtn.Text = ""
     SwitchBtn.ZIndex = 13
     SwitchBtn.Parent = ToggleContainer
@@ -1770,7 +1814,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
 
         local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
         if isON then
-            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(210, 70, 170) }):Play()
+            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(0, 168, 255) }):Play()
             TweenService:Create(Indicator, tweenInfo, { Position = UDim2.new(1, -19, 0.5, -8) }):Play()
         else
             TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(45, 45, 58) }):Play()
@@ -1845,7 +1889,7 @@ end
 local function CreateButton(parent, title, layoutOrder, onClick)
     local Button = Instance.new("TextButton")
     Button.Size = UDim2.new(1, -10, 0, 36)
-    Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+    Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
     Button.Text = title
     Button.TextColor3 = Color3.fromRGB(255, 255, 255)
     Button.TextSize = 13
@@ -1905,7 +1949,7 @@ local function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, ma
 
     local Fill = Instance.new("Frame")
     Fill.Name = "Fill"
-    Fill.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+    Fill.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
     Fill.BorderSizePixel = 0
     Fill.ZIndex = 14
     Fill.Parent = Bar
@@ -2075,7 +2119,7 @@ local function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutO
             local Box = Instance.new("TextButton")
             Box.Size = UDim2.new(0, 18, 0, 18)
             Box.Position = UDim2.new(0, 8, 0.5, -9)
-            Box.BackgroundColor3 = rank and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
+            Box.BackgroundColor3 = rank and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
             Box.Text = rank and "✓" or ""
             Box.TextColor3 = Color3.fromRGB(255, 255, 255)
             Box.TextSize = 12
@@ -2160,7 +2204,7 @@ local WebhookPage = CreateTab("Webhook", 4)
 local MiscPage = CreateTab("Misc", 5)
 
 tabs["Auto Play"].Page.Visible = true
-tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 tabs["Auto Play"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 
 CreateHint(MainPage, "When a match ends: Next runs if it is enabled and a next stage is available. Otherwise Replay runs if it is enabled. Otherwise Leave runs if it is enabled.", 0, 44)
@@ -3321,6 +3365,7 @@ task.spawn(function()
             webhookGameWasActive = false
             webhookSent = false
             webhookCurrencyBefore = nil
+            webhookSecretPortalBefore = nil
         end
         end)
         if not whOk then
