@@ -3245,6 +3245,7 @@ local function HasPendingFarmUpgrade(myUnits)
     return false
 end
 local votedStart = false
+local lastVoteAttempt = 0
 local lobbyStartSent = false
 local lastLobbyStartAttempt = 0
 local unitRefreshClock = 0
@@ -3361,6 +3362,7 @@ end
 local function TryAutoStart()
     if not State.AutoStart then
         votedStart = false
+        lastVoteAttempt = 0
         lobbyStartSent = false
         lastLobbyStartAttempt = 0
         return
@@ -3410,21 +3412,28 @@ local function TryAutoStart()
     local data = workspace:FindFirstChild("_DATA")
     local voteFolder = data and data:FindFirstChild("VoteStart")
     local finished = voteFolder and voteFolder:FindFirstChild("VotingFinished")
-    local open = voteGui and voteGui.Enabled and (not finished or finished.Value == false)
+
+    -- The vote is open while the server says VotingFinished == false. The Yes button
+    -- GUI can be hidden or its signal not hookable by the executor, so do not depend on it.
+    local open
+    if finished then
+        open = finished.Value == false
+    else
+        open = voteGui ~= nil and voteGui.Enabled == true
+    end
+
     if open then
-        if not votedStart then
+        -- The game's own Yes button only calls EndpointsClient.invoke_server("vote_start"),
+        -- so send that directly and retry every 2s until the vote closes.
+        if os.clock() - lastVoteAttempt >= 2 then
+            lastVoteAttempt = os.clock()
+            InvokeEndpoint("vote_start")
             votedStart = true
-            local yes = voteGui:FindFirstChild("Holder")
-                and voteGui.Holder:FindFirstChild("ButtonHolder")
-                and voteGui.Holder.ButtonHolder:FindFirstChild("Yes")
-            if yes then
-                FireGuiButton(yes)
-            else
-                InvokeEndpoint("vote_start")
-            end
+            UpdateAutoPlayStatus("Auto Start: Vote Sent", Color3.fromRGB(70, 200, 255))
         end
     else
         votedStart = false
+        lastVoteAttempt = 0
     end
 end
 
