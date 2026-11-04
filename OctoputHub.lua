@@ -439,10 +439,10 @@ local function GetUnitsData()
     end)
     if ok and type(data) == "table" then
         UnitsDataCache = data
-    else
-        UnitsDataCache = {}
+        return UnitsDataCache
     end
-    return UnitsDataCache
+    -- Retry on later lobby refreshes if ReplicatedStorage has not loaded Units yet.
+    return {}
 end
 
 local function LookupUnitData(unitId)
@@ -503,30 +503,93 @@ local function GetPlayerUnits()
 end
 
 local function IsFarmUnit(unit)
-    if not unit then
-        return false
+    if not unit then return false end
+    local stats = unit:FindFirstChild("_stats")
+    local ids = {}
+    local function add(value)
+        if value ~= nil and tostring(value) ~= "" then table.insert(ids, tostring(value)) end
     end
-    local unitData = LookupUnitData(GetRawUnitId(unit))
-    if type(unitData) == "table" and type(unitData.tags) == "table" then
-        for _, tag in ipairs(unitData.tags) do
-            if tostring(tag):lower() == "farm" then return true end
+    add(GetRawUnitId(unit))
+    add(GetUnitId(unit))
+    add(unit.Name)
+    if stats then
+        for _, fieldName in ipairs({ "unit_id", "unitId", "name", "display_name", "unit_name" }) do
+            local field = stats:FindFirstChild(fieldName)
+            if field then add(field.Value) end
+        end
+        if stats:FindFirstChild("farm_amount") then return true end
+        local showFarm = stats:FindFirstChild("_show_as_farm_unit")
+        if showFarm and showFarm.Value == true then return true end
+    end
+
+    -- Match every known identifier against the canonical unit database. Some
+    -- evolved/renamed models do not keep the same _stats.id as their loadout.
+    for _, id in ipairs(ids) do
+        local data = LookupUnitData(id)
+        if type(data) == "table" then
+            if type(data.tags) == "table" then
+                for _, tag in pairs(data.tags) do
+                    if tostring(tag):lower() == "farm" then return true end
+                end
+            end
+            if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
+                or data._show_as_farm_unit == true or data.show_as_farm_unit == true
+                or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
+                return true
+            end
+            if type(data.end_of_wave) == "table" then
+                for _, effect in pairs(data.end_of_wave) do
+                    if type(effect) == "table" and tostring(effect.type):lower() == "farm" then
+                        return true
+                    end
+                end
+            end
         end
     end
-    if unit:FindFirstChild("_stats") then
-        if unit._stats:FindFirstChild("farm_amount") then
-            return true
-        end
-        local showFarm = unit._stats:FindFirstChild("_show_as_farm_unit")
-        if showFarm and showFarm.Value == true then
-            return true
-        end
+    for _, id in ipairs(ids) do
+        if IsFarmName(id) then return true end
     end
-    return (IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)) and true or false
+    return false
 end
 
 local function GetEquippedUnitList()
-    local unitsList = {}
+    local unitsByUuid = {}
 
+    -- Prefer the game's collection service: it works in the lobby before the
+    -- in-match spawn GUI has finished creating its unit frames.
+    pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+        if ucs and ucs.get_equipped_units then
+            local equipped = ucs.get_equipped_units()
+            if type(equipped) == "table" then
+                for slot, uuid in pairs(equipped) do
+                    if uuid ~= nil then
+                        local item = nil
+                        if ucs.get_equipped_unit_by_uuid then
+                            item = ucs.get_equipped_unit_by_uuid(uuid)
+                        end
+                        local unitId = type(item) == "table" and (item.unit_id or item.unitId or item.id) or nil
+                        local data = unitId and LookupUnitData(unitId) or nil
+                        local displayName = type(item) == "table" and (item.name or item.display_name or item.displayName) or nil
+                        if (not displayName or displayName == "") and type(data) == "table" then
+                            displayName = data.name
+                        end
+                        unitsByUuid[tostring(uuid)] = {
+                            uuid = uuid,
+                            cost = type(data) == "table" and tonumber(data.cost) or 0,
+                            name = displayName or unitId or "Unit",
+                            unitId = unitId,
+                            slot = tostring(slot),
+                        }
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Merge GUI slot data as a fallback/refresh source, without discarding the
+    -- service's canonical unit IDs when the GUI text is still loading.
     local spawnGui = playerGui:FindFirstChild("spawn_units")
     local frame = spawnGui and spawnGui:FindFirstChild("Lives") and spawnGui.Lives:FindFirstChild("Frame")
     local unitsGrid = frame and frame:FindFirstChild("Units")
@@ -534,38 +597,26 @@ local function GetEquippedUnitList()
         for _, slotFrame in ipairs(unitsGrid:GetChildren()) do
             local uuid = slotFrame:GetAttribute("_equipped_frame_unit_uuid")
             if uuid then
-                local cost = 0
-                if slotFrame:FindFirstChild("Cost") and slotFrame.Cost:FindFirstChild("text") then
-                    cost = tonumber(slotFrame.Cost.text.Text) or 0
-                end
-                local unitName = slotFrame:FindFirstChild("name") and slotFrame.name.Text or "Unit"
-                table.insert(unitsList, {
-                    uuid = uuid,
-                    cost = cost,
-                    name = unitName,
-                    slot = slotFrame.Name
-                })
+                local key = tostring(uuid)
+                local existing = unitsByUuid[key] or { uuid = uuid, slot = slotFrame.Name }
+                local guiName = slotFrame:FindFirstChild("name") and slotFrame.name.Text or nil
+                local guiCost = slotFrame:FindFirstChild("Cost") and slotFrame.Cost:FindFirstChild("text")
+                    and tonumber(slotFrame.Cost.text.Text) or nil
+                if guiName and guiName ~= "" and guiName ~= "Unit" then existing.name = guiName end
+                if guiCost then existing.cost = guiCost end
+                existing.slot = slotFrame.Name
+                unitsByUuid[key] = existing
             end
         end
     end
 
-    if #unitsList == 0 then
-        pcall(function()
-            local Loader = require(ReplicatedStorage.src.Loader)
-            local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
-            if ucs and ucs.get_equipped_units then
-                for slot, uuid in pairs(ucs.get_equipped_units()) do
-                    table.insert(unitsList, {
-                        uuid = uuid,
-                        cost = 0,
-                        name = "Unit",
-                        slot = tostring(slot)
-                    })
-                end
-            end
-        end)
+    local unitsList = {}
+    for _, info in pairs(unitsByUuid) do
+        table.insert(unitsList, info)
     end
-
+    table.sort(unitsList, function(a, b)
+        return tostring(a.slot) < tostring(b.slot)
+    end)
     return unitsList
 end
 
@@ -578,8 +629,8 @@ local function EnrichEquipped(list)
                 local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
                 if ucs and ucs.get_equipped_unit_by_uuid then
                     local owned = ucs.get_equipped_unit_by_uuid(info.uuid)
-                    if owned and owned.unit_id then
-                        unitId = owned.unit_id
+                    if owned then
+                        unitId = owned.unit_id or owned.unitId or owned.id or unitId
                     end
                 end
             end
@@ -611,22 +662,30 @@ end
 -- Some equipped-unit records use an internal ID that does not contain the display name.
 local function IsFarmInfo(info)
     if not info then return false end
-    local data = LookupUnitData(info.unitId or info.name)
-    if type(data) == "table" and type(data.tags) == "table" then
-        for _, tag in ipairs(data.tags) do
-            if tostring(tag):lower() == "farm" then return true end
-        end
-    end
-    local farmText = NormalizeName(info.name) .. NormalizeName(info.displayName) .. NormalizeName(info.unitId)
-    if IsFarmName(info.name) or IsFarmName(info.displayName) or IsFarmName(info.unitId)
-        or farmText:find("farm", 1, true) then
-        return true
-    end
-    if type(data) == "table" then
-        if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
-            or data._show_as_farm_unit == true or data.show_as_farm_unit == true
-            or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
-            return true
+    local ids = { info.unitId, info.name, info.displayName }
+    for _, id in ipairs(ids) do
+        if id and tostring(id) ~= "" then
+            local data = LookupUnitData(id)
+            if type(data) == "table" then
+                if type(data.tags) == "table" then
+                    for _, tag in pairs(data.tags) do
+                        if tostring(tag):lower() == "farm" then return true end
+                    end
+                end
+                if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
+                    or data._show_as_farm_unit == true or data.show_as_farm_unit == true
+                    or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
+                    return true
+                end
+                if type(data.end_of_wave) == "table" then
+                    for _, effect in pairs(data.end_of_wave) do
+                        if type(effect) == "table" and tostring(effect.type):lower() == "farm" then
+                            return true
+                        end
+                    end
+                end
+            end
+            if IsFarmName(id) then return true end
         end
     end
     return false
@@ -1054,7 +1113,7 @@ local function GetPlacementCFrame(index, kind)
         -- minimum-distance check and terrain / road restrictions.
         local spacing = 3.8
         local offsets = { Vector2.new(0, 0) }
-        local maxRing = 5
+        local maxRing = (kind == "hill") and 16 or 5
         for ring = 1, maxRing do
             local ringOffsets = {}
             for q = -ring, ring do
@@ -1099,9 +1158,19 @@ local function GetPlacementCFrame(index, kind)
     end
     local angle = (index * 45) * (math.pi / 180)
     local distance = 6 + math.floor(index / 8) * 5
-    local pos = hrp.Position + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
-    local finalPos = PlacementIsClear(pos, kind) or pos
-    return Finish(finalPos, hrp.CFrame.LookVector)
+    local maxFallbackRing = (kind == "hill") and 16 or 5
+    for ring = 0, maxFallbackRing do
+        local radius = distance + ring * 4
+        for direction = 0, 7 do
+            local a = angle + direction * (math.pi / 4)
+            local pos = hrp.Position + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
+            local finalPos = PlacementIsClear(pos, kind)
+            if finalPos then
+                return Finish(finalPos, hrp.CFrame.LookVector)
+            end
+        end
+    end
+    return nil
 end
 
 -- Farm units can be ground or hill units depending on the game's unit data.
@@ -2282,7 +2351,10 @@ local function RefreshUnitConfigUI()
 
     local keyParts = {}
     for _, info in ipairs(ordered) do
-        table.insert(keyParts, info.unitId .. ":" .. tostring(info.spawnCap) .. ":" .. tostring(info.maxUpgrade))
+        table.insert(keyParts, table.concat({
+            tostring(info.unitId), tostring(info.uuid), tostring(info.name),
+            tostring(info.spawnCap), tostring(info.maxUpgrade), tostring(info.hybrid), tostring(info.hill)
+        }, ":"))
     end
     local key = table.concat(keyParts, "|")
     if key == lastUnitKey then
@@ -2962,18 +3034,25 @@ task.spawn(function()
 
             local farmUpgradePending = false
             local wave = GetCurrentWave()
+            local farmUnits = {}
             for _, unit in ipairs(units) do
                 local stats = unit:FindFirstChild("_stats")
                 local level = stats and stats:FindFirstChild("upgrade")
                 local maximum = stats and stats:FindFirstChild("max_upgrade")
-                if level and maximum then
-                    local cfg = GetUnitConfig(GetRawUnitId(unit))
-                    local targetLevel = tonumber(maximum.Value) or 0
+                local isFarm = IsFarmUnit(unit)
+                if level then
+                    local rawId = GetRawUnitId(unit)
+                    local data = LookupUnitData(rawId)
+                    local dataMax = type(data) == "table" and type(data.upgrade) == "table" and #data.upgrade or 0
+                    local targetLevel = tonumber(maximum and maximum.Value) or dataMax
+                    local cfg = GetUnitConfig(rawId) or GetUnitConfig(GetUnitId(unit))
                     if cfg and tonumber(cfg.upgradeTarget) then
                         targetLevel = math.min(targetLevel, math.max(0, math.floor(tonumber(cfg.upgradeTarget))))
                     end
-                    local isFarm = IsFarmUnit(unit)
-                    if isFarm and level.Value < targetLevel then farmUpgradePending = true end
+                    if isFarm and level.Value < targetLevel then
+                        farmUpgradePending = true
+                        table.insert(farmUnits, { unit = unit, level = level, target = targetLevel, cfg = cfg })
+                    end
                     if level.Value < targetLevel and not pendingUpgradeRequests[unit] then
                         local allowed = not (cfg and cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave)
                         if allowed then
@@ -2987,13 +3066,17 @@ task.spawn(function()
                 end
             end
 
-            -- Strict Farm First: pending or delayed Farm upgrades block non-Farm upgrades.
+            -- Strict Farm First: while ANY detected Farm unit is below its own
+            -- configured target, only Farm candidates may receive upgrade calls.
             if State.AutoUpgradeFarmFirst and farmUpgradePending then
                 local farmOnly = {}
                 for _, candidate in ipairs(candidates) do
                     if candidate.farm then table.insert(farmOnly, candidate) end
                 end
                 candidates = farmOnly
+                if #candidates == 0 then
+                    UpdateAutoPlayStatus("Waiting for Farm Upgrade", Color3.fromRGB(255, 190, 80))
+                end
             end
 
             if #candidates > 0 then
@@ -3029,7 +3112,7 @@ task.spawn(function()
         local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
         unitRefreshClock = unitRefreshClock + 0.5
-        if unitRefreshClock >= 2 then
+        if unitRefreshClock >= 1 then
             unitRefreshClock = 0
             pcall(RefreshUnitConfigUI)
         end
@@ -3091,17 +3174,28 @@ task.spawn(function()
                     -- that, randomly fill remaining allowed copies until each cap is met.
                     if #missingFirst > 0 then eligible = missingFirst end
                     if #eligible > 0 then
-                        local chosen = eligible[math.random(1, #eligible)]
-                        local placeIndex = #myUnits + math.random(1, 12)
-                        local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
-                        if cframe then
-                            local countBefore = CountPlacedInfo(chosen)
-                            InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
-                            pendingSpawnRequests[tostring(chosen.uuid)] = {
-                                time = now,
-                                unitId = chosen.unitId,
-                                countBefore = countBefore,
-                            }
+                        -- Shuffle candidates, then try each until a valid surface/slot
+                        -- is found. This prevents a hill-only unit (e.g. aqua / Water
+                        -- Goddess) from blocking every other unit when no hill is nearby.
+                        for i = #eligible, 2, -1 do
+                            local j = math.random(1, i)
+                            eligible[i], eligible[j] = eligible[j], eligible[i]
+                        end
+                        for _, chosen in ipairs(eligible) do
+                            local placeIndex = #myUnits + math.random(1, 12)
+                            local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
+                            if cframe then
+                                local countBefore = CountPlacedInfo(chosen)
+                                local ok = InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
+                                if ok ~= false then
+                                    pendingSpawnRequests[tostring(chosen.uuid)] = {
+                                        time = now,
+                                        unitId = chosen.unitId,
+                                        countBefore = countBefore,
+                                    }
+                                end
+                                break
+                            end
                         end
                     end
                 end
