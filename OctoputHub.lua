@@ -4206,31 +4206,18 @@ task.spawn(function()
                 end
             end
 
-            -- Farm First has two phases while Auto Place is enabled:
-            -- first finish placing every configured Farm copy; only then begin
-            -- upgrades. If the next Farm is unaffordable, the placement worker can
-            -- still place other affordable units, but upgrades wait for the Farm phase.
-            local farmPlacementIncomplete = false
-            if State.AutoUpgradeFarmFirst and State.AutoPlace then
-                local equippedForFarmCheck = EnrichEquipped(GetEquippedUnitList())
-                for _, info in ipairs(equippedForFarmCheck) do
-                    if IsFarmInfo(info) and CanPlaceConfigured(info, wave) then
-                        farmPlacementIncomplete = true
-                        break
-                    end
-                end
-            end
-            if farmPlacementIncomplete then
-                candidates = {}
-                UpdateAutoPlayStatus("Prioritizing Farm Placement", Color3.fromRGB(255, 190, 80))
-            end
+            -- Farm First must never lock the upgrade worker during Farm placement.
+            -- Existing Farm units remain eligible for upgrades at all times; when
+            -- Auto Upgrade Farm First is enabled, affordable Farm upgrades are
+            -- selected ahead of non-Farm upgrades below. The placement worker can
+            -- continue prioritizing additional Farm copies independently.
 
-            -- Farm First is a priority rather than a permanent lock:
+            -- Farm First is a priority, not a placement-phase lock:
             -- 1) Wait briefly for an already-sent Farm upgrade to resolve.
-            -- 2) Otherwise, choose an affordable Farm upgrade before any other unit.
+            -- 2) Choose an affordable Farm upgrade before any other unit.
             -- 3) If no Farm upgrade is affordable, allow another affordable unit.
-            -- Every cycle checks current cash again, so a Farm upgrade regains
-            -- priority immediately after kills or other income make it affordable.
+            -- Every cycle checks current cash again, so Farm regains priority as
+            -- soon as income makes its next upgrade affordable.
             if State.AutoUpgradeFarmFirst and pendingFarmUpgradeRequest then
                 candidates = {}
                 UpdateAutoPlayStatus("Waiting for Farm Upgrade Result", Color3.fromRGB(255, 190, 80))
