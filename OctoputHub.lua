@@ -1048,71 +1048,62 @@ function GetUnitCurseCooldownInfo(unit)
     if uuid ~= "" then
         local cached = BUFF_ROTATION_CURSE_CACHE[uuid]
         if cached and tick() - cached.time < 5 then
-            return cached.hasCurse, cached.reduction, cached.known
+            return cached.hasCurse, cached.reduction, cached.known, cached.factor
         end
     end
 
     local owned = GetOwnedUnitRecordForPlacedUnit(unit)
     if type(owned) ~= "table" then
         if uuid ~= "" then
-            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = false }
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = false, factor = 1 }
         end
-        return false, 0, false
+        return false, 0, false, 1
     end
 
-    local modifiers = owned.further_modifiers
-    local cursed = type(modifiers) == "table" and modifiers.cursed or nil
+    local cursed = type(owned.further_modifiers) == "table" and owned.further_modifiers.cursed or nil
     if type(cursed) ~= "table" then
-        -- The owned record and modifier container were read successfully, so
-        -- absence of the cursed entry means this unit has no Curse.
         if uuid ~= "" then
-            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = true }
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = true, factor = 1 }
         end
-        return false, 0, true
+        return false, 0, true, 1
     end
 
-    local reduction = 0
+    -- game.lua calculate_static_stat_multiplier() strips the "active_" prefix,
+    -- then sums BOTH cursed.positive_buff and cursed.negative_buff for
+    -- stat_id == "attack_cooldown". Keep positive and negative modifiers.
+    local modifierSum = 0
+    local hasCooldownModifier = false
     for _, key in ipairs({ "positive_buff", "negative_buff" }) do
         local mod = cursed[key]
-        if type(mod) == "table"
-            and (mod.stat_id == "attack_cooldown" or mod.stat_id == "active_attack_cooldown")
-            and tonumber(mod.stat_mod) and tonumber(mod.stat_mod) < 0 then
-            reduction = reduction + tonumber(mod.stat_mod)
+        if type(mod) == "table" and mod.stat_id == "attack_cooldown" and tonumber(mod.stat_mod) then
+            modifierSum = modifierSum + tonumber(mod.stat_mod)
+            hasCooldownModifier = true
         end
     end
-    local hasCurse = reduction < 0
+    local factor = math.max(0.0001, 1 + modifierSum)
     if uuid ~= "" then
-        BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = hasCurse, reduction = reduction, known = true }
+        BUFF_ROTATION_CURSE_CACHE[uuid] = {
+            time = tick(), hasCurse = hasCooldownModifier, reduction = modifierSum,
+            known = true, factor = factor
+        }
     end
-    return hasCurse, reduction, true
+    return hasCooldownModifier, modifierSum, true, factor
 end
 
 BUFF_ROTATION_ATTACKS_REPLICATE = nil
 function GetActiveAttackCooldownState(unit, attackId, fallbackCooldown, lastCast, now)
-    -- Use the game's own helper so both per-unit cooldown and
-    -- AttacksReplicate.GLOBAL_ATTACK_COOLDOWNS are respected.
-    local service = BUFF_ROTATION_ATTACKS_REPLICATE
-    if not service then
-        local ok, loaded = pcall(function()
-            local Loader = require(ReplicatedStorage.src.Loader)
-            return Loader.load_client_service(game, "AttacksReplicate")
-        end)
-        if ok and type(loaded) == "table" then
-            service = loaded
-            BUFF_ROTATION_ATTACKS_REPLICATE = loaded
-        end
-    end
-    if service and type(service.get_current_active_attack_cooldown) == "function" then
-        local ok, busy, ready, cooldown, remaining = pcall(
-            service.get_current_active_attack_cooldown, unit, attackId
-        )
-        if ok then
-            return busy == true, ready == true, tonumber(cooldown), tonumber(remaining), true
-        end
-    end
-
-    local remaining = (tonumber(fallbackCooldown) or 60) - (now - (tonumber(lastCast) or 0))
-    return false, remaining <= 0, tonumber(fallbackCooldown), math.max(0, remaining), false
+    -- Mirror game.lua's native Auto Active worker (around line 91749):
+    -- it checks each unit's own active_attack_cooldown and last_active_cast.
+    -- It deliberately does NOT gate casts on GLOBAL_ATTACK_COOLDOWNS; doing so
+    -- prevents same-type buff units from rotating even though native Auto Active
+    -- continues to request each ready unit independently.
+    local stats = unit and unit:FindFirstChild("_stats")
+    local cdValue = stats and stats:FindFirstChild("active_attack_cooldown")
+    local castValue = stats and stats:FindFirstChild("last_active_cast")
+    local cooldown = cdValue and tonumber(cdValue.Value) or tonumber(fallbackCooldown) or 60
+    local castAt = castValue and tonumber(castValue.Value) or tonumber(lastCast) or 0
+    local remaining = cooldown - (now - castAt)
+    return false, remaining <= 0, cooldown, math.max(0, remaining), true
 end
 
 function GetBuffRotationGroups()
@@ -1162,7 +1153,7 @@ function GetBuffRotationGroups()
                 local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
                 local lastCastValue = stats:FindFirstChild("last_active_cast")
                 if cooldownValue and lastCastValue then
-                    local hasCurse, curseReduction, curseKnown = GetUnitCurseCooldownInfo(unit)
+                    local hasCurse, curseReduction, curseKnown, curseFactor = GetUnitCurseCooldownInfo(unit)
                     local group = groups[activeId]
                     if not group then
                         group = {
@@ -1186,7 +1177,9 @@ function GetBuffRotationGroups()
                         lastCast = lastCast,
                         hasCurse = hasCurse,
                         curseReduction = curseReduction,
+                        curseFactor = curseFactor or 1,
                         curseKnown = curseKnown,
+                        spd = 1 / cooldown,
                     })
                     if hasCurse then group.curseCount = group.curseCount + 1 end
                     if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
@@ -1201,10 +1194,18 @@ function GetBuffRotationGroups()
             return tostring(a.uuid) < tostring(b.uuid)
         end)
         local totalRate = 0
+        local spdTotal = 0
         for _, entry in ipairs(group.units) do
-            totalRate = totalRate + (1 / math.max(0.1, entry.cooldown))
+            -- The deployed _stats.active_attack_cooldown is the final in-game
+            -- cooldown after Curse, traits, artifacts and level modifiers.
+            -- Use it as the authoritative SPD source, not a guessed base value.
+            entry.spd = 1 / math.max(0.1, entry.cooldown)
+            spdTotal = spdTotal + entry.spd
+            totalRate = totalRate + entry.spd
         end
         group.totalRate = totalRate
+        group.totalSPD = spdTotal
+        group.averageSPD = #group.units > 0 and (spdTotal / #group.units) or 0
         group.interval = totalRate > 0 and (1 / totalRate) or math.huge
         group.averageCooldown = #group.units > 0 and (#group.units / math.max(totalRate, 0.000001)) or math.huge
         local safeDuration = math.max(1, group.duration - BUFF_ROTATION_SAFETY_MARGIN)
@@ -3484,7 +3485,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph): Auto Buff Rotation reads each placed unit's live active_attack and the game's per-unit + global cooldown. Elfy's Verdant Enchantment is resolved from its live _stats because it is omitted from the static Units record. All buff units are auto-placed in one nearby cluster.", 6, 42)
+CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph): Auto Buff Rotation mirrors the game's native Auto Active loop, checking each unit's live active_attack_cooldown and last_active_cast independently. SPD uses the final live cooldown after Curse and other modifiers; Curse math follows game.lua. Elfy's Verdant Enchantment is detected from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -5191,12 +5192,10 @@ task.spawn(function()
                         end
 
                         local stats = unit and unit:FindFirstChild("_stats")
-                        local busyValue = stats and stats:FindFirstChild("active_queued_or_using")
-                        local unitBusy = busyValue and busyValue.Value == true
-                        local globalBusy, cooldownReady, effectiveCooldown, remaining =
+                        local cooldownBusy, cooldownReady, effectiveCooldown, remaining =
                             GetActiveAttackCooldownState(unit, attackId, entry.cooldown, entry.lastCast, now)
                         local lastRequest = runtime.lastRequest[unit] or -math.huge
-                        if not pending and not unitBusy and not globalBusy and cooldownReady
+                        if not pending and not cooldownBusy and cooldownReady
                             and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                             table.insert(ready, entry)
                         end
@@ -5221,8 +5220,9 @@ task.spawn(function()
                     local capacityText = group.sustainable and "Loop capacity OK"
                         or ("Need about " .. tostring(group.requiredUnitsEstimate) .. " units total")
                     local intervalText = group.interval < math.huge and string.format("%.1fs avg", group.interval) or "N/A"
-                    table.insert(statusParts, string.format("%s: %s | %d units | %s | %s",
-                        group.name, curseMode, #group.units, intervalText, capacityText))
+                    local spdText = string.format("%.4f SPD/unit", tonumber(group.averageSPD) or 0)
+                    table.insert(statusParts, string.format("%s: %s | %d units | %s | %s | %s",
+                        group.name, curseMode, #group.units, spdText, intervalText, capacityText))
 
                     -- The game client serializes active requests globally, while
                     -- keeping the 0.5s guard per unit. Reproduce that behavior;
@@ -5234,7 +5234,18 @@ task.spawn(function()
                         runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
                         task.spawn(function()
                             local ok, err = pcall(function()
-                                InvokeEndpoint("use_active_attack", chosen.model)
+                                local unit = chosen.model
+                                local stats = unit and unit:FindFirstChild("_stats")
+                                if not unit or not unit.Parent or not stats then
+                                    error("Buff unit is no longer deployed")
+                                end
+                                local CollectionService = game:GetService("CollectionService")
+                                if CollectionService:HasTag(unit, "dying_units") then
+                                    error("Buff unit is dying")
+                                end
+                                -- This is the same request path used by the game's
+                                -- Auto Active worker (v_u_12 -> EndpointsClient).
+                                InvokeEndpoint("use_active_attack", unit)
                             end)
                             if not ok then
                                 warn("[OctoputHub] Buff request failed: " .. tostring(err))
@@ -5251,7 +5262,7 @@ task.spawn(function()
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
             if not hasActionableUnits then
                 if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) detected, but its live Verdant Enchantment active is not exposed yet. Select the unit once, then retry.", Color3.fromRGB(255, 190, 100))
+                    SetBuffRotationStatus("Auto Buff: Elfy detected, waiting for its live Verdant Enchantment active/cooldown stats...", Color3.fromRGB(255, 190, 100))
                 else
                     SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong / Elfy active buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
