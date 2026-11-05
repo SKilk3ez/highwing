@@ -4449,8 +4449,10 @@ task.spawn(function()
     end
 end)
 
--- Webhook end detection: use the actual match lifecycle first, with ResultsUI as
--- a fallback because some game modes do not expose GameFinished consistently.
+-- Webhook end detection: follow Anime Adventures' actual ResultsUI lifecycle.
+-- game.lua assigns ResultsUI.settings = p22 before enabling ResultsUI, while the
+-- game_finished endpoint calls ResultsUI.show_results(p22). GameFinished is an
+-- additional signal; neither signal requires a guessed result from _DATA.
 webhookSent = false
 webhookSending = false
 webhookGameWasActive = false
@@ -4465,92 +4467,166 @@ webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
 
+local initialDataForWebhook = workspace:FindFirstChild("_DATA")
+local initialFinishedForWebhook = initialDataForWebhook and initialDataForWebhook:FindFirstChild("GameFinished")
+local initialResultsForWebhook = playerGui:FindFirstChild("ResultsUI")
+webhookFinishedLastValue = initialFinishedForWebhook ~= nil and initialFinishedForWebhook.Value == true
+webhookResultsVisibleLast = initialResultsForWebhook ~= nil and initialResultsForWebhook.Enabled == true
+webhookLastSentSettings = nil
+webhookBoundGameFinished = nil
+webhookBoundResultsGui = nil
+
+function StartWebhookEndSend(reason)
+    if not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
+        return false
+    end
+
+    webhookSending = true
+    local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
+    local secretBaseline = webhookSecretRewardBefore
+    local secretAvailable = webhookSecretRewardBaselineAvailable
+    local unitLinesSnapshot = webhookUnitLinesSnapshot
+
+    print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
+    task.spawn(function()
+        local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        webhookSending = false
+        if callOk and sendResult == true then
+            webhookSent = true
+            local finalDetails = GetResultDetails()
+            webhookLastSentSettings = finalDetails and finalDetails.settings or nil
+            print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
+        else
+            local failure = callOk and "SendEndWebhook returned false" or tostring(sendResult)
+            warn("[Octoput Hub Webhook] Send failed: " .. failure)
+            webhookRetryAt = os.clock() + 8
+        end
+    end)
+    return true
+end
+
+function MarkWebhookEnd(reason)
+    if not webhookEndDetected then
+        webhookUnitLinesSnapshot = ReadMatchUnitLines()
+        webhookEndDetected = true
+        webhookGameWasActive = false
+        print("[Octoput Hub Webhook] Match end detected by " .. tostring(reason or "game result") .. ".")
+    end
+    StartWebhookEndSend(reason)
+end
+
 task.spawn(function()
     while true do
-        task.wait(0.25)
+        task.wait(0.2)
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
                 webhookDataFolder = dataFolder
+                webhookGameWasActive = false
+                webhookEndDetected = false
+                webhookSent = false
+                webhookSending = false
+                webhookRetryAt = 0
+                webhookCurrencyBefore = nil
+                webhookSecretRewardBefore = nil
+                webhookSecretRewardBaselineAvailable = false
+                webhookUnitLinesSnapshot = nil
+                webhookResultSettingsAtStart = nil
+                local finishedValue = dataFolder and dataFolder:FindFirstChild("GameFinished")
+                webhookFinishedLastValue = finishedValue ~= nil and finishedValue.Value == true
             end
 
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
             local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
             local unitsFolder = workspace:FindFirstChild("_UNITS")
             local resultsGui = playerGui:FindFirstChild("ResultsUI")
-            local resultsVisible = resultsGui ~= nil and resultsGui.Enabled == true
-            local finished = gameFinished ~= nil and gameFinished.Value == true
-            local resultTitle = ""
-            if resultsVisible then
-                local resultDetails = GetResultDetails()
-                resultTitle = string.upper(tostring(resultDetails.result or ""))
-            end
-            -- Do not treat GameFinished=false by itself as proof of a live match;
-            -- that value can also exist while the player is in the lobby.
-            local startedByFlag = gameStarted ~= nil and gameStarted.Value == true
-            local startedByWorld = unitsFolder ~= nil and not IsInLobby() and not finished
-            local isActive = (startedByFlag or startedByWorld) and not finished
 
-            if isActive then
-                if not webhookGameWasActive then
-                    local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
-                    webhookCurrencyBefore = currencySnapshot
-                    webhookSecretRewardBefore = secretSnapshot
-                    webhookSecretRewardBaselineAvailable = secretAvailable
-                    webhookGameWasActive = true
-                    webhookEndDetected = false
-                    webhookSent = false
-                    webhookRetryAt = 0
-                    webhookUnitLinesSnapshot = nil
-                    webhookResultTitleAtStart = resultTitle
-                    webhookResultsVisibleAtStart = resultsVisible
-                    webhookResultSettingsAtStart = ReadAuthoritativeResultSettings()
+            -- Bind to the game's real completion signals as well as polling.
+            -- ResultsUI.show_results assigns settings before Enabled becomes true.
+            if gameFinished ~= webhookBoundGameFinished then
+                webhookBoundGameFinished = gameFinished
+                if gameFinished then
+                    gameFinished.Changed:Connect(function()
+                        if gameFinished.Value == true then
+                            task.spawn(function()
+                                task.wait(0.15)
+                                MarkWebhookEnd("GameFinished.Changed")
+                            end)
+                        end
+                    end)
+                end
+            end
+            if resultsGui ~= webhookBoundResultsGui then
+                webhookBoundResultsGui = resultsGui
+                if resultsGui then
+                    resultsGui:GetPropertyChangedSignal("Enabled"):Connect(function()
+                        if resultsGui.Enabled == true then
+                            task.spawn(function()
+                                task.wait(0.1)
+                                local details = GetResultDetails()
+                                local title = string.upper(tostring(details.result or ""))
+                                if title:find("VICTORY", 1, true) or title:find("DEFEAT", 1, true) then
+                                    MarkWebhookEnd("ResultsUI.Enabled")
+                                end
+                            end)
+                        end
+                    end)
                 end
             end
 
-            local resultTitleIsFresh = resultTitle ~= "" and resultTitle ~= webhookResultTitleAtStart
-            local resultsScreenAppeared = resultsVisible and not webhookResultsVisibleAtStart
-            local resultScreenConfirmed = resultsVisible and resultTitle ~= ""
-                and (resultTitleIsFresh or resultsScreenAppeared)
-            -- GameFinished is the primary lifecycle signal. ResultsUI is only a
-            -- fallback after this monitor has observed this match become active,
-            -- so a previous match's still-open VICTORY screen cannot end a new run.
-            local hasEnded = finished or (webhookGameWasActive and resultScreenConfirmed)
+            local resultsVisible = resultsGui ~= nil and resultsGui.Enabled == true
+            local finished = gameFinished ~= nil and gameFinished.Value == true
+            local finishedRising = finished and not webhookFinishedLastValue
+            webhookFinishedLastValue = finished
+
+            local resultDetails = resultsVisible and GetResultDetails() or nil
+            local resultTitle = string.upper(tostring(resultDetails and resultDetails.result or ""))
+            local currentSettings = resultDetails and resultDetails.settings or nil
+            local resultsRising = resultsVisible and not webhookResultsVisibleLast
+            webhookResultsVisibleLast = resultsVisible
+
+            -- A new ResultsUI settings table is the strongest signal: game.lua
+            -- assigns p21.settings = p22 before showing the results ScreenGui.
+            local freshResultSettings = currentSettings ~= nil
+                and currentSettings ~= webhookResultSettingsAtStart
+                and currentSettings ~= webhookLastSentSettings
+            local hasResultTitle = resultTitle:find("VICTORY", 1, true) ~= nil
+                or resultTitle:find("DEFEAT", 1, true) ~= nil
+            local resultScreenConfirmed = resultsVisible and hasResultTitle
+                and (freshResultSettings or resultsRising)
+
+            -- GameStarted is the normal baseline point. If the monitor misses
+            -- that edge, a fresh ResultsUI transition / GameFinished edge still
+            -- sends the webhook rather than silently requiring active=true.
+            local startedByFlag = gameStarted ~= nil and gameStarted.Value == true
+            local startedByWorld = unitsFolder ~= nil and not IsInLobby() and not finished
+            local isActive = (startedByFlag or startedByWorld) and not finished
+            if isActive and not webhookGameWasActive then
+                local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
+                webhookCurrencyBefore = currencySnapshot
+                webhookSecretRewardBefore = secretSnapshot
+                webhookSecretRewardBaselineAvailable = secretAvailable
+                webhookGameWasActive = true
+                webhookEndDetected = false
+                webhookSent = false
+                webhookSending = false
+                webhookRetryAt = 0
+                webhookUnitLinesSnapshot = nil
+                webhookResultTitleAtStart = resultTitle
+                webhookResultsVisibleAtStart = resultsVisible
+                webhookResultSettingsAtStart = currentSettings
+                print("[Octoput Hub Webhook] Match start detected; reward baseline captured.")
+            end
+
+            local hasEnded = finishedRising or (finished and webhookGameWasActive) or resultScreenConfirmed
             if hasEnded and not webhookEndDetected then
-                -- Capture final per-unit takedowns before cleanup when possible.
-                -- Do not require webhookGameWasActive: some matches transition to
-                -- GameFinished/ResultsUI between monitor polls, so the start edge
-                -- can be missed even though the end state is authoritative.
-                webhookUnitLinesSnapshot = ReadMatchUnitLines()
-                webhookEndDetected = true
-                webhookGameWasActive = false
-                print("[Octoput Hub Webhook] Match end detected ("
-                    .. (resultTitle ~= "" and resultTitle or "GameFinished") .. ").")
+                MarkWebhookEnd(resultTitle ~= "" and resultTitle or (finished and "GameFinished" or "ResultsUI"))
             end
 
-            if hasEnded and webhookEndDetected and State.WebhookOnEnd and not webhookSent
+            if webhookEndDetected and State.WebhookOnEnd and not webhookSent
                 and not webhookSending and os.clock() >= webhookRetryAt then
-                webhookSending = true
-                local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
-                local secretBaseline = webhookSecretRewardBefore
-                local secretAvailable = webhookSecretRewardBaselineAvailable
-                local unitLinesSnapshot = webhookUnitLinesSnapshot
-                task.spawn(function()
-                    local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
-                    webhookSending = false
-                    if callOk and sendResult == true then
-                        webhookSent = true
-                        print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
-                    else
-                        local reason = callOk and "SendEndWebhook returned false" or tostring(sendResult)
-                        warn("[Octoput Hub Webhook] Send failed: " .. reason)
-                        webhookRetryAt = os.clock() + 8
-                    end
-                end)
+                StartWebhookEndSend(finished and "GameFinished" or "ResultsUI")
             end
-
-            -- A new match may reuse the same _DATA folder. GameStarted becoming
-            -- true after an ended result resets the per-match send guard above.
         end)
         if not loopOk then
             warn("[Octoput Hub Webhook] Monitor error: " .. tostring(loopError))
