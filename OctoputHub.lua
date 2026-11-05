@@ -4146,19 +4146,36 @@ local function SnipeGetBannerUnitData(bannerId)
 end
 
 local function SnipeGetLiveBannerIds()
-    local ids, seen = {}, {}
-    local shop = workspace:FindFirstChild("_shop")
-    local bannerFolder = shop and shop:FindFirstChild("_banners")
-    if bannerFolder then
-        for _, child in ipairs(bannerFolder:GetChildren()) do
-            if child.Name ~= "ComingSoon" and not seen[child.Name] then
-                seen[child.Name] = true
-                table.insert(ids, child.Name)
-            end
+    -- The physical objects under workspace._shop._banners are display stands,
+    -- not the authoritative banner IDs. Use ReplicatedStorage.src.Data.Banners,
+    -- exactly as the game's SummonServiceClient does.
+    local bannersData = SnipeGetGameData()
+    local ids = {}
+    if type(bannersData) ~= "table" then return ids end
+    for bannerId, config in pairs(bannersData) do
+        if type(bannerId) == "string" and type(config) == "table"
+            and config.active ~= false and config.type == "rateup" then
+            table.insert(ids, bannerId)
         end
     end
     table.sort(ids)
     return ids
+end
+
+local function SnipeGetBannerDisplayName(bannerId, config)
+    local names = {
+        Legacy = "Legacy Banner",
+        EventClover = "New / Event Banner",
+        Summer2026 = "Summer 2026 Capsule Banner",
+    }
+    local name = names[bannerId] or bannerId
+    local currency = config and config.resource_cost
+    if config and config.gem_cost then
+        return name .. "  |  Gems x" .. tostring(config.gem_cost)
+    elseif type(currency) == "table" then
+        return name .. "  |  " .. tostring(currency.id or "Special Currency") .. " x" .. tostring(currency.amount or "?")
+    end
+    return name
 end
 
 local function SnipeResolveUnitIds(raw, unitsData)
@@ -4197,17 +4214,19 @@ local function SnipeClearList(frame)
 end
 
 local function SnipeBuildBannerList()
+    local bannersData = SnipeGetGameData()
     SnipeBannerOptions = SnipeGetLiveBannerIds()
     SnipeClearList(SnipeBannerList)
     if not SnipeBannerList then return end
     for index, bannerId in ipairs(SnipeBannerOptions) do
+        local config = bannersData and bannersData[bannerId]
         local button = Instance.new("TextButton")
         button.Size = UDim2.new(1, -6, 0, 30)
         button.BackgroundColor3 = State.SnipeBanner == bannerId and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(31, 31, 43)
         button.TextColor3 = Color3.fromRGB(235, 235, 245)
         button.TextSize = 11
         button.Font = Enum.Font.GothamMedium
-        button.Text = bannerId
+        button.Text = SnipeGetBannerDisplayName(bannerId, config)
         button.TextXAlignment = Enum.TextXAlignment.Left
         button.LayoutOrder = index
         button.ZIndex = 14
@@ -4222,13 +4241,16 @@ local function SnipeBuildBannerList()
             State.SnipeBanner = bannerId
             State.SnipeTargets = {}
             SaveConfig()
-            if SnipeBannerSelectedLabel then SnipeBannerSelectedLabel.Text = "Selected Banner: " .. bannerId end
+            if SnipeBannerSelectedLabel then SnipeBannerSelectedLabel.Text = "Selected Banner: " .. SnipeGetBannerDisplayName(bannerId, config) end
             SnipeBuildBannerList()
             SnipeBuildUnitList()
         end)
     end
     if #SnipeBannerOptions == 0 then
-        SnipeMakeLabel(SnipeBannerList, "No banner frames found. Open the game lobby first.", 1, 28, Color3.fromRGB(235, 170, 100))
+        SnipeMakeLabel(SnipeBannerList, "No active rate-up banners were found in Data.Banners.", 1, 28, Color3.fromRGB(235, 170, 100))
+    end
+    if State.SnipeBanner ~= "" and bannersData and bannersData[State.SnipeBanner] and SnipeBannerSelectedLabel then
+        SnipeBannerSelectedLabel.Text = "Selected Banner: " .. SnipeGetBannerDisplayName(State.SnipeBanner, bannersData[State.SnipeBanner])
     end
 end
 
@@ -4349,24 +4371,46 @@ local function SnipeStart()
     if SnipeRuntime.Running then SnipeStop("Stopped by user") return end
     if State.SnipeBanner == "" then SnipeSetStatus("Select a banner first", Color3.fromRGB(235, 100, 100)) return end
     if not workspace:FindFirstChild("_shop") then SnipeSetStatus("Snipe Summon is available in the lobby only", Color3.fromRGB(235, 100, 100)) return end
+
+    local selectedBanner = State.SnipeBanner
     local targetCount = 0
     for _, enabled in pairs(State.SnipeTargets) do if enabled then targetCount += 1 end end
     if targetCount == 0 then SnipeSetStatus("Select at least one target unit", Color3.fromRGB(235, 100, 100)) return end
+
     local owned = SnipeFindOwnedUnits()
     if not owned then
         SnipeSetStatus("Cannot access owned-unit data; stopped safely", Color3.fromRGB(235, 100, 100))
         return
     end
+
     local bannersData = SnipeGetGameData()
-    if not bannersData or not bannersData[State.SnipeBanner] then
-        SnipeSetStatus("Selected banner is not available in game data", Color3.fromRGB(235, 100, 100))
+    local config = bannersData and bannersData[selectedBanner]
+    if type(config) ~= "table" or config.active == false then
+        SnipeSetStatus("Selected banner is not active in game data", Color3.fromRGB(235, 100, 100))
         return
     end
-    local config = bannersData[State.SnipeBanner]
-    if not config.gem_cost then
-        SnipeSetStatus("Selected banner does not use Gems", Color3.fromRGB(235, 100, 100))
+
+    -- Read the exact currency and price from Data.Banners:
+    -- gem_cost -> _stats.gem_amount; resource_cost.id -> _stats["_resource" .. id].
+    local currencyId, currencyStatName, currencyLabel, unitCost
+    if tonumber(config.gem_cost) and config.gem_cost > 0 then
+        currencyId = "Gems"
+        currencyStatName = "gem_amount"
+        currencyLabel = "Gems"
+        unitCost = tonumber(config.gem_cost)
+    elseif type(config.resource_cost) == "table"
+        and type(config.resource_cost.id) == "string"
+        and tonumber(config.resource_cost.amount)
+        and config.resource_cost.amount > 0 then
+        currencyId = config.resource_cost.id
+        currencyStatName = "_resource" .. currencyId
+        currencyLabel = currencyId
+        unitCost = tonumber(config.resource_cost.amount)
+    else
+        SnipeSetStatus("Banner currency / cost is not defined in Data.Banners", Color3.fromRGB(235, 100, 100))
         return
     end
+
     local remote
     local remoteOk = pcall(function()
         remote = ReplicatedStorage:WaitForChild("endpoints"):WaitForChild("client_to_server"):WaitForChild("buy_from_banner")
@@ -4374,48 +4418,61 @@ local function SnipeStart()
     end)
     if not remoteOk or not remote then SnipeSetStatus("Summon endpoint not found", Color3.fromRGB(235, 100, 100)) return end
 
+    local stats = player:FindFirstChild("_stats")
+    local currencyStat = stats and stats:FindFirstChild(currencyStatName)
+    if not currencyStat then
+        SnipeSetStatus("Currency balance stat not found: " .. currencyStatName, Color3.fromRGB(235, 100, 100))
+        return
+    end
+
     local targetSnapshot = SnipeCountTargets(owned, State.SnipeTargets)
-    local gemStat = player:FindFirstChild("_stats") and player._stats:FindFirstChild("gem_amount")
-    if not gemStat then SnipeSetStatus("Gem balance value not found", Color3.fromRGB(235, 100, 100)) return end
-    local startingGems = gemStat.Value
-    local gemLimit = math.max(0, tonumber(State.SnipeGemLimit) or 0)
+    local startingBalance = tonumber(currencyStat.Value) or 0
+    local currencyLimit = math.max(0, tonumber(State.SnipeGemLimit) or 0)
     local summonCount = State.SnipeSummonCount == 1 and 1 or 10
-    local estimatedCost = tonumber(config.gem_cost) or 0
-    if summonCount == 10 then estimatedCost *= 10 end
-    if estimatedCost <= 0 then SnipeSetStatus("Could not determine banner Gem cost", Color3.fromRGB(235, 100, 100)) return end
+    local estimatedCost = unitCost * summonCount
+    local summonMode = summonCount == 10 and "gems10" or "gems"
 
     SnipeRuntime.Running = true
     SnipeRuntime.StopReason = "Running"
     if SnipeStartButton then SnipeStartButton.Text = "Stop Snipe Summon" end
-    SnipeSetStatus("Watching " .. State.SnipeBanner .. " | Targets: " .. targetCount, Color3.fromRGB(100, 220, 160))
+    SnipeSetStatus("Watching " .. selectedBanner .. " | " .. currencyLabel .. " | Targets: " .. targetCount, Color3.fromRGB(100, 220, 160))
+
     task.spawn(function()
         while SnipeRuntime.Running do
             if not player.Parent then SnipeStop("Player unavailable") break end
-            local currentGems = tonumber(gemStat.Value) or 0
-            local spent = math.max(0, startingGems - currentGems)
-            if gemLimit > 0 and spent + estimatedCost > gemLimit then
-                SnipeStop("Gem limit reached (spent " .. spent .. ")")
+
+            local currentBalance = tonumber(currencyStat.Value) or 0
+            local spent = math.max(0, startingBalance - currentBalance)
+            if currencyLimit > 0 and spent + estimatedCost > currencyLimit then
+                SnipeStop(currencyLabel .. " limit reached (spent " .. spent .. ")")
                 break
             end
-            if currentGems < estimatedCost then
-                SnipeStop("Not enough Gems for next summon")
+            if currentBalance < estimatedCost then
+                SnipeStop("Not enough " .. currencyLabel .. " for next summon")
                 break
             end
-            local liveUnits = SnipeGetBannerUnitData(State.SnipeBanner)
+
+            local liveUnits = SnipeGetBannerUnitData(selectedBanner)
             if not liveUnits then
                 SnipeSetStatus("Waiting for selected banner data...", Color3.fromRGB(235, 180, 100))
                 task.wait(5)
             else
                 local ok, result = pcall(function()
-                    return remote:InvokeServer(State.SnipeBanner, summonCount == 10 and "gems10" or "gems")
+                    -- The game's BuyOne / BuyTen buttons use these same modes for all
+                    -- banners; the selected banner's Data.Banners entry determines cost.
+                    return remote:InvokeServer(selectedBanner, summonMode)
                 end)
                 if not ok then
                     SnipeStop("Summon request failed: " .. tostring(result))
                     break
                 end
-                SnipeSetStatus("Summon request sent | Gems spent: " .. math.max(0, startingGems - (tonumber(gemStat.Value) or 0)), Color3.fromRGB(100, 190, 255))
+
+                SnipeSetStatus("Summon request sent | " .. currencyLabel .. " spent: " ..
+                    math.max(0, startingBalance - (tonumber(currencyStat.Value) or 0)),
+                    Color3.fromRGB(100, 190, 255))
+
                 local found = false
-                for _ = 1, 12 do
+                for _ = 1, 20 do
                     task.wait(0.5)
                     local liveOwned = SnipeFindOwnedUnits() or owned
                     local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
@@ -4481,7 +4538,7 @@ unitPadding.PaddingBottom = UDim.new(0, 4)
 unitPadding.PaddingLeft = UDim.new(0, 4)
 unitPadding.PaddingRight = UDim.new(0, 4)
 unitPadding.Parent = SnipeUnitList
-CreateTextBox(SummonPage, "Gem Limit (0 = unlimited)", "Example: 5000", 9, function(value)
+CreateTextBox(SummonPage, "Currency Limit (0 = unlimited)", "Example: 5000", 9, function(value)
     State.SnipeGemLimit = math.max(0, math.floor(tonumber(value) or 0))
     SaveConfig()
 end, tostring(State.SnipeGemLimit or 0))
