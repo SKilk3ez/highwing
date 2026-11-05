@@ -85,6 +85,80 @@ FloatingFallback.TextSize = 30
 FloatingFallback.ZIndex = 201
 FloatingFallback.Parent = FloatingButton
 
+-- Promotional match overlay: remains visible above the black render-reduction layer.
+local MatchInfoPanel = Instance.new("Frame")
+MatchInfoPanel.Name = "BlackScreenMatchInfo"
+MatchInfoPanel.AnchorPoint = Vector2.new(0.5, 0.5)
+MatchInfoPanel.Position = UDim2.fromScale(0.5, 0.5)
+MatchInfoPanel.Size = UDim2.new(0.84, 0, 0, 286)
+local MatchPanelConstraint = Instance.new("UISizeConstraint")
+MatchPanelConstraint.MinSize = Vector2.new(280, 250)
+MatchPanelConstraint.MaxSize = Vector2.new(520, 286)
+MatchPanelConstraint.Parent = MatchInfoPanel
+MatchInfoPanel.BackgroundColor3 = Color3.fromRGB(12, 15, 24)
+MatchInfoPanel.BackgroundTransparency = 0.08
+MatchInfoPanel.BorderSizePixel = 0
+MatchInfoPanel.Visible = false
+MatchInfoPanel.ZIndex = 180
+MatchInfoPanel.Parent = ScreenGui
+local MatchPanelCorner = Instance.new("UICorner")
+MatchPanelCorner.CornerRadius = UDim.new(0, 18)
+MatchPanelCorner.Parent = MatchInfoPanel
+local MatchPanelStroke = Instance.new("UIStroke")
+MatchPanelStroke.Color = Color3.fromRGB(105, 125, 190)
+MatchPanelStroke.Thickness = 2
+MatchPanelStroke.Transparency = 0.12
+MatchPanelStroke.Parent = MatchInfoPanel
+
+local PromoLogo = Instance.new("ImageLabel")
+PromoLogo.Name = "PromoLogo"
+PromoLogo.Position = UDim2.fromOffset(18, 18)
+PromoLogo.Size = UDim2.fromOffset(82, 82)
+PromoLogo.BackgroundColor3 = Color3.fromRGB(25, 29, 43)
+PromoLogo.BackgroundTransparency = 0.05
+PromoLogo.BorderSizePixel = 0
+PromoLogo.ScaleType = Enum.ScaleType.Fit
+PromoLogo.ZIndex = 181
+PromoLogo.Parent = MatchInfoPanel
+local PromoLogoCorner = Instance.new("UICorner")
+PromoLogoCorner.CornerRadius = UDim.new(0, 14)
+PromoLogoCorner.Parent = PromoLogo
+local PromoLogoFallback = Instance.new("TextLabel")
+PromoLogoFallback.Size = UDim2.fromScale(1, 1)
+PromoLogoFallback.BackgroundTransparency = 1
+PromoLogoFallback.Text = "OCTOPUT HUB"
+PromoLogoFallback.TextColor3 = Color3.new(1, 1, 1)
+PromoLogoFallback.Font = Enum.Font.GothamBlack
+PromoLogoFallback.TextSize = 12
+PromoLogoFallback.ZIndex = 182
+PromoLogoFallback.Parent = PromoLogo
+
+local function MakeMatchLabel(name, position, size, text, textSize, color, font)
+    local label = Instance.new("TextLabel")
+    label.Name = name
+    label.Position = position
+    label.Size = size
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = color or Color3.fromRGB(235, 239, 255)
+    label.TextSize = textSize or 16
+    label.Font = font or Enum.Font.GothamMedium
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.ZIndex = 181
+    label.Parent = MatchInfoPanel
+    return label
+end
+
+MakeMatchLabel("PromoTitle", UDim2.fromOffset(116, 18), UDim2.new(1, -134, 0, 30), "OCTOPUT HUB  |  LIVE MATCH", 19, Color3.fromRGB(255, 255, 255), Enum.Font.GothamBlack)
+local MatchStageLabel = MakeMatchLabel("Stage", UDim2.fromOffset(116, 53), UDim2.new(1, -134, 0, 25), "STAGE: Loading...", 15, Color3.fromRGB(190, 205, 255), Enum.Font.GothamBold)
+local MatchTimerLabel = MakeMatchLabel("ElapsedTime", UDim2.fromOffset(18, 119), UDim2.new(0.5, -25, 0, 32), "TIME  00:00:00", 21, Color3.fromRGB(120, 235, 180), Enum.Font.GothamBlack)
+local MatchWaveLabel = MakeMatchLabel("Wave", UDim2.new(0.5, 7, 0, 119), UDim2.new(0.5, -25, 0, 32), "WAVE  0", 21, Color3.fromRGB(255, 210, 120), Enum.Font.GothamBlack)
+local MatchStatsLabel = MakeMatchLabel("PlayerStats", UDim2.fromOffset(18, 166), UDim2.new(1, -36, 0, 98), "PLAYER STATS  |  Loading...", 15, Color3.fromRGB(225, 230, 245), Enum.Font.GothamMedium)
+MatchStatsLabel.TextYAlignment = Enum.TextYAlignment.Top
+MatchStatsLabel.TextWrapped = true
+
 -- Download/cache the GitHub image when the executor exposes file + custom-asset APIs.
 task.spawn(function()
     local ok, asset = pcall(function()
@@ -101,10 +175,34 @@ task.spawn(function()
         return assetLoader(FLOATING_LOGO_FILE)
     end)
     if ok and type(asset) == "string" then
+        -- Keep the existing floating launcher behavior unchanged.
         FloatingButton.Image = asset
         FloatingFallback.Visible = false
     else
         warn("[OctoputHub] Floating logo could not load; using fallback icon. " .. tostring(asset))
+    end
+end)
+
+-- The logo displayed in the center BlackScreen promotion panel uses the requested image.
+task.spawn(function()
+    local ok, asset = pcall(function()
+        local assetLoader = getcustomasset or getsynasset
+        if type(assetLoader) ~= "function" or type(writefile) ~= "function" then
+            error("Executor does not expose getcustomasset/getsynasset and writefile")
+        end
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("OctoputHub") then
+            pcall(makefolder, "OctoputHub")
+        end
+        local imageBytes = game:HttpGet("https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png")
+        assert(type(imageBytes) == "string" and #imageBytes > 0, "BlackScreen logo download returned empty data")
+        writefile("OctoputHub/blackscreen_promo_logo.png", imageBytes)
+        return assetLoader("OctoputHub/blackscreen_promo_logo.png")
+    end)
+    if ok and type(asset) == "string" then
+        PromoLogo.Image = asset
+        PromoLogoFallback.Visible = false
+    else
+        warn("[OctoputHub] BlackScreen promotional logo could not load; using panel fallback. " .. tostring(asset))
     end
 end)
 
@@ -648,54 +746,30 @@ end
 
 local function IsFarmUnit(unit)
     if not unit then return false end
-    local stats = unit:FindFirstChild("_stats")
-    local ids = {}
-    local function add(value)
-        if value ~= nil and tostring(value) ~= "" then table.insert(ids, tostring(value)) end
-    end
-    add(GetRawUnitId(unit))
-    add(GetUnitId(unit))
-    add(unit.Name)
-    if stats then
-        for _, fieldName in ipairs({ "unit_id", "unitId", "name", "display_name", "unit_name" }) do
-            local field = stats:FindFirstChild(fieldName)
-            if field then add(field.Value) end
-        end
-        if stats:FindFirstChild("farm_amount") then return true end
-        local showFarm = stats:FindFirstChild("_show_as_farm_unit")
-        if showFarm and showFarm.Value == true then return true end
-    end
 
-    -- Match every known identifier against the canonical unit database. Some
-    -- evolved/renamed models do not keep the same _stats.id as their loadout.
+    -- Match the game's unit_static_is_farm() implementation:
+    -- Units[unitId].tags must contain the exact "Farm" tag.
+    -- LookupUnitData reads the same canonical ReplicatedStorage unit database.
+    local ids = {
+        GetRawUnitId(unit),
+        GetUnitId(unit),
+    }
+
     for _, id in ipairs(ids) do
-        local data = LookupUnitData(id)
-        if type(data) == "table" then
-            if type(data.tags) == "table" then
+        if id and id ~= "" then
+            local data = LookupUnitData(id)
+            if type(data) == "table" and type(data.tags) == "table" then
                 for _, tag in pairs(data.tags) do
-                    if tostring(tag):lower() == "farm" then return true end
-                end
-            end
-            if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
-                or data._show_as_farm_unit == true or data.show_as_farm_unit == true
-                or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
-                return true
-            end
-            if type(data.end_of_wave) == "table" then
-                for _, effect in pairs(data.end_of_wave) do
-                    if type(effect) == "table" and tostring(effect.type):lower() == "farm" then
+                    if tag == "Farm" then
                         return true
                     end
                 end
             end
         end
     end
-    for _, id in ipairs(ids) do
-        if IsFarmName(id) then return true end
-    end
+
     return false
 end
-
 local function GetEquippedUnitList()
     local unitsList = {}
 
@@ -1485,6 +1559,75 @@ local function BuildPlayerStatsText(currencies)
     end
     return table.concat(lines, "\n")
 end
+
+-- Live match information shown while Reduce 3D Render is active.
+local GetInGameCash -- forward declaration; implementation is below the upgrade helpers.
+local matchStartedAt = nil
+local lastMatchInfoRefresh = 0
+local function FormatElapsed(seconds)
+    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, secs)
+end
+
+local function ReadCurrentStageName()
+    local results = playerGui:FindFirstChild("ResultsUI")
+    local holder = results and results:FindFirstChild("Holder")
+    local resultName = holder and holder:FindFirstChild("LevelName")
+    if resultName and resultName:IsA("TextLabel") and resultName.Text ~= "" then
+        return resultName.Text
+    end
+
+    local data = workspace:FindFirstChild("_DATA")
+    if data then
+        for _, name in ipairs({"LevelName", "StageName", "MapName", "Level", "Stage"}) do
+            local value = data:FindFirstChild(name)
+            if value and value:IsA("ValueBase") and tostring(value.Value) ~= "" then
+                return tostring(value.Value)
+            end
+        end
+    end
+    for _, name in ipairs({"_level_name", "_stage_name", "_map_name"}) do
+        local value = workspace:FindFirstChild(name)
+        if value and value:IsA("ValueBase") and tostring(value.Value) ~= "" then
+            return tostring(value.Value)
+        end
+    end
+    return "Unknown Stage"
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        task.wait(0.25)
+        local inMatch = workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
+        if inMatch then
+            if not matchStartedAt then matchStartedAt = os.clock() end
+        else
+            matchStartedAt = nil
+        end
+
+        local showPanel = State.BlackScreen == true and inMatch
+        MatchInfoPanel.Visible = showPanel
+        if showPanel and os.clock() - lastMatchInfoRefresh >= 0.5 then
+            lastMatchInfoRefresh = os.clock()
+            MatchTimerLabel.Text = "TIME  " .. FormatElapsed(matchStartedAt and (os.clock() - matchStartedAt) or 0)
+            MatchStageLabel.Text = "STAGE: " .. ReadCurrentStageName()
+            MatchWaveLabel.Text = "WAVE  " .. tostring(GetCurrentWave())
+
+            local currencies = ReadPlayerCurrencies()
+            local cash = GetInGameCash()
+            local statLines = {
+                "PLAYER: " .. tostring(player.DisplayName or player.Name),
+                "CASH: " .. (cash ~= nil and FormatCompact(cash) or "N/A"),
+                "GEMS: " .. FormatCompact(currencies.Gems or 0) .. "     GOLD: " .. FormatCompact(currencies.Gold or 0),
+                "XP: " .. FormatCompact(currencies.XP or 0) .. "     TROPHIES: " .. FormatCompact(currencies.Trophies or 0),
+            }
+            MatchStatsLabel.Text = table.concat(statLines, "\n")
+        end
+    end
+end)
 
 local function BuildRewardText(before, after)
     local ordered = {"XP", "SummerPearls", "Gold", "Gems", "Trophies"}
@@ -3624,7 +3767,7 @@ local pendingUpgradeRequests = {}
 local pendingSpawnRequests = {}
 
 -- In-game cash (same value the game HUD uses for upgrade/placement affordability).
-local function GetInGameCash()
+GetInGameCash = function()
     local stats = player:FindFirstChild("_stats")
     local resource = stats and stats:FindFirstChild("resource")
     return resource and tonumber(resource.Value) or nil
@@ -3720,16 +3863,35 @@ task.spawn(function()
             end
 
             if #candidates > 0 then
-                table.sort(candidates, function(a, b)
-                    if State.AutoUpgradeFarmFirst and a.farm ~= b.farm then
-                        return a.farm
+                local function sortByCheapest(list)
+                    table.sort(list, function(a, b)
+                        if a.cost ~= b.cost then return a.cost < b.cost end
+                        if a.level ~= b.level then return a.level < b.level end
+                        return tostring(a.unit) < tostring(b.unit)
+                    end)
+                end
+
+                if State.AutoUpgradeFarmFirst then
+                    -- Strictly separate the queues: any affordable Farm upgrade
+                    -- outranks every non-Farm upgrade, regardless of its price.
+                    local farmCandidates = {}
+                    local otherCandidates = {}
+                    for _, candidate in ipairs(candidates) do
+                        if candidate.farm then
+                            table.insert(farmCandidates, candidate)
+                        else
+                            table.insert(otherCandidates, candidate)
+                        end
                     end
-                    if a.cost ~= b.cost then return a.cost < b.cost end
-                    local aLevel = a.level
-                    local bLevel = b.level
-                    if aLevel ~= bLevel then return aLevel < bLevel end
-                    return tostring(a.unit) < tostring(b.unit)
-                end)
+                    sortByCheapest(farmCandidates)
+                    sortByCheapest(otherCandidates)
+                    candidates = #farmCandidates > 0 and farmCandidates or otherCandidates
+                else
+                    -- Normal Auto Upgrade: cheapest affordable upgrade first,
+                    -- without considering whether the unit is a Farm.
+                    sortByCheapest(candidates)
+                end
+
                 local target = candidates[1].unit
                 local targetStats = target:FindFirstChild("_stats")
                 local targetLevel = targetStats and targetStats:FindFirstChild("upgrade")
