@@ -813,8 +813,102 @@ function IsFarmName(text)
         or id:find("weather", 1, true)) ~= nil
 end
 
+ReplicatedGameDataSyncedJobId = nil
+ReplicatedGameDataSyncing = false
+ReplicatedGameDataLastAttempt = 0
+
+function SyncReplicatedGameData()
+    if IsInLobby() then
+        return
+    end
+    local jobId = tostring(game.JobId or "")
+    if ReplicatedGameDataSyncedJobId == jobId
+        and type(UnitsDataCache) == "table"
+        and type(UnitsDataCache["leafa_evolved"]) == "table"
+        and type(UnitsDataCache["leafa_evolved"].upgrade) == "table" then
+        return
+    end
+    local now = tick()
+    if ReplicatedGameDataSyncing or (now - ReplicatedGameDataLastAttempt) < 4 then
+        return
+    end
+    ReplicatedGameDataLastAttempt = now
+    ReplicatedGameDataSyncing = true
+
+    task.spawn(function()
+        pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local loaderUnits = Loader.load_data(game, "Units")
+            local loaderAttacks = Loader.load_data(game, "Attacks")
+            if type(loaderUnits) == "table" then
+                UnitsDataCache = UnitsDataCache or loaderUnits
+                for k, v in pairs(loaderUnits) do
+                    if type(v) == "table" then
+                        UnitsDataCache[k] = v
+                    end
+                end
+            end
+            if type(loaderAttacks) == "table" then
+                AttacksDataCache = AttacksDataCache or loaderAttacks
+                for k, v in pairs(loaderAttacks) do
+                    if type(v) == "table" then
+                        AttacksDataCache[k] = v
+                    end
+                end
+            end
+
+            if type(UnitsDataCache) == "table"
+                and type(UnitsDataCache["leafa_evolved"]) == "table"
+                and type(UnitsDataCache["leafa_evolved"].upgrade) == "table" then
+                ReplicatedGameDataSyncedJobId = jobId
+                return
+            end
+
+            local rep = InvokeEndpoint("get_unit_game_replicator_data")
+            if type(rep) == "table" then
+                if type(rep.units) == "table" then
+                    UnitsDataCache = UnitsDataCache or {}
+                    for unitId, unitDef in pairs(rep.units) do
+                        if type(unitDef) == "table" then
+                            unitDef.id = unitDef.id or unitId
+                            UnitsDataCache[unitId] = unitDef
+                            if type(loaderUnits) == "table" then
+                                loaderUnits[unitId] = unitDef
+                            end
+                        end
+                    end
+                end
+                if type(rep.attacks) == "table" then
+                    AttacksDataCache = AttacksDataCache or {}
+                    for attackId, attackDef in pairs(rep.attacks) do
+                        if type(attackDef) == "table" then
+                            AttacksDataCache[attackId] = attackDef
+                            if type(loaderAttacks) == "table" then
+                                loaderAttacks[attackId] = attackDef
+                            end
+                        end
+                    end
+                end
+                ReplicatedGameDataSyncedJobId = jobId
+            end
+        end)
+        ReplicatedGameDataSyncing = false
+    end)
+end
+
 function GetUnitsData()
-    if UnitsDataCache then
+    if not IsInLobby() then
+        SyncReplicatedGameData()
+    end
+    if UnitsDataCache and next(UnitsDataCache) ~= nil then
+        return UnitsDataCache
+    end
+    local okLoader, loaderData = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_data(game, "Units")
+    end)
+    if okLoader and type(loaderData) == "table" and next(loaderData) ~= nil then
+        UnitsDataCache = loaderData
         return UnitsDataCache
     end
     local ok, data = pcall(function()
@@ -1013,15 +1107,30 @@ end
 -- matching owned-unit Curse data. Game.lua applies Curse cooldown modifiers
 -- through further_modifiers.cursed and exposes the effective cooldown in
 -- _stats.active_attack_cooldown on the deployed model.
+--
+-- Buff loop formula (game.lua):
+--   active cooldown  C = active_attack_stats.attack_cooldown (60s for Commander/Windsong)
+--                        * calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown")
+--                      = base * max(0.6, (1 + cursed attack_cooldown mods) * level/artifact mods)
+--   buff duration    D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
+--   unit SPD         = 1 / C (casts per second); group rate R = sum(1 / C_i)
+--   loop is seamless when R >= 1 / D, i.e. units needed = ceil(C / D)
+-- The worker recasts one unit only when the group's current buff is about to
+-- expire (lastGroupCast + D - lead), so casts are staggered instead of all
+-- units firing together and leaving a gap afterwards.
 BUFF_ROTATION_ATTACKS = {
-    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical" },
-    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic" },
+    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander", baseCooldown = 60 },
+    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong", baseCooldown = 60 },
 }
-BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false }
+BUFF_ROTATION_ELFY_DEFAULT = { name = "Elfy (Sylph) - Verdant Enchantment", duration = 30, buff = "Magic", unit = "elfy", baseCooldown = 60 }
+BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false, requestStarted = 0, ownCast = {} }
 BUFF_ROTATION_CURSE_CACHE = {}
+BUFF_ROTATION_MULT_CACHE = {}
 BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
 BUFF_ROTATION_PENDING_TIMEOUT = 4.5
 BUFF_ROTATION_SAFETY_MARGIN = 0.75
+BUFF_ROTATION_REQUEST_TIMEOUT = 8
+BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN = 60
 
 function GetOwnedUnitRecordForPlacedUnit(unit)
     if not unit or not unit:FindFirstChild("_stats") then return nil end
@@ -1048,123 +1157,471 @@ function GetUnitCurseCooldownInfo(unit)
     if uuid ~= "" then
         local cached = BUFF_ROTATION_CURSE_CACHE[uuid]
         if cached and tick() - cached.time < 5 then
-            return cached.hasCurse, cached.reduction, cached.known
+            return cached.hasCurse, cached.reduction, cached.known, cached.factor
         end
     end
 
     local owned = GetOwnedUnitRecordForPlacedUnit(unit)
     if type(owned) ~= "table" then
         if uuid ~= "" then
-            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = false }
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = false, factor = 1 }
         end
-        return false, 0, false
+        return false, 0, false, 1
     end
 
-    local modifiers = owned.further_modifiers
-    local cursed = type(modifiers) == "table" and modifiers.cursed or nil
+    local cursed = type(owned.further_modifiers) == "table" and owned.further_modifiers.cursed or nil
     if type(cursed) ~= "table" then
-        -- The owned record and modifier container were read successfully, so
-        -- absence of the cursed entry means this unit has no Curse.
         if uuid ~= "" then
-            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = true }
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = true, factor = 1 }
         end
-        return false, 0, true
+        return false, 0, true, 1
     end
 
-    local reduction = 0
+    -- game.lua calculate_static_stat_multiplier() strips the "active_" prefix,
+    -- then sums BOTH cursed.positive_buff and cursed.negative_buff for
+    -- stat_id == "attack_cooldown". Keep positive and negative modifiers.
+    local modifierSum = 0
+    local hasCooldownModifier = false
     for _, key in ipairs({ "positive_buff", "negative_buff" }) do
         local mod = cursed[key]
-        if type(mod) == "table"
-            and (mod.stat_id == "attack_cooldown" or mod.stat_id == "active_attack_cooldown")
-            and tonumber(mod.stat_mod) and tonumber(mod.stat_mod) < 0 then
-            reduction = reduction + tonumber(mod.stat_mod)
+        if type(mod) == "table" and mod.stat_id == "attack_cooldown" and tonumber(mod.stat_mod) then
+            modifierSum = modifierSum + tonumber(mod.stat_mod)
+            hasCooldownModifier = true
         end
     end
-    local hasCurse = reduction < 0
+    local factor = math.max(0.0001, 1 + modifierSum)
     if uuid ~= "" then
-        BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = hasCurse, reduction = reduction, known = true }
+        BUFF_ROTATION_CURSE_CACHE[uuid] = {
+            time = tick(), hasCurse = hasCooldownModifier, reduction = modifierSum,
+            known = true, factor = factor
+        }
     end
-    return hasCurse, reduction, true
+    return hasCooldownModifier, modifierSum, true, factor
 end
 
-function IsElfySylphUnit(rawId, unitData)
-    local id = NormalizeName(rawId)
+function GetAttacksData()
+    if not IsInLobby() then
+        SyncReplicatedGameData()
+    end
+    if AttacksDataCache and next(AttacksDataCache) ~= nil then
+        return AttacksDataCache
+    end
+    local okLoader, loaderData = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_data(game, "Attacks")
+    end)
+    if okLoader and type(loaderData) == "table" and next(loaderData) ~= nil then
+        AttacksDataCache = loaderData
+        return AttacksDataCache
+    end
+    local ok, data = pcall(function()
+        return require(ReplicatedStorage.src.Data.Attacks)
+    end)
+    if ok and type(data) == "table" then
+        AttacksDataCache = data
+        return AttacksDataCache
+    end
+    return {}
+end
+
+-- Read the buff time from Attacks[attackId].aoe[*].hit.buffs[*].time
+-- (erwin:buff_units / wendy:buff_units = 30s). Works for Elfy's runtime
+-- Verdant Enchantment as well, because the live Attacks module contains it.
+function GetAttackBuffDuration(attackId, fallback)
+    local attack = attackId and GetAttacksData()[attackId] or nil
+    local best = nil
+    local function scanHit(hit)
+        if type(hit) ~= "table" or type(hit.buffs) ~= "table" then return end
+        for _, buff in pairs(hit.buffs) do
+            local t = type(buff) == "table" and tonumber(buff.time) or nil
+            if t and t > 0 and (not best or t > best) then
+                best = t
+            end
+        end
+    end
+    if type(attack) == "table" then
+        scanHit(attack.hit)
+        if type(attack.hit) == "table" then
+            for _, hit in pairs(attack.hit) do
+                if type(hit) == "table" then scanHit(hit) end
+            end
+        end
+        if type(attack.aoe) == "table" then
+            for _, entry in pairs(attack.aoe) do
+                if type(entry) == "table" then scanHit(entry.hit) end
+            end
+        end
+    end
+    return best or fallback or 30
+end
+
+function GetAttackDisplayName(attackId, fallback)
+    local attack = attackId and GetAttacksData()[attackId] or nil
+    if type(attack) == "table" and type(attack.name) == "string" and attack.name ~= "" then
+        return attack.name
+    end
+    return fallback
+end
+
+-- Mirrors UnitServiceCore.get_active_stats_used(): unit active_attack_stats
+-- first, otherwise the first upgrade that defines active_attack_stats.
+function GetUnitActiveBaseCooldown(unitData, upgradeLevel)
+    if type(unitData) ~= "table" then return nil end
+    local stats = unitData.active_attack_stats
+    if type(stats) == "table" and tonumber(stats.attack_cooldown) then
+        return tonumber(stats.attack_cooldown)
+    end
+    if type(unitData.upgrade) == "table" then
+        local lvl = math.min(tonumber(upgradeLevel) or #unitData.upgrade, #unitData.upgrade)
+        local found = nil
+        for i = 1, lvl do
+            local upg = unitData.upgrade[i]
+            if type(upg) == "table" and type(upg.active_attack_stats) == "table"
+                and tonumber(upg.active_attack_stats.attack_cooldown) then
+                found = tonumber(upg.active_attack_stats.attack_cooldown)
+            end
+        end
+        if found then return found end
+        for _, upg in pairs(unitData.upgrade) do
+            if type(upg) == "table" and type(upg.active_attack_stats) == "table"
+                and tonumber(upg.active_attack_stats.attack_cooldown) then
+                return tonumber(upg.active_attack_stats.attack_cooldown)
+            end
+        end
+    end
+    return nil
+end
+
+-- Active cooldown multiplier exactly as game.lua computes it:
+-- UnitServiceCore.calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown").
+-- For "active_" stats the game strips the prefix, skips trait multipliers, adds
+-- cursed positive_buff + negative_buff attack_cooldown mods, applies level /
+-- artifact modifiers and clamps the result to >= 0.6.
+-- Fallback when the core service is unavailable: max(0.6, 1 + curseSum).
+function GetActiveCooldownMultiplier(unit, curseSum)
+    local stats = unit and unit:FindFirstChild("_stats")
+    local uuidValue = stats and stats:FindFirstChild("uuid")
+    local uuid = uuidValue and tostring(uuidValue.Value or "") or ""
+    if uuid ~= "" then
+        local cached = BUFF_ROTATION_MULT_CACHE[uuid]
+        if cached and tick() - cached.time < 5 then
+            return cached.mult, cached.source, cached.speedStat
+        end
+    end
+
+    local owned = GetOwnedUnitRecordForPlacedUnit(unit)
+    local mult, source = nil, "curse"
+    local speedStat = nil
+    if type(owned) == "table" then
+        if type(owned.trait_stats) == "table" then
+            speedStat = tonumber(owned.trait_stats.speed_stat)
+        end
+        local ok, value = pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local core = Loader.load_core_service(game, "UnitServiceCore")
+            if core and type(core.calculate_static_stat_multiplier) == "function" then
+                return core.calculate_static_stat_multiplier(owned, owned.xp or 0, "active_attack_cooldown", nil)
+            end
+        end)
+        if ok and tonumber(value) and tonumber(value) > 0 then
+            mult = tonumber(value)
+            source = "game"
+        end
+    end
+    if not mult then
+        mult = math.max(0.6, 1 + (tonumber(curseSum) or 0))
+    end
+    if not speedStat and unit then
+        speedStat = tonumber(unit:GetAttribute("speed_stat"))
+    end
+    if uuid ~= "" then
+        BUFF_ROTATION_MULT_CACHE[uuid] = { time = tick(), mult = mult, source = source, speedStat = speedStat }
+    end
+    return mult, source, speedStat
+end
+
+BUFF_ROTATION_ATTACKS_REPLICATE = nil
+function GetAttacksReplicateService()
+    if BUFF_ROTATION_ATTACKS_REPLICATE then
+        return BUFF_ROTATION_ATTACKS_REPLICATE
+    end
+    local ok, service = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_client_service(game, "AttacksReplicate")
+    end)
+    if ok and type(service) == "table" then
+        BUFF_ROTATION_ATTACKS_REPLICATE = service
+        return service
+    end
+    return nil
+end
+
+function GetUnitOverheadReadyAttribute(unit)
+    if not unit then return nil end
+    local ok, readyAttr = pcall(function()
+        local hrp = unit:FindFirstChild("HumanoidRootPart")
+        local overFrame = hrp and hrp:FindFirstChild("OverFrame")
+        local activeCd = overFrame and overFrame:FindFirstChild("ActiveCooldown")
+        local bar = activeCd and activeCd:FindFirstChild("Bar")
+        local stroke = bar and bar:FindFirstChild("UIStroke")
+        if stroke then
+            return stroke:GetAttribute("_ready")
+        end
+        return nil
+    end)
+    if ok then return readyAttr end
+    return nil
+end
+
+function GetActiveAttackCooldownState(entry, now)
+    -- Mirror game.lua AttacksReplicate.get_current_active_attack_cooldown():
+    -- busy while _stats.active_queued_or_using is true, otherwise ready when
+    -- active_attack_cooldown - (tick() - last_active_cast) <= 0.
+    if entry.queued then
+        return true, false, entry.cooldown, entry.cooldown
+    end
+    local remaining = entry.cooldown - (now - entry.lastCast)
+    local isReady = remaining <= 0
+    if isReady and entry.lastCast <= 0 then
+        local overheadReady = GetUnitOverheadReadyAttribute(entry.model)
+        if overheadReady == false then
+            isReady = false
+            remaining = math.max(remaining, 1)
+        end
+    end
+    return false, isReady, entry.cooldown, math.max(0, remaining)
+end
+
+function IsElfySylphUnit(rawId, unitData, unit)
+    for _, value in ipairs({ rawId, unitData and unitData.id, unit and unit.Name }) do
+        local id = NormalizeName(value)
+        if id == "leafaevolved"
+            or (id:find("leafa", 1, true) and id:find("evolved", 1, true))
+            or id:find("sylph", 1, true) then
+            return true
+        end
+    end
+    -- NormalizeName keeps parentheses, so "Elfy (Sylph)" -> "elfy(sylph)".
     local name = NormalizeName(unitData and unitData.name)
-    return id == "leafaevolved"
-        or (id:find("leafa", 1, true) ~= nil and id:find("evolved", 1, true) ~= nil)
-        or name:find("sylph", 1, true) ~= nil
+    if name:find("sylph", 1, true) then
+        return true
+    end
+    if type(unitData) == "table" and type(unitData.evolved) == "table" and unitData.evolved.from == "leafa" then
+        return true
+    end
+    return false
 end
 
-function GetBuffRotationGroups()
+function IsElfyFamilyUnit(rawId, unitData, unit)
+    if IsElfySylphUnit(rawId, unitData, unit) then return true end
+    local id = NormalizeName(rawId)
+    local unitName = NormalizeName(unit and unit.Name)
+    local name = NormalizeName(unitData and unitData.name)
+    return id:find("leafa", 1, true) ~= nil
+        or id:find("elfy", 1, true) ~= nil
+        or unitName:find("leafa", 1, true) ~= nil
+        or unitName:find("elfy", 1, true) ~= nil
+        or name:find("elfy", 1, true) ~= nil
+end
+
+function ResolveUnitActiveAttackId(unit, stats, unitData, upgradeLevel)
+    local activeValue = stats and stats:FindFirstChild("active_attack")
+    local activeId = activeValue and tostring(activeValue.Value) or "nil"
+    if activeId ~= "" and activeId ~= "nil" then
+        return activeId
+    end
+    local okCore, coreActive = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local core = Loader.load_core_service(game, "UnitServiceCore")
+        if core and type(core.get_active_id) == "function" then
+            return core.get_active_id(unit)
+        end
+        return nil
+    end)
+    if okCore and type(coreActive) == "string" and coreActive ~= "" and coreActive ~= "nil" then
+        return coreActive
+    end
+    if type(unitData) == "table" then
+        if type(unitData.active_attack) == "string" and unitData.active_attack ~= "" and unitData.active_attack ~= "nil" then
+            return unitData.active_attack
+        end
+        if type(unitData.upgrade) == "table" then
+            local lvl = math.min(tonumber(upgradeLevel) or 0, #unitData.upgrade)
+            local resolved = nil
+            for i = 1, lvl do
+                local upg = unitData.upgrade[i]
+                if type(upg) == "table" and type(upg.active_attack) == "string"
+                    and upg.active_attack ~= "" and upg.active_attack ~= "nil" then
+                    resolved = upg.active_attack
+                end
+            end
+            if resolved then
+                return resolved
+            end
+        end
+    end
+    return nil
+end
+
+function GetBuffRotationGroups(now)
+    now = now or tick()
+    SyncReplicatedGameData()
+    local attacksReplicate = GetAttacksReplicateService()
+    local globalCooldowns = attacksReplicate and type(attacksReplicate.GLOBAL_ATTACK_COOLDOWNS) == "table"
+        and attacksReplicate.GLOBAL_ATTACK_COOLDOWNS or nil
+
     local groups = {}
-    local passiveElfyCount = 0
+    local elfyInfo = { total = 0, withoutActive = 0 }
+    local liveModels = {}
     for _, unit in ipairs(GetPlayerUnits()) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
+            liveModels[unit] = true
             local rawId = GetRawUnitId(unit)
             local unitData = LookupUnitData(rawId)
-            local activeValue = stats:FindFirstChild("active_attack")
-            local activeId = activeValue and tostring(activeValue.Value) or "nil"
-            if activeId == "" or activeId == "nil" then activeId = nil end
+            local upgradeValue = stats:FindFirstChild("upgrade")
+            local upgradeLevel = upgradeValue and tonumber(upgradeValue.Value) or 0
 
-            local isElfy = IsElfySylphUnit(rawId, unitData)
-            local definition = activeId and BUFF_ROTATION_ATTACKS[activeId] or nil
+            -- Same source as UnitServiceCore.get_active_id(): the live
+            -- _stats.active_attack value, with fallbacks to UnitServiceCore
+            -- and replicated unit upgrade data.
+            local activeId = ResolveUnitActiveAttackId(unit, stats, unitData, upgradeLevel)
 
-            -- game.lua's static Units.leafa_evolved record only declares the
-            -- buff-unit markers; it does not hardcode active_attack. The live
-            -- unit's _stats.active_attack is the same value consumed by
-            -- UnitServiceCore.get_active_id() in the game's ActiveButton.
-            -- Therefore only register Elfy when the live game has supplied an
-            -- actual active ID; never invent an endpoint/attack ID.
+            local isElfy = IsElfyFamilyUnit(rawId, unitData, unit)
             if isElfy then
-                if activeId then
-                    definition = definition or {
-                        name = "Elfy (Sylph) - Verdant Enchantment",
-                        duration = 30,
-                        buff = "Magic",
+                elfyInfo.total = elfyInfo.total + 1
+                if not activeId then
+                    elfyInfo.withoutActive = elfyInfo.withoutActive + 1
+                end
+            end
+
+            local definition = activeId and BUFF_ROTATION_ATTACKS[activeId] or nil
+            if not definition and activeId then
+                local lowerActive = activeId:lower()
+                local isElfyActive = isElfy
+                    or lowerActive:find("leafa", 1, true) ~= nil
+                    or lowerActive:find("elfy", 1, true) ~= nil
+                    or lowerActive:find("sylph", 1, true) ~= nil
+                    or lowerActive:find("verdant", 1, true) ~= nil
+                    or lowerActive:find("enchant", 1, true) ~= nil
+                if isElfyActive then
+                    definition = {
+                        name = "Elfy (Sylph) - " .. tostring(GetAttackDisplayName(activeId, "Verdant Enchantment")),
+                        duration = BUFF_ROTATION_ELFY_DEFAULT.duration,
+                        buff = BUFF_ROTATION_ELFY_DEFAULT.buff,
                         unit = "elfy",
+                        baseCooldown = BUFF_ROTATION_ELFY_DEFAULT.baseCooldown,
                     }
                     BUFF_ROTATION_ATTACKS[activeId] = definition
-                else
-                    passiveElfyCount = passiveElfyCount + 1
+                elseif IsPlacedBuffUnit(unit) then
+                    definition = {
+                        name = tostring((unitData and unitData.name) or unit.Name) .. " - " .. tostring(GetAttackDisplayName(activeId, activeId)),
+                        duration = 30,
+                        buff = "Buff",
+                        unit = NormalizeName(rawId),
+                        baseCooldown = 60,
+                    }
+                    BUFF_ROTATION_ATTACKS[activeId] = definition
                 end
             end
 
-            if definition and (not unitData or unitData._show_as_buff_unit ~= false) then
-                local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
-                local lastCastValue = stats:FindFirstChild("last_active_cast")
-                if cooldownValue and lastCastValue then
-                    local hasCurse, curseReduction, curseKnown = GetUnitCurseCooldownInfo(unit)
-                    local group = groups[activeId]
-                    if not group then
-                        group = {
-                            attackId = activeId,
-                            name = definition.name,
-                            buff = definition.buff,
-                            duration = definition.duration,
-                            units = {},
-                            curseCount = 0,
-                            curseKnownCount = 0,
-                            maxCooldown = 0,
-                        }
-                        groups[activeId] = group
-                    end
-                    local cooldown = math.max(0.1, tonumber(cooldownValue.Value) or definition.duration * 2)
-                    local lastCast = tonumber(lastCastValue.Value) or 0
-                    table.insert(group.units, {
-                        model = unit,
-                        uuid = stats:FindFirstChild("uuid") and tostring(stats.uuid.Value) or tostring(unit),
-                        cooldown = cooldown,
-                        lastCast = lastCast,
-                        hasCurse = hasCurse,
-                        curseReduction = curseReduction,
-                        curseKnown = curseKnown,
-                    })
-                    if hasCurse then group.curseCount = group.curseCount + 1 end
-                    if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
-                    group.maxCooldown = math.max(group.maxCooldown, cooldown)
+            if definition then
+                local baseCooldown = GetUnitActiveBaseCooldown(unitData, upgradeLevel)
+                if not baseCooldown and type(unitData) == "table" and type(unitData.evolved) == "table" then
+                    baseCooldown = GetUnitActiveBaseCooldown(LookupUnitData(unitData.evolved.from), upgradeLevel)
                 end
+                baseCooldown = baseCooldown or definition.baseCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+
+                local hasCurse, curseReduction, curseKnown, curseFactor = GetUnitCurseCooldownInfo(unit)
+                local multiplier, multSource, speedStat = GetActiveCooldownMultiplier(unit, curseReduction)
+                local expectedCooldown = baseCooldown and (baseCooldown * multiplier) or nil
+
+                -- The live value is what the game itself uses for readiness, so
+                -- it is authoritative. Fall back to the game formula when the
+                -- unit does not expose active_attack_cooldown (Elfy runtime active).
+                local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
+                local liveCooldown = cooldownValue and tonumber(cooldownValue.Value) or nil
+                if liveCooldown and liveCooldown <= 0 then liveCooldown = nil end
+                local globalEntry = globalCooldowns and globalCooldowns[activeId] or nil
+                local globalCooldown = type(globalEntry) == "table" and tonumber(globalEntry.cooldown) or nil
+                if globalCooldown and globalCooldown <= 0 then globalCooldown = nil end
+
+                local cooldown = liveCooldown or globalCooldown or expectedCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+                cooldown = math.max(0.1, cooldown)
+
+                -- In Lua, 0 is truthy! last_active_cast.Value starts at 0 before
+                -- the first cast, so treat <= 0 as nil so ownCast / globalCast work.
+                local lastCastValue = stats:FindFirstChild("last_active_cast")
+                local rawLiveLastCast = lastCastValue and tonumber(lastCastValue.Value) or nil
+                local validLiveLastCast = (rawLiveLastCast and rawLiveLastCast > 0 and rawLiveLastCast <= now + 5)
+                    and rawLiveLastCast or nil
+
+                local globalLastCast = nil
+                if type(globalEntry) == "table" and tonumber(globalEntry.last_cast) and tonumber(globalEntry.last_cast) > 0 then
+                    globalLastCast = tonumber(globalEntry.last_cast)
+                elseif tonumber(globalEntry) and tonumber(globalEntry) > 0 then
+                    globalLastCast = tonumber(globalEntry)
+                end
+                if globalLastCast and globalLastCast > now + 5 then
+                    globalLastCast = nil
+                end
+
+                local ownCast = BUFF_ROTATION_RUNTIME.ownCast[unit] or 0
+                local lastCast = math.max(validLiveLastCast or 0, globalLastCast or 0, ownCast or 0)
+
+                local queuedValue = stats:FindFirstChild("active_queued_or_using")
+                local queued = queuedValue and queuedValue.Value == true or false
+
+                local duration = GetAttackBuffDuration(activeId, definition.duration)
+
+                local group = groups[activeId]
+                if not group then
+                    group = {
+                        attackId = activeId,
+                        name = definition.name,
+                        buff = definition.buff,
+                        duration = duration,
+                        units = {},
+                        curseCount = 0,
+                        curseKnownCount = 0,
+                        maxCooldown = 0,
+                        baseCooldown = baseCooldown,
+                        isElfy = definition.unit == "elfy",
+                    }
+                    groups[activeId] = group
+                end
+                group.duration = math.max(group.duration or 0, duration)
+
+                table.insert(group.units, {
+                    model = unit,
+                    attackId = activeId,
+                    uuid = stats:FindFirstChild("uuid") and tostring(stats.uuid.Value) or tostring(unit),
+                    cooldown = cooldown,
+                    liveCooldown = liveCooldown,
+                    expectedCooldown = expectedCooldown,
+                    baseCooldown = baseCooldown,
+                    multiplier = multiplier,
+                    multSource = multSource,
+                    speedStat = speedStat,
+                    lastCast = lastCast,
+                    hasLiveCast = (validLiveLastCast ~= nil) or (globalLastCast ~= nil),
+                    queued = queued,
+                    hasCurse = hasCurse,
+                    curseReduction = curseReduction,
+                    curseFactor = curseFactor or 1,
+                    curseKnown = curseKnown,
+                    spd = 1 / cooldown,
+                })
+                if hasCurse then group.curseCount = group.curseCount + 1 end
+                if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
+                group.maxCooldown = math.max(group.maxCooldown, cooldown)
             end
+        end
+    end
+
+    for model in pairs(BUFF_ROTATION_RUNTIME.ownCast) do
+        if not liveModels[model] then
+            BUFF_ROTATION_RUNTIME.ownCast[model] = nil
         end
     end
 
@@ -1173,17 +1630,30 @@ function GetBuffRotationGroups()
             return tostring(a.uuid) < tostring(b.uuid)
         end)
         local totalRate = 0
+        local multTotal = 0
         for _, entry in ipairs(group.units) do
-            totalRate = totalRate + (1 / math.max(0.1, entry.cooldown))
+            entry.spd = 1 / math.max(0.1, entry.cooldown)
+            totalRate = totalRate + entry.spd
+            multTotal = multTotal + (entry.multiplier or 1)
         end
+        local n = #group.units
         group.totalRate = totalRate
+        group.totalSPD = totalRate
+        group.averageSPD = n > 0 and (totalRate / n) or 0
+        group.averageMultiplier = n > 0 and (multTotal / n) or 1
+        -- Average spacing between casts if every unit is used as soon as it is ready.
         group.interval = totalRate > 0 and (1 / totalRate) or math.huge
-        group.averageCooldown = #group.units > 0 and (#group.units / math.max(totalRate, 0.000001)) or math.huge
-        local safeDuration = math.max(1, group.duration - BUFF_ROTATION_SAFETY_MARGIN)
-        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / safeDuration))
-        group.sustainable = totalRate >= (1 / safeDuration)
+        group.averageCooldown = n > 0 and (n / math.max(totalRate, 0.000001)) or math.huge
+        -- Seamless loop needs one cast every D seconds: R >= 1 / D.
+        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / math.max(1, group.duration)))
+        group.sustainable = totalRate >= (1 / math.max(1, group.duration)) - 1e-6
+        -- Recast lead before expiry. Using a lead shortens the effective cycle,
+        -- so only use as much lead as the group's SPD can afford:
+        --   sum((D - lead) / C_i) >= 1  ->  lead <= D - 1 / R
+        local affordable = totalRate > 0 and (group.duration - 1 / totalRate) or 0
+        group.lead = math.clamp(affordable, 0, BUFF_ROTATION_SAFETY_MARGIN)
     end
-    return groups, passiveElfyCount
+    return groups, elfyInfo
 end
 
 function SetBuffRotationStatus(message, color)
@@ -1576,7 +2046,29 @@ function HitAllowsPlacement(inst, kind)
     return not onHill
 end
 
-function PlacementIsClear(pos, kind)
+function GetPlacedBuffUnitPosition(unit)
+    if not unit then return nil end
+    local stats = unit:FindFirstChild("_stats")
+    local formation = stats and stats:FindFirstChild("formation_goal")
+    if formation and formation.Value then
+        local ok, pos = pcall(function() return formation.Value.Position end)
+        if ok and pos then return pos end
+    end
+    local root = unit:FindFirstChild("_root") or (stats and stats:FindFirstChild("_root"))
+    if root and root.Value then
+        local ok, pos = pcall(function() return root.Value.Position end)
+        if ok and pos then return pos end
+    end
+    local hrp = unit:FindFirstChild("HumanoidRootPart")
+    if hrp then
+        return hrp.Position
+    end
+    local ok, pivot = pcall(function() return unit:GetPivot().Position end)
+    return ok and pivot or nil
+end
+
+function PlacementIsClear(pos, kind, minDistance)
+    minDistance = minDistance or 2.45
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     local ignore = {}
@@ -1601,15 +2093,144 @@ function PlacementIsClear(pos, kind)
     if unitsFolder then
         for _, unit in ipairs(unitsFolder:GetChildren()) do
             if unit:IsA("Model") then
-                local pivot = unit:GetPivot().Position
-                local flat = Vector3.new(hit.Position.X - pivot.X, 0, hit.Position.Z - pivot.Z)
-                if flat.Magnitude < 3.4 then
-                    return nil
+                local unitPos = GetPlacedBuffUnitPosition(unit)
+                if unitPos then
+                    local flat = Vector3.new(hit.Position.X - unitPos.X, 0, hit.Position.Z - unitPos.Z)
+                    if flat.Magnitude < minDistance then
+                        return nil
+                    end
                 end
             end
         end
     end
     return hit.Position
+end
+
+function BuildCompactHexOffsets(spacing, maxRing)
+    spacing = spacing or 2.6
+    maxRing = maxRing or 8
+    local offsets = { Vector2.new(0, 0) }
+    local allRingOffsets = {}
+    for ring = 1, maxRing do
+        for q = -ring, ring do
+            for r = -ring, ring do
+                local s = -q - r
+                if math.max(math.abs(q), math.abs(r), math.abs(s)) == ring then
+                    local x = spacing * (q + r * 0.5)
+                    local z = spacing * (r * 0.8660254038)
+                    table.insert(allRingOffsets, Vector2.new(x, z))
+                end
+            end
+        end
+    end
+    table.sort(allRingOffsets, function(a, b)
+        local da, db = a.Magnitude, b.Magnitude
+        if math.abs(da - db) > 0.05 then
+            return da < db
+        end
+        return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
+    end)
+    for _, offset in ipairs(allRingOffsets) do
+        table.insert(offsets, offset)
+    end
+    return offsets
+end
+
+-- Farm units can be ground or hill units depending on the game's unit data.
+-- If the unit database lookup misses an entry, try every valid placement surface
+-- instead of silently skipping the farm because the guessed surface was wrong.
+-- Buff units must stay together so their range-based buffs overlap.
+-- game.lua marks Commander, Windsong and Elfy (Sylph) with
+-- _show_as_buff_unit / _placement_highlight_buffed_units.
+function IsBuffUnitInfo(info)
+    if type(info) ~= "table" then return false end
+    local rawId = info.unitId or info.name
+    local data = LookupUnitData(rawId)
+    if type(data) == "table"
+        and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true) then
+        return true
+    end
+    if IsElfyFamilyUnit(rawId, data) then
+        return true
+    end
+    local norm = NormalizeName(rawId)
+    return norm:find("erwin", 1, true) ~= nil
+        or norm:find("commander", 1, true) ~= nil
+        or norm:find("wendy", 1, true) ~= nil
+        or norm:find("windsong", 1, true) ~= nil
+end
+
+function IsPlacedBuffUnit(unit)
+    if not unit then return false end
+    local rawId = GetRawUnitId(unit)
+    local data = LookupUnitData(rawId)
+    if type(data) == "table"
+        and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true) then
+        return true
+    end
+    if IsElfyFamilyUnit(rawId, data, unit) then
+        return true
+    end
+    local norm = NormalizeName(rawId)
+    return norm:find("erwin", 1, true) ~= nil
+        or norm:find("commander", 1, true) ~= nil
+        or norm:find("wendy", 1, true) ~= nil
+        or norm:find("windsong", 1, true) ~= nil
+end
+
+function GetClusterAnchorPosition(kind)
+    kind = kind or "ground"
+    local buffPositions = {}
+    local combatPositions = {}
+    local farmPositions = {}
+
+    for _, placed in ipairs(GetPlayerUnits()) do
+        local placedKind = ResolvePlacementKind(GetRawUnitId(placed))
+        local compatible = (kind == "hill" and (placedKind == "hill" or placedKind == "hybrid"))
+            or (kind ~= "hill" and placedKind ~= "hill")
+        if compatible then
+            local pos = GetPlacedBuffUnitPosition(placed)
+            if pos then
+                if IsPlacedBuffUnit(placed) then
+                    table.insert(buffPositions, pos)
+                elseif IsFarmUnit(placed) then
+                    table.insert(farmPositions, pos)
+                else
+                    table.insert(combatPositions, pos)
+                end
+            end
+        end
+    end
+
+    local source = #buffPositions > 0 and buffPositions
+        or (#combatPositions > 0 and combatPositions or farmPositions)
+    if #source == 0 then
+        return nil, buffPositions, combatPositions
+    end
+
+    local seed, bestNeighbors = source[1], -1
+    for _, candidateSeed in ipairs(source) do
+        local neighbors = 0
+        for _, otherPos in ipairs(source) do
+            if (candidateSeed - otherPos).Magnitude <= 14 then
+                neighbors = neighbors + 1
+            end
+        end
+        if neighbors > bestNeighbors then
+            seed, bestNeighbors = candidateSeed, neighbors
+        end
+    end
+
+    local clusterSum = Vector3.new(0, 0, 0)
+    local clusterCount = 0
+    for _, pos in ipairs(source) do
+        if (seed - pos).Magnitude <= 14 then
+            clusterSum = clusterSum + pos
+            clusterCount = clusterCount + 1
+        end
+    end
+    local anchor = clusterCount > 0 and (clusterSum / clusterCount) or seed
+    return anchor, buffPositions, combatPositions
 end
 
 function GetPlacementCFrame(index, kind)
@@ -1629,11 +2250,15 @@ function GetPlacementCFrame(index, kind)
         return CFrame.new(finalPos, finalPos + flatLook)
     end
 
+    local clusterAnchor = GetClusterAnchorPosition(kind)
+
     if #points >= 2 then
         -- Keep the whole formation around one point on the actual path.
-        -- GetPointOnPolyline uses total segment length, so different map/path
-        -- lengths still place the cluster at the selected percentage.
-        local center, look = GetPointOnPolyline(points, preferred)
+        -- Once the first unit is placed beside the road, anchor subsequent
+        -- units to the existing cluster on the same side of the road so units
+        -- stay tightly packed together.
+        local pathCenter, look = GetPointOnPolyline(points, preferred)
+        local center = clusterAnchor or pathCenter
         local right = look:Cross(Vector3.new(0, 1, 0))
         if right.Magnitude < 0.01 then
             right = Vector3.new(1, 0, 0)
@@ -1647,37 +2272,12 @@ function GetPlacementCFrame(index, kind)
             forward = forward.Unit
         end
 
-        -- Hexagonal cluster: neighboring slots are 3.8 studs apart.
-        -- PlacementIsClear still enforces the game's existing 3.4-stud
-        -- minimum-distance check and terrain / road restrictions.
-        local spacing = 3.8
-        local offsets = { Vector2.new(0, 0) }
-        local maxRing = (kind == "hill") and 16 or 5
-        for ring = 1, maxRing do
-            local ringOffsets = {}
-            for q = -ring, ring do
-                for r = -ring, ring do
-                    local s = -q - r
-                    if math.max(math.abs(q), math.abs(r), math.abs(s)) == ring then
-                        local x = spacing * (q + r * 0.5)
-                        local z = spacing * (r * 0.8660254038)
-                        table.insert(ringOffsets, Vector2.new(x, z))
-                    end
-                end
-            end
-            table.sort(ringOffsets, function(a, b)
-                return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
-            end)
-            for _, offset in ipairs(ringOffsets) do
-                table.insert(offsets, offset)
-            end
-        end
+        local maxRing = (kind == "hill") and 16 or 9
+        local offsets = BuildCompactHexOffsets(2.6, maxRing)
 
-        -- Prefer this unit's stable slot. If terrain, road, or an existing
-        -- unit blocks it, try the remaining nearby cluster slots.
-        local preferredSlot = ((math.max(1, math.floor(index)) - 1) % #offsets) + 1
-        for pass = 1, #offsets do
-            local slot = ((preferredSlot + pass - 2) % #offsets) + 1
+        -- Always search from the cluster center outward (slot 1 -> #offsets)
+        -- so units pack tightly instead of scattering into outer rings.
+        for slot = 1, #offsets do
             local offset = offsets[slot]
             local candidate = center + right * offset.X + forward * offset.Y
             local finalPos = PlacementIsClear(candidate, kind)
@@ -1685,38 +2285,119 @@ function GetPlacementCFrame(index, kind)
                 return Finish(finalPos, look)
             end
         end
+        if clusterAnchor then
+            for slot = 1, #offsets do
+                local offset = offsets[slot]
+                local candidate = pathCenter + right * offset.X + forward * offset.Y
+                local finalPos = PlacementIsClear(candidate, kind)
+                if finalPos then
+                    return Finish(finalPos, look)
+                end
+            end
+        end
         return nil
     end
 
     -- Preserve the previous fallback for maps where lane path points
-    -- are not exposed by the client.
+    -- are not exposed by the client, but pack tightly around the cluster.
     local char = player.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     if not hrp then
         return nil
     end
-    local angle = (index * 45) * (math.pi / 180)
-    local distance = 6 + math.floor(index / 8) * 5
-    local maxFallbackRing = (kind == "hill") and 16 or 5
-    for ring = 0, maxFallbackRing do
-        local radius = distance + ring * 4
-        for direction = 0, 7 do
-            local a = angle + direction * (math.pi / 4)
-            local pos = hrp.Position + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
-            local finalPos = PlacementIsClear(pos, kind)
-            if finalPos then
-                return Finish(finalPos, hrp.CFrame.LookVector)
-            end
+    local center = clusterAnchor or hrp.Position
+    local look = hrp.CFrame.LookVector
+    local right = look:Cross(Vector3.new(0, 1, 0))
+    if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+    local forward = Vector3.new(look.X, 0, look.Z)
+    if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
+
+    local maxFallbackRing = (kind == "hill") and 16 or 9
+    local offsets = BuildCompactHexOffsets(2.6, maxFallbackRing)
+    for slot = 1, #offsets do
+        local offset = offsets[slot]
+        local pos = center + right * offset.X + forward * offset.Y
+        local finalPos = PlacementIsClear(pos, kind)
+        if finalPos then
+            return Finish(finalPos, look)
         end
     end
     return nil
 end
 
--- Farm units can be ground or hill units depending on the game's unit data.
--- If the unit database lookup misses an entry, try every valid placement surface
--- instead of silently skipping the farm because the guessed surface was wrong.
+function GetBuffPlacementCFrame(index, info, kind)
+    kind = kind or ResolvePlacementKind(info and info.unitId)
+    local anchor, buffPositions, combatPositions = GetClusterAnchorPosition(kind)
+
+    local center, look
+    local lane = GetPath1Lane()
+    local points = lane and GetPathPoints(lane) or {}
+    local preferred = math.clamp(tonumber(State.PlacePercent) or 0, 0, 100) / 100
+    if #points >= 2 then
+        local _, pathLook = GetPointOnPolyline(points, preferred)
+        look = pathLook
+    end
+
+    if anchor then
+        center = anchor
+        if not look then
+            local base = GetPlacementCFrame(1, kind)
+            look = base and base.LookVector or Vector3.new(0, 0, -1)
+        end
+    else
+        local base = GetPlacementCFrame(1, kind)
+        if not base then return nil end
+        center = base.Position
+        look = look or base.LookVector
+    end
+
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude < 0.01 then
+        flatLook = Vector3.new(0, 0, -1)
+    else
+        flatLook = flatLook.Unit
+    end
+    local right = flatLook:Cross(Vector3.new(0, 1, 0))
+    if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+
+    -- Compact 2.6-stud hex grid keeps all buff units and nearby combat units
+    -- tightly grouped well inside Commander (15), Windsong (20), and Elfy (25)
+    -- range circles.
+    local offsets = BuildCompactHexOffsets(2.55, 7)
+    local referencePositions = #buffPositions > 0 and buffPositions or combatPositions
+
+    local bestCFrame, bestScore = nil, math.huge
+    for _, offset in ipairs(offsets) do
+        local candidate = center + right * offset.X + flatLook * offset.Y
+        local finalPos = PlacementIsClear(candidate, kind)
+        if finalPos then
+            local maxRefDistance = 0
+            local sumRefDistance = 0
+            for _, existingPos in ipairs(referencePositions) do
+                local d = (finalPos - existingPos).Magnitude
+                maxRefDistance = math.max(maxRefDistance, d)
+                sumRefDistance = sumRefDistance + d
+            end
+            local avgRefDistance = #referencePositions > 0 and (sumRefDistance / #referencePositions) or 0
+            local score = offset.Magnitude + avgRefDistance * 0.6 + maxRefDistance * 0.4
+            if (maxRefDistance <= 14.5 or bestCFrame == nil) and score < bestScore then
+                bestScore = score
+                bestCFrame = CFrame.new(finalPos, finalPos + flatLook)
+                if maxRefDistance <= 6.5 and offset.Magnitude <= 5.5 then
+                    break
+                end
+            end
+        end
+    end
+    return bestCFrame
+end
+
 function GetPlacementCFrameForInfo(index, info)
     local primary = ResolvePlacementKind(info and info.unitId)
+    if IsBuffUnitInfo(info) then
+        local clustered = GetBuffPlacementCFrame(index, info, primary)
+        if clustered then return clustered, primary end
+    end
     local kinds = { primary }
     if IsFarmInfo(info) then
         for _, candidate in ipairs({ "ground", "hill", "hybrid" }) do
@@ -1732,57 +2413,6 @@ function GetPlacementCFrameForInfo(index, info)
         if cf then return cf, kind end
     end
     return nil, primary
-end
-
--- Buff units of the same unit type form their own compact cluster.
--- Non-buff units continue using the original path-based placement formation.
-function IsBuffUnitInfo(info)
-    if not info then return false end
-    local data = LookupUnitData(info.unitId)
-    return type(data) == "table" and data._show_as_buff_unit == true
-end
-
-function GetBuffTypePlacementCFrame(info, placedUnits)
-    if not IsBuffUnitInfo(info) then return nil, nil end
-
-    local targetId = NormalizeName(info.unitId)
-    local anchor = nil
-    local sameTypeCount = 0
-    for _, unit in ipairs(placedUnits or {}) do
-        local rawId = GetRawUnitId(unit)
-        local data = LookupUnitData(rawId)
-        if NormalizeName(rawId) == targetId
-            and type(data) == "table" and data._show_as_buff_unit == true then
-            sameTypeCount = sameTypeCount + 1
-            if not anchor then anchor = unit end
-        end
-    end
-
-    -- The first copy keeps the existing placement behavior; later copies
-    -- search concentric rings around that type's first placed copy.
-    if not anchor then return nil, nil end
-
-    local kind = ResolvePlacementKind(info.unitId)
-    local anchorCF = anchor:GetPivot()
-    local center = anchorCF.Position
-    local spacing = 4.2
-    local maxRing = 4
-    local startSlot = ((sameTypeCount - 1) * 3) % 8
-    for ring = 1, maxRing do
-        local radius = spacing * ring
-        for step = 0, 7 do
-            local angle = ((startSlot + step) * math.pi / 4) + (ring % 2) * (math.pi / 8)
-            local candidate = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-            local finalPos = PlacementIsClear(candidate, kind)
-            if finalPos then
-                local look = anchorCF.LookVector
-                local flatLook = Vector3.new(look.X, 0, look.Z)
-                if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) end
-                return CFrame.new(finalPos, finalPos + flatLook.Unit), kind
-            end
-        end
-    end
-    return nil, kind
 end
 
 function CountCategory(myUnits, pred)
@@ -3365,7 +3995,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Checks every placed Commander / Windsong independently and casts each one as soon as its live Active Cooldown is ready. Estimates whether the current unit count can sustain the 30s buff.", 6, 42)
+CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph) buff loop: each unit's cooldown C = base active CD (60s) x Curse/level multiplier (min 0.6), SPD = 1/C. One unit is cast only when the current buff (D = 30s) is about to expire, so buffs chain without overlap. Seamless when sum(1/C) >= 1/D (units needed = ceil(C/D)). Elfy's Verdant Enchantment is read from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -4824,23 +5454,57 @@ end
 RefreshUnitConfigUI()
 
 -- Estimate the next upgrade price from live unit stats first, then unit data.
--- Unknown prices sort last instead of being mistaken for free upgrades.
+-- Unknown prices for non-maxed units fall back to 0 instead of math.huge so
+-- runtime-replicated units like Elfy (Sylph) are never skipped by AutoUpgrade.
 function GetNextUpgradeCost(unit)
     if not unit or not unit:FindFirstChild("_stats") then return math.huge end
     local stats = unit._stats
     local current = stats:FindFirstChild("upgrade")
     if not current then return math.huge end
+    local curLvl = tonumber(current.Value) or 0
+    local maxVal = stats:FindFirstChild("max_upgrade")
+    if maxVal and tonumber(maxVal.Value) and curLvl >= tonumber(maxVal.Value) then
+        return math.huge
+    end
+
+    SyncReplicatedGameData()
 
     -- Match the game's own pricing path:
     -- ceil(upgrade data cost * player_cost_scale * unit upgrade_cost_multiplier),
     -- with the _negate_high_cost cap applied by UnitServiceCore.
     local data = LookupUnitData(GetRawUnitId(unit))
     local upgrades = type(data) == "table" and data.upgrade or nil
-    local nextInfo = type(upgrades) == "table" and upgrades[(tonumber(current.Value) or 0) + 1] or nil
-    if type(nextInfo) ~= "table" then return math.huge end
+    local nextInfo = type(upgrades) == "table" and upgrades[curLvl + 1] or nil
+    local baseCost = type(nextInfo) == "table"
+        and tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
+        or nil
 
-    local baseCost = tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
-    if not baseCost then return math.huge end
+    if not baseCost then
+        local okGui, guiCost = pcall(function()
+            local pgui = player:FindFirstChild("PlayerGui")
+            local overview = pgui and pgui:FindFirstChild("UnitOverview")
+            local ref = overview and overview:FindFirstChild("_unit_char_ref")
+            if ref and ref.Value == unit then
+                local textObj = overview:FindFirstChild("Outer")
+                    and overview.Outer:FindFirstChild("buttons")
+                    and overview.Outer.buttons:FindFirstChild("Upgrade")
+                    and overview.Outer.buttons.Upgrade:FindFirstChild("Main")
+                    and overview.Outer.buttons.Upgrade.Main:FindFirstChild("Text")
+                local rawText = textObj and tostring(textObj.Text or "") or ""
+                local digits = rawText:gsub("[^%d]", "")
+                if digits ~= "" then
+                    return tonumber(digits)
+                end
+            end
+            return nil
+        end)
+        if okGui and tonumber(guiCost) then
+            return tonumber(guiCost)
+        end
+        -- Allow AutoUpgrade to attempt upgrading when replicator data is still
+        -- loading instead of permanently skipping Elfy (Sylph).
+        return 0
+    end
 
     local multiplier = 1
     local dataFolder = workspace:FindFirstChild("_DATA")
@@ -4903,6 +5567,7 @@ task.spawn(function()
         task.wait(0.5)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            SyncReplicatedGameData()
             local units = GetPlayerUnits()
             local now = tick()
             local candidates = {}
@@ -4940,11 +5605,20 @@ task.spawn(function()
                         if allowed and not pendingRequest then
                             local cost = GetNextUpgradeCost(unit)
                             local cash = GetInGameCash()
+                            local activeVal = stats:FindFirstChild("active_attack")
+                            local hasActive = activeVal and tostring(activeVal.Value) ~= "" and tostring(activeVal.Value) ~= "nil"
+                            local needsBuffUnlock = IsPlacedBuffUnit(unit) and not hasActive
                             -- Only upgrades affordable with the current cash enter the
                             -- queue. Farm candidates receive priority, but an unaffordable
                             -- Farm does not prevent affordable non-Farm upgrades.
                             if cash == nil or (cost ~= math.huge and cost <= cash) then
-                                table.insert(candidates, { unit = unit, cost = cost, farm = isFarm, level = level.Value })
+                                table.insert(candidates, {
+                                    unit = unit,
+                                    cost = cost,
+                                    farm = isFarm,
+                                    buffUnlock = needsBuffUnlock,
+                                    level = level.Value,
+                                })
                             end
                         end
                     end
@@ -4969,20 +5643,24 @@ task.spawn(function()
             end
 
             if #candidates > 0 then
-                if State.AutoUpgradeFarmFirst then
-                    -- Any affordable Farm upgrade outranks every non-Farm upgrade.
-                    -- If no Farm upgrade is affordable, other affordable units remain
-                    -- eligible. Selection within each priority group stays random.
-                    local farmCandidates = {}
-                    local otherCandidates = {}
-                    for _, candidate in ipairs(candidates) do
-                        if candidate.farm then
-                            table.insert(farmCandidates, candidate)
-                        else
-                            table.insert(otherCandidates, candidate)
-                        end
+                local farmCandidates = {}
+                local buffUnlockCandidates = {}
+                local otherCandidates = {}
+                for _, candidate in ipairs(candidates) do
+                    if State.AutoUpgradeFarmFirst and candidate.farm then
+                        table.insert(farmCandidates, candidate)
+                    elseif candidate.buffUnlock then
+                        table.insert(buffUnlockCandidates, candidate)
+                    else
+                        table.insert(otherCandidates, candidate)
                     end
-                    candidates = #farmCandidates > 0 and farmCandidates or otherCandidates
+                end
+                if #farmCandidates > 0 then
+                    candidates = farmCandidates
+                elseif #buffUnlockCandidates > 0 then
+                    candidates = buffUnlockCandidates
+                else
+                    candidates = otherCandidates
                 end
 
                 -- Auto Upgrade randomly selects among all currently affordable
@@ -5011,12 +5689,99 @@ task.spawn(function()
     end
 end)
 
--- Adaptive Commander / Windsong buff rotation.
--- This mirrors Anime Adventures' native Auto Active loop from game.lua:
--- scan every deployed unit independently, and cast as soon as that unit's
--- active_attack_cooldown has elapsed. Do not gate casts behind cooldown/count
--- intervals; that artificial group timer was the reason non-Curse rotations
--- could stall even while another deployed unit was ready.
+-- Adaptive Commander / Windsong / Elfy (Sylph) buff loop.
+-- Elfy's static Units record omits the Verdant Enchantment active, but its
+-- live UnitUpgrade UI exposes the active through _stats.active_attack. Resolve
+-- and rotate that runtime active just like Commander and Windsong.
+--
+-- Loop rule per buff type (attack id):
+--   buffEnd = lastGroupCast + D
+--   cast ONE ready unit when tick() >= buffEnd - lead
+-- Each unit's readiness uses its own cooldown (SPD after Curse), so units with
+-- different Curse modifiers rotate correctly without overlapping buffs.
+function DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
+    if not unit or not stats then return false end
+    local lastCastValue = stats:FindFirstChild("last_active_cast")
+    local liveCast = lastCastValue and tonumber(lastCastValue.Value) or 0
+    if liveCast > (beforeLastCast or 0) + 0.01 then
+        return true
+    end
+    local queuedValue = stats:FindFirstChild("active_queued_or_using")
+    if queuedValue and queuedValue.Value == true then
+        return true
+    end
+    local trackId = tonumber(unit:GetAttribute("client_track_active_attack_id")) or 0
+    if trackId > (beforeTrackId or 0) then
+        return true
+    end
+    if GetUnitOverheadReadyAttribute(unit) == false then
+        return true
+    end
+    return false
+end
+
+function SendBuffActiveRequest(runtime, entry, now)
+    BUFF_ROTATION_RUNTIME.requestBusy = true
+    BUFF_ROTATION_RUNTIME.requestStarted = now
+    runtime.lastRequest[entry.model] = now
+    runtime.pending = { model = entry.model, time = now, before = entry.lastCast }
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local unit = entry.model
+            local stats = unit and unit:FindFirstChild("_stats")
+            if not unit or not unit.Parent or not stats then
+                error("Buff unit is no longer deployed")
+            end
+            local CollectionService = game:GetService("CollectionService")
+            if CollectionService:HasTag(unit, "dying_units") then
+                error("Buff unit is dying")
+            end
+            -- Same request path as the game's ActiveButton / Auto Active
+            -- (_use_active_endpoint -> EndpointsClient "use_active_attack").
+            -- Actives with _sets_aoe_point need { aoe_point = position }.
+            local lastCastValue = stats:FindFirstChild("last_active_cast")
+            local beforeLastCast = lastCastValue and tonumber(lastCastValue.Value) or 0
+            local beforeTrackId = tonumber(unit:GetAttribute("client_track_active_attack_id")) or 0
+
+            local attack = GetAttacksData()[runtime.attackId]
+            local pos = GetPlacedBuffUnitPosition(unit)
+            if not pos and unit:FindFirstChild("HumanoidRootPart") then
+                pos = unit.HumanoidRootPart.Position
+            end
+            local aoeParam = pos and { aoe_point = pos } or nil
+            local needsAoePoint = type(attack) == "table" and attack._sets_aoe_point == true
+
+            if needsAoePoint and aoeParam then
+                InvokeEndpoint("use_active_attack", unit, aoeParam)
+            else
+                InvokeEndpoint("use_active_attack", unit)
+            end
+
+            task.wait(0.2)
+            if unit and unit.Parent and stats and not DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId) then
+                -- Fallback if attack metadata was not yet synced and the server
+                -- expects the opposite parameter shape (aoe_point vs nil).
+                if not needsAoePoint and aoeParam then
+                    InvokeEndpoint("use_active_attack", unit, aoeParam)
+                elseif needsAoePoint then
+                    InvokeEndpoint("use_active_attack", unit)
+                end
+            end
+
+            -- Always record our own cast timestamp so units using global
+            -- cooldown tracking (or where last_active_cast stays 0) rotate cleanly.
+            BUFF_ROTATION_RUNTIME.ownCast[unit] = tick()
+        end)
+        if not ok then
+            warn("[OctoputHub] Buff request failed: " .. tostring(err))
+            if runtime.pending and runtime.pending.model == entry.model then
+                runtime.pending = nil
+            end
+        end
+        BUFF_ROTATION_RUNTIME.requestBusy = false
+    end)
+end
+
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -5035,138 +5800,150 @@ task.spawn(function()
             end
 
             local now = tick()
-            local liveGroups, passiveElfyCount = GetBuffRotationGroups()
+            if BUFF_ROTATION_RUNTIME.requestBusy
+                and now - (BUFF_ROTATION_RUNTIME.requestStarted or 0) > BUFF_ROTATION_REQUEST_TIMEOUT then
+                -- A request that never returned must not block every buff group.
+                BUFF_ROTATION_RUNTIME.requestBusy = false
+            end
+
+            local liveGroups, elfyInfo = GetBuffRotationGroups(now)
             local nextRuntimeGroups = {}
             local statusParts = {}
             local hasActionableUnits = false
 
-            local attackIds = {}
-            for attackId in pairs(liveGroups) do table.insert(attackIds, attackId) end
-            table.sort(attackIds)
-            for _, attackId in ipairs(attackIds) do
-                local group = liveGroups[attackId]
+            local ordered = {}
+            for attackId, group in pairs(liveGroups) do
                 if group and #group.units > 0 then
-                    hasActionableUnits = true
-                    local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
-                        or { seenCast = {}, pending = {}, lastRequest = {} }
-                    local liveSet = {}
-                    local ready = {}
+                    table.insert(ordered, group)
+                end
+            end
 
+            for _, group in ipairs(ordered) do
+                local attackId = group.attackId
+                hasActionableUnits = true
+                local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
+                    or { attackId = attackId, lastRequest = {}, pending = nil }
+                runtime.attackId = attackId
+
+                local liveSet = {}
+                local groupLastCast = 0
+                for _, entry in ipairs(group.units) do
+                    liveSet[entry.model] = true
+                    if entry.lastCast <= now + 1 and entry.lastCast > groupLastCast then
+                        groupLastCast = entry.lastCast
+                    end
+                end
+                for unit in pairs(runtime.lastRequest) do
+                    if not liveSet[unit] then
+                        runtime.lastRequest[unit] = nil
+                    end
+                end
+
+                -- Resolve the outstanding request: confirmed when the unit's
+                -- last_active_cast moves, dropped when it timed out.
+                local pending = runtime.pending
+                if pending then
+                    local pendingEntry = nil
                     for _, entry in ipairs(group.units) do
-                        local unit = entry.model
-                        liveSet[unit] = true
-                        local seen = runtime.seenCast[unit]
-                        if seen == nil then
-                            runtime.seenCast[unit] = entry.lastCast
-                        elseif entry.lastCast > seen + 0.05 then
-                            runtime.seenCast[unit] = entry.lastCast
-                            runtime.pending[unit] = nil
-                        end
-
-                        local pending = runtime.pending[unit]
-                        if pending then
-                            if entry.lastCast > (pending.before or 0) + 0.05 then
-                                runtime.pending[unit] = nil
-                                pending = nil
-                            elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
-                                -- The request did not produce a cast. Clear it and
-                                -- retry on the next eligible scan, not after a full
-                                -- rotation interval.
-                                runtime.pending[unit] = nil
-                                pending = nil
-                            end
-                        end
-
-                        local stats = unit and unit:FindFirstChild("_stats")
-                        local busyValue = stats and stats:FindFirstChild("active_queued_or_using")
-                        local busy = busyValue and busyValue.Value == true
-                        local remaining = entry.cooldown - (now - entry.lastCast)
-                        local lastRequest = runtime.lastRequest[unit] or -math.huge
-                        if not pending and not busy and remaining <= 0
-                            and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
-                            table.insert(ready, entry)
+                        if entry.model == pending.model then
+                            pendingEntry = entry
+                            break
                         end
                     end
+                    if not pendingEntry then
+                        runtime.pending = nil
+                    elseif pendingEntry.lastCast > (pending.before or 0) + 0.05 then
+                        runtime.pending = nil
+                    elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
+                        runtime.pending = nil
+                    end
+                    pending = runtime.pending
+                end
 
-                    for unit in pairs(runtime.seenCast) do
-                        if not liveSet[unit] then
-                            runtime.seenCast[unit] = nil
-                            runtime.pending[unit] = nil
-                            runtime.lastRequest[unit] = nil
+                local effectiveLastCast = groupLastCast
+                if pending then
+                    effectiveLastCast = math.max(effectiveLastCast, pending.time)
+                end
+                local buffEnd = effectiveLastCast + group.duration
+                local castAt = buffEnd - (group.lead or 0)
+
+                local ready = {}
+                local nextReadyIn = math.huge
+                for _, entry in ipairs(group.units) do
+                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                    local lastRequest = runtime.lastRequest[entry.model] or -math.huge
+                    if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                        table.insert(ready, entry)
+                        nextReadyIn = 0
+                    elseif not busy then
+                        nextReadyIn = math.min(nextReadyIn, remaining)
+                    end
+                end
+                -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
+                table.sort(ready, function(a, b)
+                    if math.abs(a.lastCast - b.lastCast) < 0.05 then
+                        return tostring(a.uuid) < tostring(b.uuid)
+                    end
+                    return a.lastCast < b.lastCast
+                end)
+
+                local curseMode = GetBuffRotationCurseMode(group)
+                local avgCooldown = group.averageCooldown < math.huge and group.averageCooldown or 0
+                local formulaText
+                if group.baseCooldown then
+                    formulaText = string.format("CD %.1fs (base %gs x%.2f)", avgCooldown, group.baseCooldown, group.averageMultiplier or 1)
+                else
+                    formulaText = string.format("CD %.1fs", avgCooldown)
+                end
+                local capacityText = group.sustainable and "Loop OK"
+                    or ("Need " .. tostring(group.requiredUnitsEstimate) .. " units")
+                local waitText
+                if pending then
+                    waitText = "casting..."
+                elseif now >= castAt then
+                    waitText = nextReadyIn < math.huge and string.format("gap, ready %.1fs", nextReadyIn) or "gap"
+                else
+                    waitText = string.format("next %.1fs", castAt - now)
+                end
+                table.insert(statusParts, string.format("%s: %d units | %s | %s | buff %gs | %s | %s",
+                    group.name, #group.units, curseMode, formulaText, group.duration, capacityText, waitText))
+
+                group.castAt = castAt
+                group.runtime = runtime
+                group.ready = ready
+                group.pending = pending
+                nextRuntimeGroups[attackId] = runtime
+            end
+
+            -- The game client serializes active requests (one at a time); keep
+            -- that behaviour and give the slot to the group that is most overdue.
+            if not BUFF_ROTATION_RUNTIME.requestBusy then
+                local best = nil
+                for _, group in ipairs(ordered) do
+                    if not group.pending and #group.ready > 0 and now >= group.castAt then
+                        if not best or group.castAt < best.castAt then
+                            best = group
                         end
                     end
-
-                    table.sort(ready, function(a, b)
-                        if math.abs(a.lastCast - b.lastCast) < 0.05 then
-                            return tostring(a.uuid) < tostring(b.uuid)
-                        end
-                        return a.lastCast < b.lastCast
-                    end)
-
-                    local curseMode = GetBuffRotationCurseMode(group)
-                    local capacityText = group.sustainable and "Loop capacity OK"
-                        or ("Need about " .. tostring(group.requiredUnitsEstimate) .. " units total")
-                    local intervalText = group.interval < math.huge and string.format("%.1fs avg", group.interval) or "N/A"
-                    table.insert(statusParts, string.format("%s: %s | %d units | %s | %s",
-                        group.name, curseMode, #group.units, intervalText, capacityText))
-
-                    -- The game client serializes active requests globally, while
-                    -- keeping the 0.5s guard per unit. Reproduce that behavior;
-                    -- each unit is still checked independently every 0.1s.
-                    if #ready > 0 and not BUFF_ROTATION_RUNTIME.requestBusy then
-                        local chosen = ready[1]
-                        BUFF_ROTATION_RUNTIME.requestBusy = true
-                        runtime.lastRequest[chosen.model] = now
-                        runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
-                        task.spawn(function()
-                            local ok, err = pcall(function()
-                                local attackData
-                                pcall(function()
-                                    local attackModule = ReplicatedStorage.src.Data:FindFirstChild("Attacks")
-                                    if attackModule then attackData = require(attackModule) end
-                                end)
-                                local attack = type(attackData) == "table" and attackData[attackId] or nil
-                                local requestParam
-                                if type(attack) == "table" and attack._sets_aoe_point then
-                                    local pos
-                                    pcall(function()
-                                        local root = chosen.model:FindFirstChild("HumanoidRootPart")
-                                            or chosen.model:FindFirstChild("_root")
-                                        if root and root:IsA("BasePart") then pos = root.Position end
-                                        if not pos then pos = chosen.model:GetPivot().Position end
-                                    end)
-                                    if pos then requestParam = { aoe_point = pos } end
-                                end
-                                -- Matches the game's _use_active_endpoint call:
-                                -- use_active_attack(unit, optional custom payload).
-                                if requestParam then
-                                    InvokeEndpoint("use_active_attack", chosen.model, requestParam)
-                                else
-                                    InvokeEndpoint("use_active_attack", chosen.model)
-                                end
-                            end)
-                            if not ok then
-                                warn("[OctoputHub] Buff request failed: " .. tostring(err))
-                                runtime.pending[chosen.model] = nil
-                            end
-                            BUFF_ROTATION_RUNTIME.requestBusy = false
-                        end)
-                    end
-
-                    nextRuntimeGroups[attackId] = runtime
+                end
+                if best then
+                    SendBuffActiveRequest(best.runtime, best.ready[1], now)
                 end
             end
 
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
+            local elfySuffix = ""
+            if elfyInfo.withoutActive > 0 then
+                elfySuffix = string.format(" | Elfy x%d upgrading to unlock active", elfyInfo.withoutActive)
+            end
             if not hasActionableUnits then
-                if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) detected but live active_attack is unavailable; waiting for game runtime skill data.", Color3.fromRGB(255, 190, 100))
+                if elfyInfo.withoutActive > 0 then
+                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) placed, upgrading to unlock Verdant Enchantment..." .. elfySuffix, Color3.fromRGB(255, 190, 100))
                 else
-                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong buff units detected.", Color3.fromRGB(160, 160, 180))
+                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong / Elfy (Sylph) buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
             else
-                local suffix = passiveElfyCount > 0 and " | Elfy waiting for live active_attack" or ""
-                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
+                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. elfySuffix, Color3.fromRGB(100, 220, 160))
             end
         end)
         if not rotationOk then
@@ -5189,6 +5966,7 @@ task.spawn(function()
         end
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            SyncReplicatedGameData()
             local myUnits = GetPlayerUnits()
             local wave = GetCurrentWave()
 
@@ -5249,6 +6027,7 @@ task.spawn(function()
                     -- Farm First changes candidate priority only: it never blocks other
                     -- placements when the next Farm is unaffordable or has reached its cap.
                     local farmEligible = {}
+                    local buffEligible = {}
                     local otherEligible = {}
                     for _, unitInfo in ipairs(equipped) do
                         local uuidKey = tostring(unitInfo.uuid or "")
@@ -5258,44 +6037,41 @@ task.spawn(function()
                             if State.AutoUpgradeFarmFirst and IsFarmInfo(unitInfo) then
                                 table.insert(farmEligible, unitInfo)
                             elseif not holdOtherPlacementForFarmUpgrade then
-                                table.insert(otherEligible, unitInfo)
+                                if IsBuffUnitInfo(unitInfo) then
+                                    table.insert(buffEligible, unitInfo)
+                                else
+                                    table.insert(otherEligible, unitInfo)
+                                end
                             end
                         end
                     end
 
-                    -- Prefer placing Farm units early. If no Farm is currently
-                    -- affordable/placeable, immediately fall back to any other unit.
+                    -- Prefer placing Farm units early. Next, establish the buff
+                    -- cluster so combat units and buff units form one tight group.
                     if State.AutoUpgradeFarmFirst and #farmEligible > 0 then
                         eligible = farmEligible
+                    elseif #buffEligible > 0 then
+                        eligible = buffEligible
+                        for _, info in ipairs(otherEligible) do
+                            table.insert(eligible, info)
+                        end
                     else
                         eligible = otherEligible
                     end
 
                     if #eligible > 0 then
-                        -- Randomly select among the currently eligible units. If one
-                        -- has no valid placement surface, try the next candidate.
-                        for i = #eligible, 2, -1 do
-                            local j = math.random(1, i)
-                            eligible[i], eligible[j] = eligible[j], eligible[i]
+                        -- Shuffle within the non-buff pool only when no buff unit is
+                        -- waiting; keep buff units at the front of the queue so they
+                        -- anchor the cluster tightly.
+                        if #buffEligible == 0 or (State.AutoUpgradeFarmFirst and #farmEligible > 0) then
+                            for i = #eligible, 2, -1 do
+                                local j = math.random(1, i)
+                                eligible[i], eligible[j] = eligible[j], eligible[i]
+                            end
                         end
                         for _, chosen in ipairs(eligible) do
-                            local placeIndex = #myUnits + math.random(1, 12)
-                            local cframe, kind = GetBuffTypePlacementCFrame(chosen, myUnits)
-                            if not cframe then
-                                -- First copy of a buff type, or no valid nearby
-                                -- cluster slot: retain the existing placement method
-                                -- for the first copy only. Existing groups do not
-                                -- scatter elsewhere when their local area is full.
-                                if not IsBuffUnitInfo(chosen) or not (function()
-                                    local wanted = NormalizeName(chosen.unitId)
-                                    for _, unit in ipairs(myUnits) do
-                                        if NormalizeName(GetRawUnitId(unit)) == wanted then return true end
-                                    end
-                                    return false
-                                end)() then
-                                    cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
-                                end
-                            end
+                            local placeIndex = #myUnits + 1
+                            local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
                             if cframe then
                                 local countBefore = CountPlacedInfo(chosen)
                                 local ok = InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
