@@ -993,30 +993,21 @@ end
 -- Some equipped-unit records use an internal ID that does not contain the display name.
 function IsFarmInfo(info)
     if not info then return false end
+
+    -- Match Anime Adventures' actual UnitServiceCore.unit_static_is_farm():
+    -- Units[unitId].tags must contain the exact "Farm" tag.
+    -- Do not infer Farm from display names or farm_amount fields.
     local ids = { info.unitId, info.name, info.displayName }
     for _, id in ipairs(ids) do
         if id and tostring(id) ~= "" then
             local data = LookupUnitData(id)
-            if type(data) == "table" then
-                if type(data.tags) == "table" then
-                    for _, tag in pairs(data.tags) do
-                        if tostring(tag):lower() == "farm" then return true end
-                    end
-                end
-                if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
-                    or data._show_as_farm_unit == true or data.show_as_farm_unit == true
-                    or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
-                    return true
-                end
-                if type(data.end_of_wave) == "table" then
-                    for _, effect in pairs(data.end_of_wave) do
-                        if type(effect) == "table" and tostring(effect.type):lower() == "farm" then
-                            return true
-                        end
+            if type(data) == "table" and type(data.tags) == "table" then
+                for _, tag in pairs(data.tags) do
+                    if tag == "Farm" then
+                        return true
                     end
                 end
             end
-            if IsFarmName(id) then return true end
         end
     end
     return false
@@ -1239,7 +1230,9 @@ function CanPlaceConfigured(info, wave)
         localLimit = info.spawnCap
     end
     if localLimit then
-        local placedCount = CountPlacedUnit(info.unitId)
+        -- Use the same identity matching as placement confirmation. Farm units can
+        -- expose a different runtime ID/name from their equipped collection record.
+        local placedCount = CountPlacedInfo(info)
         if placedCount >= localLimit then
             return false
         end
@@ -4213,6 +4206,25 @@ task.spawn(function()
                 end
             end
 
+            -- Farm First has two phases while Auto Place is enabled:
+            -- first finish placing every configured Farm copy; only then begin
+            -- upgrades. If the next Farm is unaffordable, the placement worker can
+            -- still place other affordable units, but upgrades wait for the Farm phase.
+            local farmPlacementIncomplete = false
+            if State.AutoUpgradeFarmFirst and State.AutoPlace then
+                local equippedForFarmCheck = EnrichEquipped(GetEquippedUnitList())
+                for _, info in ipairs(equippedForFarmCheck) do
+                    if IsFarmInfo(info) and CanPlaceConfigured(info, wave) then
+                        farmPlacementIncomplete = true
+                        break
+                    end
+                end
+            end
+            if farmPlacementIncomplete then
+                candidates = {}
+                UpdateAutoPlayStatus("Prioritizing Farm Placement", Color3.fromRGB(255, 190, 80))
+            end
+
             -- Farm First is a priority rather than a permanent lock:
             -- 1) Wait briefly for an already-sent Farm upgrade to resolve.
             -- 2) Otherwise, choose an affordable Farm upgrade before any other unit.
@@ -4225,17 +4237,10 @@ task.spawn(function()
             end
 
             if #candidates > 0 then
-                local function sortByCheapest(list)
-                    table.sort(list, function(a, b)
-                        if a.cost ~= b.cost then return a.cost < b.cost end
-                        if a.level ~= b.level then return a.level < b.level end
-                        return tostring(a.unit) < tostring(b.unit)
-                    end)
-                end
-
                 if State.AutoUpgradeFarmFirst then
-                    -- Strictly separate the queues: any affordable Farm upgrade
-                    -- outranks every non-Farm upgrade, regardless of its price.
+                    -- Any affordable Farm upgrade outranks every non-Farm upgrade.
+                    -- If no Farm upgrade is affordable, other affordable units remain
+                    -- eligible. Selection within each priority group stays random.
                     local farmCandidates = {}
                     local otherCandidates = {}
                     for _, candidate in ipairs(candidates) do
@@ -4245,13 +4250,14 @@ task.spawn(function()
                             table.insert(otherCandidates, candidate)
                         end
                     end
-                    sortByCheapest(farmCandidates)
-                    sortByCheapest(otherCandidates)
                     candidates = #farmCandidates > 0 and farmCandidates or otherCandidates
-                else
-                    -- Normal Auto Upgrade: cheapest affordable upgrade first,
-                    -- without considering whether the unit is a Farm.
-                    sortByCheapest(candidates)
+                end
+
+                -- Auto Upgrade randomly selects among all currently affordable
+                -- candidates instead of always choosing the cheapest upgrade.
+                for i = #candidates, 2, -1 do
+                    local j = math.random(1, i)
+                    candidates[i], candidates[j] = candidates[j], candidates[i]
                 end
 
                 local target = candidates[1].unit
@@ -4291,13 +4297,42 @@ task.spawn(function()
             if State.AutoPlace then
                 local equipped = EnrichEquipped(GetEquippedUnitList())
                 if #equipped > 0 then
-                    -- Farm First controls upgrade priority only. It must not reserve
-                    -- cash or block placement of other equipped units while Farm upgrades
-                    -- are still pending.
+                    -- Farm First prioritizes Farm placement first, then Farm upgrades.
+                    -- Other units remain eligible whenever the next Farm placement or
+                    -- Farm upgrade cannot currently use the available cash.
 
                     -- Only consider units we can currently afford, so an expensive unit
                     -- never blocks cheaper ones from being placed.
                     local cashNow = GetInGameCash()
+
+                    -- Once every configured Farm copy is on the field, an affordable
+                    -- Farm upgrade gets first claim on the cash. Pause non-Farm placement
+                    -- until that upgrade request resolves; if it is not affordable,
+                    -- Auto Place remains free to spend cash on other eligible units.
+                    local holdOtherPlacementForFarmUpgrade = false
+                    if State.AutoUpgradeFarmFirst and State.AutoUpgrade then
+                        local farmPlacementIncomplete = false
+                        for _, info in ipairs(equipped) do
+                            if IsFarmInfo(info) and CanPlaceConfigured(info, wave) then
+                                farmPlacementIncomplete = true
+                                break
+                            end
+                        end
+                        if not farmPlacementIncomplete then
+                            for unit in pairs(pendingUpgradeRequests) do
+                                if unit and unit.Parent and IsFarmUnit(unit) then
+                                    holdOtherPlacementForFarmUpgrade = true
+                                    break
+                                end
+                            end
+                            if not holdOtherPlacementForFarmUpgrade then
+                                local nextFarmCost = GetNextFarmUpgradeCost(myUnits)
+                                if nextFarmCost and cashNow ~= nil and nextFarmCost <= cashNow then
+                                    holdOtherPlacementForFarmUpgrade = true
+                                end
+                            end
+                        end
+                    end
 
                     local eligible = {}
                     local now = tick()
@@ -4311,26 +4346,36 @@ task.spawn(function()
                             pendingSpawnRequests[uuid] = nil
                         end
                     end
-                    local missingFirst = {}
+
+                    -- Auto Place always considers every affordable configured unit.
+                    -- Farm First changes candidate priority only: it never blocks other
+                    -- placements when the next Farm is unaffordable or has reached its cap.
+                    local farmEligible = {}
+                    local otherEligible = {}
                     for _, unitInfo in ipairs(equipped) do
                         local uuidKey = tostring(unitInfo.uuid or "")
                         if uuidKey ~= "" and not pendingSpawnRequests[uuidKey]
                             and (cashNow == nil or (tonumber(unitInfo.cost) or 0) <= cashNow)
                             and CanPlaceConfigured(unitInfo, wave) then
-                            table.insert(eligible, unitInfo)
-                            if CountPlacedInfo(unitInfo) < 1 then
-                                table.insert(missingFirst, unitInfo)
+                            if State.AutoUpgradeFarmFirst and IsFarmInfo(unitInfo) then
+                                table.insert(farmEligible, unitInfo)
+                            elseif not holdOtherPlacementForFarmUpgrade then
+                                table.insert(otherEligible, unitInfo)
                             end
                         end
                     end
 
-                    -- First guarantee one placement for every equipped unit type; after
-                    -- that, randomly fill remaining allowed copies until each cap is met.
-                    if #missingFirst > 0 then eligible = missingFirst end
+                    -- Prefer placing Farm units early. If no Farm is currently
+                    -- affordable/placeable, immediately fall back to any other unit.
+                    if State.AutoUpgradeFarmFirst and #farmEligible > 0 then
+                        eligible = farmEligible
+                    else
+                        eligible = otherEligible
+                    end
+
                     if #eligible > 0 then
-                        -- Shuffle candidates, then try each until a valid surface/slot
-                        -- is found. This prevents a hill-only unit (e.g. aqua / Water
-                        -- Goddess) from blocking every other unit when no hill is nearby.
+                        -- Randomly select among the currently eligible units. If one
+                        -- has no valid placement surface, try the next candidate.
                         for i = #eligible, 2, -1 do
                             local j = math.random(1, i)
                             eligible[i], eligible[j] = eligible[j], eligible[i]
