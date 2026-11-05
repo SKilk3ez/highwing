@@ -3585,34 +3585,39 @@ RefreshUnitConfigUI()
 local function GetNextUpgradeCost(unit)
     if not unit or not unit:FindFirstChild("_stats") then return math.huge end
     local stats = unit._stats
-    local keys = { "next_upgrade_cost", "upgrade_cost", "next_cost", "upgrade_price" }
-    local best = nil
-    for _, child in ipairs(stats:GetDescendants()) do
-        local name = NormalizeName(child.Name)
-        local isCost = false
-        for _, key in ipairs(keys) do
-            if name == NormalizeName(key) or name:find("upgradecost", 1, true) then
-                isCost = true break
-            end
-        end
-        if isCost and (child:IsA("NumberValue") or child:IsA("IntValue") or child:IsA("StringValue")) then
-            local value = tonumber(child.Value)
-            if value and value >= 0 then best = value break end
-        end
-    end
-    if best ~= nil then return best end
-
     local current = stats:FindFirstChild("upgrade")
+    if not current then return math.huge end
+
+    -- Match the game's own pricing path:
+    -- ceil(upgrade data cost * player_cost_scale * unit upgrade_cost_multiplier),
+    -- with the _negate_high_cost cap applied by UnitServiceCore.
     local data = LookupUnitData(GetRawUnitId(unit))
     local upgrades = type(data) == "table" and data.upgrade or nil
-    if current and type(upgrades) == "table" then
-        local nextInfo = upgrades[(tonumber(current.Value) or 0) + 1]
-        if type(nextInfo) == "table" then
-            local value = tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
-            if value then return value end
-        end
+    local nextInfo = type(upgrades) == "table" and upgrades[(tonumber(current.Value) or 0) + 1] or nil
+    if type(nextInfo) ~= "table" then return math.huge end
+
+    local baseCost = tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
+    if not baseCost then return math.huge end
+
+    local multiplier = 1
+    local dataFolder = workspace:FindFirstChild("_DATA")
+    local modifiers = dataFolder and dataFolder:FindFirstChild("GameModifiers")
+    local playerCostScale = modifiers and modifiers:FindFirstChild("player_cost_scale")
+    if playerCostScale and tonumber(playerCostScale.Value) then
+        multiplier = tonumber(playerCostScale.Value)
     end
-    return math.huge
+
+    local unitMultiplier = stats:FindFirstChild("upgrade_cost_multiplier")
+    if unitMultiplier and tonumber(unitMultiplier.Value) then
+        multiplier = multiplier * tonumber(unitMultiplier.Value)
+    end
+
+    local negateHighCost = tonumber(player:GetAttribute("_negate_high_cost")) or 0
+    if negateHighCost > 0 then
+        multiplier = math.min(multiplier, 1)
+    end
+
+    return math.ceil(baseCost * math.max(0, multiplier))
 end
 
 local pendingUpgradeRequests = {}
@@ -3687,13 +3692,14 @@ task.spawn(function()
                     if isFarm and pendingRequest then
                         pendingFarmUpgradeRequest = true
                     end
-                    if level.Value < targetLevel and not pendingRequest then
+                    if level.Value < targetLevel then
                         local allowed = not (cfg and cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave)
-                        if allowed then
+                        if allowed and not pendingRequest then
                             local cost = GetNextUpgradeCost(unit)
                             local cash = GetInGameCash()
-                            -- Only affordable upgrades enter the queue. An unaffordable
-                            -- Farm upgrade must not block other units from using spare cash.
+                            -- Only upgrades affordable with the current cash enter the
+                            -- queue. Farm candidates receive priority, but an unaffordable
+                            -- Farm does not prevent affordable non-Farm upgrades.
                             if cash == nil or (cost ~= math.huge and cost <= cash) then
                                 table.insert(candidates, { unit = unit, cost = cost, farm = isFarm, level = level.Value })
                             end
@@ -3702,30 +3708,15 @@ task.spawn(function()
                 end
             end
 
-            -- Dynamic Farm First:
-            -- 1) If a Farm upgrade is affordable, it always wins over non-Farm units.
-            -- 2) If no Farm upgrade is affordable, other affordable units may upgrade.
-            -- 3) Wait for an issued Farm request to resolve before spending the same
-            --    budget on another unit; then re-read cash and priorities next cycle.
-            if State.AutoUpgradeFarmFirst then
-                if pendingFarmUpgradeRequest then
-                    local farmOnly = {}
-                    for _, candidate in ipairs(candidates) do
-                        if candidate.farm then table.insert(farmOnly, candidate) end
-                    end
-                    candidates = farmOnly
-                    if #candidates == 0 then
-                        UpdateAutoPlayStatus("Waiting for Farm Upgrade", Color3.fromRGB(255, 190, 80))
-                    end
-                else
-                    local affordableFarm = {}
-                    for _, candidate in ipairs(candidates) do
-                        if candidate.farm then table.insert(affordableFarm, candidate) end
-                    end
-                    if #affordableFarm > 0 then
-                        candidates = affordableFarm
-                    end
-                end
+            -- Farm First is a priority rather than a permanent lock:
+            -- 1) Wait briefly for an already-sent Farm upgrade to resolve.
+            -- 2) Otherwise, choose an affordable Farm upgrade before any other unit.
+            -- 3) If no Farm upgrade is affordable, allow another affordable unit.
+            -- Every cycle checks current cash again, so a Farm upgrade regains
+            -- priority immediately after kills or other income make it affordable.
+            if State.AutoUpgradeFarmFirst and pendingFarmUpgradeRequest then
+                candidates = {}
+                UpdateAutoPlayStatus("Waiting for Farm Upgrade Result", Color3.fromRGB(255, 190, 80))
             end
 
             if #candidates > 0 then
