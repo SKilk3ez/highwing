@@ -4386,6 +4386,17 @@ task.spawn(function()
             local resultsGui = playerGui:FindFirstChild("ResultsUI")
             local resultsVisible = resultsGui ~= nil and resultsGui.Enabled == true
             local finished = gameFinished ~= nil and gameFinished.Value == true
+            local resultTitle = ""
+            if resultsVisible then
+                local resultDetails = GetResultDetails()
+                resultTitle = string.upper(tostring(resultDetails.result or ""))
+            end
+            -- ResultsUI.show_results() sets the title to VICTORY!!! or DEFEAT.
+            -- Use that explicit result as an end signal even if the monitor missed
+            -- the short GameStarted=true window or _UNITS was already cleaned up.
+            local resultScreenConfirmed = resultsVisible
+                and (resultTitle:find("VICTORY", 1, true) ~= nil
+                    or resultTitle:find("DEFEAT", 1, true) ~= nil)
 
             -- Do not treat GameFinished=false by itself as proof of a live match;
             -- that value can also exist while the player is in the lobby.
@@ -4407,13 +4418,17 @@ task.spawn(function()
                 end
             end
 
-            local hasEnded = finished or (resultsVisible and webhookGameWasActive)
-            if hasEnded and webhookGameWasActive and not webhookEndDetected then
-                -- Capture each unit type's final per-instance takedown while the
-                -- match units still exist; ResultsUI may remain open after cleanup.
+            local hasEnded = finished or resultScreenConfirmed
+            if hasEnded and not webhookEndDetected then
+                -- Capture final per-unit takedowns before cleanup when possible.
+                -- Do not require webhookGameWasActive: some matches transition to
+                -- GameFinished/ResultsUI between monitor polls, so the start edge
+                -- can be missed even though the end state is authoritative.
                 webhookUnitLinesSnapshot = ReadMatchUnitLines()
                 webhookEndDetected = true
                 webhookGameWasActive = false
+                print("[Octoput Hub Webhook] Match end detected ("
+                    .. (resultTitle ~= "" and resultTitle or "GameFinished") .. ").")
             end
 
             if hasEnded and webhookEndDetected and State.WebhookOnEnd and not webhookSent
