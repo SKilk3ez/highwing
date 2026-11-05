@@ -1576,19 +1576,24 @@ function DescribeWebhookResult(ok, result)
         return false, tostring(result)
     end
     if type(result) == "table" then
-        local code = tonumber(result.StatusCode or result.status_code or result.Status)
-        if code and code >= 300 then
-            local body = tostring(result.Body or result.body or "")
-            if #body > 180 then
-                body = body:sub(1, 180)
-            end
+        local code = tonumber(result.StatusCode or result.status_code or result.Status or result.status)
+        local requestSucceeded = result.Success
+        if requestSucceeded == nil then requestSucceeded = result.success end
+        local body = tostring(result.Body or result.body or "")
+        if #body > 180 then body = body:sub(1, 180) end
+
+        if requestSucceeded == false then
+            return false, (code and ("HTTP " .. tostring(code) .. ": ") or "Request failed: ") .. body
+        end
+        if code and (code < 200 or code >= 300) then
             if body ~= "" then
                 return false, "HTTP " .. tostring(code) .. ": " .. body
             end
             return false, "HTTP " .. tostring(code)
         end
     end
-    return true, "Test message sent."
+    -- Discord webhooks commonly answer with HTTP 204 and an empty body.
+    return true, "Webhook request accepted."
 end
 
 
@@ -1988,6 +1993,7 @@ webhookSecretRewardBaselineAvailable = false
 function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
+    return table.clone(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
 end
 
 function ReadPlayerLevel()
@@ -2047,7 +2053,7 @@ function ReadMatchUnitLines()
     return table.concat(lines, "\n")
 end
 
-function SendEndWebhook(currencyBaseline)
+function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable)
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
@@ -2078,8 +2084,8 @@ function SendEndWebhook(currencyBaseline)
     local resourceText = BuildResourceRewardLines(resourceRewards)
     local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
     local secretRewardText
-    if webhookSecretRewardBaselineAvailable and secretRewardsAvailable then
-        secretRewardText = BuildSecretRewardLines(webhookSecretRewardBefore, secretRewardsAfter)
+    if secretBaselineAvailable and secretRewardsAvailable then
+        secretRewardText = BuildSecretRewardLines(secretBaseline, secretRewardsAfter)
     else
         secretRewardText = "Inventory snapshot unavailable; Secret rewards could not be verified"
     end
@@ -4323,55 +4329,81 @@ task.spawn(function()
     end
 end)
 
+-- Webhook end detection: use the actual match lifecycle first, with ResultsUI as
+-- a fallback because some game modes do not expose GameFinished consistently.
 webhookSent = false
+webhookSending = false
 webhookGameWasActive = false
+webhookEndDetected = false
+webhookRetryAt = 0
 webhookDataFolder = nil
+webhookCurrencyBefore = nil
+webhookSecretRewardBefore = nil
+webhookSecretRewardBaselineAvailable = false
+
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(0.25)
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
                 webhookDataFolder = dataFolder
-                webhookGameWasActive = false
-                webhookSent = false
-                webhookCurrencyBefore = nil
-                webhookSecretRewardBefore = nil
-                webhookSecretRewardBaselineAvailable = false
             end
 
-            local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
-            local isActive = gameFinished ~= nil and gameFinished.Value ~= true
+            local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
+            local unitsFolder = workspace:FindFirstChild("_UNITS")
+            local resultsGui = playerGui:FindFirstChild("ResultsUI")
+            local resultsVisible = resultsGui ~= nil and resultsGui.Enabled == true
+            local finished = gameFinished ~= nil and gameFinished.Value == true
+
+            -- Do not treat GameFinished=false by itself as proof of a live match;
+            -- that value can also exist while the player is in the lobby.
+            local startedByFlag = gameStarted ~= nil and gameStarted.Value == true
+            local startedByWorld = unitsFolder ~= nil and not IsInLobby() and not finished
+            local isActive = (startedByFlag or startedByWorld) and not finished
 
             if isActive then
                 if not webhookGameWasActive then
-                    CaptureWebhookCurrencyBaseline()
+                    local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
+                    webhookCurrencyBefore = currencySnapshot
+                    webhookSecretRewardBefore = secretSnapshot
+                    webhookSecretRewardBaselineAvailable = secretAvailable
                     webhookGameWasActive = true
+                    webhookEndDetected = false
                     webhookSent = false
-                end
-            elseif gameFinished and gameFinished.Value == true then
-                if not webhookSent and State.WebhookOnEnd then
-                    webhookSent = true
-                    local baseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
-                    task.spawn(function()
-                        local sendOk, sendError = pcall(SendEndWebhook, baseline)
-                        if not sendOk then
-                            warn("[Octoput Hub Webhook] Sender crashed: " .. tostring(sendError))
-                        end
-                    end)
-                end
-                -- Keep webhookSent true while the result screen remains open.
-                -- A new match (GameFinished=false) will capture a fresh baseline.
-                webhookGameWasActive = false
-            elseif gameStarted and gameStarted.Value == true then
-                -- Fallback for games that briefly create GameStarted before GameFinished.
-                if not webhookGameWasActive then
-                    CaptureWebhookCurrencyBaseline()
-                    webhookGameWasActive = true
-                    webhookSent = false
+                    webhookRetryAt = 0
                 end
             end
+
+            local hasEnded = finished or (resultsVisible and webhookGameWasActive)
+            if hasEnded and webhookGameWasActive and not webhookEndDetected then
+                webhookEndDetected = true
+                webhookGameWasActive = false
+            end
+
+            if hasEnded and webhookEndDetected and State.WebhookOnEnd and not webhookSent
+                and not webhookSending and os.clock() >= webhookRetryAt then
+                webhookSending = true
+                local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
+                local secretBaseline = webhookSecretRewardBefore
+                local secretAvailable = webhookSecretRewardBaselineAvailable
+                task.spawn(function()
+                    local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable)
+                    webhookSending = false
+                    if callOk and sendResult == true then
+                        webhookSent = true
+                        print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
+                    else
+                        local reason = callOk and "SendEndWebhook returned false" or tostring(sendResult)
+                        warn("[Octoput Hub Webhook] Send failed: " .. reason)
+                        webhookRetryAt = os.clock() + 8
+                    end
+                end)
+            end
+
+            -- A new match may reuse the same _DATA folder. GameStarted becoming
+            -- true after an ended result resets the per-match send guard above.
         end)
         if not loopOk then
             warn("[Octoput Hub Webhook] Monitor error: " .. tostring(loopError))
