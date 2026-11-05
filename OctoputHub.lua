@@ -58,7 +58,7 @@ FloatingButton.AnchorPoint = Vector2.new(0, 0)
 FloatingButton.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
 FloatingButton.BackgroundTransparency = 0.08
 FloatingButton.BorderSizePixel = 0
-FloatingButton.AutoButtonColor = true
+FloatingButton.AutoButtonColor = false
 FloatingButton.Active = true
 FloatingButton.Visible = true
 FloatingButton.ZIndex = 200
@@ -74,6 +74,70 @@ FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
 FloatingStroke.Transparency = 0.2
 FloatingStroke.Thickness = 1.5
 FloatingStroke.Parent = FloatingButton
+
+-- Mythic-style animated rainbow outline, shown only while the mouse hovers
+-- over the floating launcher. The base button layout and drag behavior stay intact.
+local FloatingRainbow = Instance.new("UIGradient")
+FloatingRainbow.Name = "HoverRainbowGradient"
+FloatingRainbow.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 70, 70)),
+    ColorSequenceKeypoint.new(0.17, Color3.fromRGB(255, 220, 70)),
+    ColorSequenceKeypoint.new(0.34, Color3.fromRGB(80, 255, 120)),
+    ColorSequenceKeypoint.new(0.51, Color3.fromRGB(70, 220, 255)),
+    ColorSequenceKeypoint.new(0.68, Color3.fromRGB(110, 100, 255)),
+    ColorSequenceKeypoint.new(0.85, Color3.fromRGB(235, 80, 255)),
+    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(255, 70, 70)),
+})
+FloatingRainbow.Rotation = 0
+FloatingRainbow.Transparency = NumberSequence.new(1)
+FloatingRainbow.Parent = FloatingStroke
+
+local FloatingButtonScale = Instance.new("UIScale")
+FloatingButtonScale.Name = "PressScale"
+FloatingButtonScale.Scale = 1
+FloatingButtonScale.Parent = FloatingButton
+
+local floatingHovering = false
+local floatingPressTween = nil
+local floatingHoverTween = nil
+local floatingRainbowTween = nil
+local function SetFloatingHover(isHovering)
+    floatingHovering = isHovering
+    if floatingHoverTween then floatingHoverTween:Cancel() end
+    floatingHoverTween = TweenService:Create(FloatingStroke, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Thickness = isHovering and 2.8 or 1.5,
+        Transparency = isHovering and 0 or 0.2,
+    })
+    floatingHoverTween:Play()
+    FloatingRainbow.Transparency = isHovering and NumberSequence.new(0) or NumberSequence.new(1)
+    if isHovering then
+        if floatingRainbowTween then floatingRainbowTween:Cancel() end
+        FloatingRainbow.Rotation = 0
+        floatingRainbowTween = TweenService:Create(FloatingRainbow, TweenInfo.new(2.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {
+            Rotation = 360,
+        })
+        floatingRainbowTween:Play()
+    else
+        if floatingRainbowTween then floatingRainbowTween:Cancel(); floatingRainbowTween = nil end
+        FloatingRainbow.Rotation = 0
+    end
+end
+
+local function SetFloatingPressed(isPressed)
+    if floatingPressTween then floatingPressTween:Cancel() end
+    floatingPressTween = TweenService:Create(FloatingButtonScale, TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Scale = isPressed and 0.9 or 1,
+    })
+    floatingPressTween:Play()
+end
+
+FloatingButton.MouseEnter:Connect(function()
+    SetFloatingHover(true)
+end)
+FloatingButton.MouseLeave:Connect(function()
+    SetFloatingHover(false)
+    SetFloatingPressed(false)
+end)
 local FloatingFallback = Instance.new("TextLabel")
 FloatingFallback.Name = "FallbackText"
 FloatingFallback.Size = UDim2.fromScale(1, 1)
@@ -84,80 +148,6 @@ FloatingFallback.Font = Enum.Font.GothamBlack
 FloatingFallback.TextSize = 30
 FloatingFallback.ZIndex = 201
 FloatingFallback.Parent = FloatingButton
-
--- Promotional match overlay: remains visible above the black render-reduction layer.
-local MatchInfoPanel = Instance.new("Frame")
-MatchInfoPanel.Name = "BlackScreenMatchInfo"
-MatchInfoPanel.AnchorPoint = Vector2.new(0.5, 0.5)
-MatchInfoPanel.Position = UDim2.fromScale(0.5, 0.5)
-MatchInfoPanel.Size = UDim2.new(0.84, 0, 0, 286)
-local MatchPanelConstraint = Instance.new("UISizeConstraint")
-MatchPanelConstraint.MinSize = Vector2.new(280, 250)
-MatchPanelConstraint.MaxSize = Vector2.new(520, 286)
-MatchPanelConstraint.Parent = MatchInfoPanel
-MatchInfoPanel.BackgroundColor3 = Color3.fromRGB(12, 15, 24)
-MatchInfoPanel.BackgroundTransparency = 0.08
-MatchInfoPanel.BorderSizePixel = 0
-MatchInfoPanel.Visible = false
-MatchInfoPanel.ZIndex = 180
-MatchInfoPanel.Parent = ScreenGui
-local MatchPanelCorner = Instance.new("UICorner")
-MatchPanelCorner.CornerRadius = UDim.new(0, 18)
-MatchPanelCorner.Parent = MatchInfoPanel
-local MatchPanelStroke = Instance.new("UIStroke")
-MatchPanelStroke.Color = Color3.fromRGB(105, 125, 190)
-MatchPanelStroke.Thickness = 2
-MatchPanelStroke.Transparency = 0.12
-MatchPanelStroke.Parent = MatchInfoPanel
-
-local PromoLogo = Instance.new("ImageLabel")
-PromoLogo.Name = "PromoLogo"
-PromoLogo.Position = UDim2.fromOffset(18, 18)
-PromoLogo.Size = UDim2.fromOffset(82, 82)
-PromoLogo.BackgroundColor3 = Color3.fromRGB(25, 29, 43)
-PromoLogo.BackgroundTransparency = 0.05
-PromoLogo.BorderSizePixel = 0
-PromoLogo.ScaleType = Enum.ScaleType.Fit
-PromoLogo.ZIndex = 181
-PromoLogo.Parent = MatchInfoPanel
-local PromoLogoCorner = Instance.new("UICorner")
-PromoLogoCorner.CornerRadius = UDim.new(0, 14)
-PromoLogoCorner.Parent = PromoLogo
-local PromoLogoFallback = Instance.new("TextLabel")
-PromoLogoFallback.Size = UDim2.fromScale(1, 1)
-PromoLogoFallback.BackgroundTransparency = 1
-PromoLogoFallback.Text = "OCTOPUT HUB"
-PromoLogoFallback.TextColor3 = Color3.new(1, 1, 1)
-PromoLogoFallback.Font = Enum.Font.GothamBlack
-PromoLogoFallback.TextSize = 12
-PromoLogoFallback.ZIndex = 182
-PromoLogoFallback.Parent = PromoLogo
-
-local function MakeMatchLabel(name, position, size, text, textSize, color, font)
-    local label = Instance.new("TextLabel")
-    label.Name = name
-    label.Position = position
-    label.Size = size
-    label.BackgroundTransparency = 1
-    label.Text = text
-    label.TextColor3 = color or Color3.fromRGB(235, 239, 255)
-    label.TextSize = textSize or 16
-    label.Font = font or Enum.Font.GothamMedium
-    label.TextXAlignment = Enum.TextXAlignment.Left
-    label.TextYAlignment = Enum.TextYAlignment.Center
-    label.TextTruncate = Enum.TextTruncate.AtEnd
-    label.ZIndex = 181
-    label.Parent = MatchInfoPanel
-    return label
-end
-
-MakeMatchLabel("PromoTitle", UDim2.fromOffset(116, 18), UDim2.new(1, -134, 0, 30), "OCTOPUT HUB  |  LIVE MATCH", 19, Color3.fromRGB(255, 255, 255), Enum.Font.GothamBlack)
-local MatchStageLabel = MakeMatchLabel("Stage", UDim2.fromOffset(116, 53), UDim2.new(1, -134, 0, 25), "STAGE: Loading...", 15, Color3.fromRGB(190, 205, 255), Enum.Font.GothamBold)
-local MatchTimerLabel = MakeMatchLabel("ElapsedTime", UDim2.fromOffset(18, 119), UDim2.new(0.5, -25, 0, 32), "TIME  00:00:00", 21, Color3.fromRGB(120, 235, 180), Enum.Font.GothamBlack)
-local MatchWaveLabel = MakeMatchLabel("Wave", UDim2.new(0.5, 7, 0, 119), UDim2.new(0.5, -25, 0, 32), "WAVE  0", 21, Color3.fromRGB(255, 210, 120), Enum.Font.GothamBlack)
-local MatchStatsLabel = MakeMatchLabel("PlayerStats", UDim2.fromOffset(18, 166), UDim2.new(1, -36, 0, 98), "PLAYER STATS  |  Loading...", 15, Color3.fromRGB(225, 230, 245), Enum.Font.GothamMedium)
-MatchStatsLabel.TextYAlignment = Enum.TextYAlignment.Top
-MatchStatsLabel.TextWrapped = true
 
 -- Download/cache the GitHub image when the executor exposes file + custom-asset APIs.
 task.spawn(function()
@@ -175,34 +165,10 @@ task.spawn(function()
         return assetLoader(FLOATING_LOGO_FILE)
     end)
     if ok and type(asset) == "string" then
-        -- Keep the existing floating launcher behavior unchanged.
         FloatingButton.Image = asset
         FloatingFallback.Visible = false
     else
         warn("[OctoputHub] Floating logo could not load; using fallback icon. " .. tostring(asset))
-    end
-end)
-
--- The logo displayed in the center BlackScreen promotion panel uses the requested image.
-task.spawn(function()
-    local ok, asset = pcall(function()
-        local assetLoader = getcustomasset or getsynasset
-        if type(assetLoader) ~= "function" or type(writefile) ~= "function" then
-            error("Executor does not expose getcustomasset/getsynasset and writefile")
-        end
-        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("OctoputHub") then
-            pcall(makefolder, "OctoputHub")
-        end
-        local imageBytes = game:HttpGet("https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png")
-        assert(type(imageBytes) == "string" and #imageBytes > 0, "BlackScreen logo download returned empty data")
-        writefile("OctoputHub/blackscreen_promo_logo.png", imageBytes)
-        return assetLoader("OctoputHub/blackscreen_promo_logo.png")
-    end)
-    if ok and type(asset) == "string" then
-        PromoLogo.Image = asset
-        PromoLogoFallback.Visible = false
-    else
-        warn("[OctoputHub] BlackScreen promotional logo could not load; using panel fallback. " .. tostring(asset))
     end
 end)
 
@@ -215,6 +181,7 @@ local floatingMoved = false
 local suppressFloatingClick = false
 FloatingButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        SetFloatingPressed(true)
         floatingDragging = true
         floatingMoved = false
         floatingDragStart = input.Position
@@ -240,6 +207,9 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        SetFloatingPressed(false)
+    end
     if floatingDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
         floatingDragging = false
         if floatingMoved then
@@ -1489,9 +1459,6 @@ local function ReadPlayerCurrencies()
                 elseif name:sub(1, 9) == "_resource" then
                     local resourceName = name:sub(10):gsub("^_+", "")
                     values[resourceName] = child.Value
-                    if resourceName:lower():find("summer", 1, true) and resourceName:lower():find("pearl", 1, true) then
-                        values.SummerPearls = child.Value
-                    end
                 elseif name:lower():find("summerpearls", 1, true) then
                     values.SummerPearls = child.Value
                 end
@@ -1562,76 +1529,6 @@ local function BuildPlayerStatsText(currencies)
     end
     return table.concat(lines, "\n")
 end
-
--- Live match information shown while Reduce 3D Render is active.
-local GetInGameCash -- forward declaration; implementation is below the upgrade helpers.
-local matchStartedAt = nil
-local lastMatchInfoRefresh = 0
-local function FormatElapsed(seconds)
-    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
-    local hours = math.floor(seconds / 3600)
-    local minutes = math.floor((seconds % 3600) / 60)
-    local secs = seconds % 60
-    return string.format("%02d:%02d:%02d", hours, minutes, secs)
-end
-
-local function ReadCurrentStageName()
-    local results = playerGui:FindFirstChild("ResultsUI")
-    local holder = results and results:FindFirstChild("Holder")
-    local resultName = holder and holder:FindFirstChild("LevelName")
-    if resultName and resultName:IsA("TextLabel") and resultName.Text ~= "" then
-        return resultName.Text
-    end
-
-    local data = workspace:FindFirstChild("_DATA")
-    if data then
-        for _, name in ipairs({"LevelName", "StageName", "MapName", "Level", "Stage"}) do
-            local value = data:FindFirstChild(name)
-            if value and value:IsA("ValueBase") and tostring(value.Value) ~= "" then
-                return tostring(value.Value)
-            end
-        end
-    end
-    for _, name in ipairs({"_level_name", "_stage_name", "_map_name"}) do
-        local value = workspace:FindFirstChild(name)
-        if value and value:IsA("ValueBase") and tostring(value.Value) ~= "" then
-            return tostring(value.Value)
-        end
-    end
-    return "Unknown Stage"
-end
-
-task.spawn(function()
-    while ScreenGui.Parent do
-        task.wait(0.25)
-        local inMatch = workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
-        if inMatch then
-            if not matchStartedAt then matchStartedAt = os.clock() end
-        else
-            matchStartedAt = nil
-        end
-
-        local showPanel = State.BlackScreen == true and inMatch
-        MatchInfoPanel.Visible = showPanel
-        if showPanel and os.clock() - lastMatchInfoRefresh >= 0.5 then
-            lastMatchInfoRefresh = os.clock()
-            MatchTimerLabel.Text = "TIME  " .. FormatElapsed(matchStartedAt and (os.clock() - matchStartedAt) or 0)
-            MatchStageLabel.Text = "STAGE: " .. ReadCurrentStageName()
-            MatchWaveLabel.Text = "WAVE  " .. tostring(GetCurrentWave())
-
-            local currencies = ReadPlayerCurrencies()
-            local cash = GetInGameCash()
-            local statLines = {
-                "PLAYER: " .. tostring(player.DisplayName or player.Name),
-                "CASH: " .. (cash ~= nil and FormatCompact(cash) or "N/A"),
-                "GEMS: " .. FormatCompact(currencies.Gems or 0) .. "     GOLD: " .. FormatCompact(currencies.Gold or 0),
-                "SUMMER PEARLS: " .. FormatCompact(currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls or 0),
-                "XP: " .. FormatCompact(currencies.XP or 0) .. "     TROPHIES: " .. FormatCompact(currencies.Trophies or 0),
-            }
-            MatchStatsLabel.Text = table.concat(statLines, "\n")
-        end
-    end
-end)
 
 local function BuildRewardText(before, after)
     local ordered = {"XP", "SummerPearls", "Gold", "Gems", "Trophies"}
@@ -1828,11 +1725,11 @@ local function BuildSecretRewardLines(before, after)
     for _, category in ipairs({"Secret Unit", "Secret Portal", "Secret Item"}) do
         local entries = {}
         for name, count in pairs(totals[category]) do
-            table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
+            table.insert(entries, string.format("⭐ **%s** ×%d", name, count))
         end
         table.sort(entries)
         if #entries > 0 then
-            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n" .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
+            table.insert(sections, "**💎 " .. string.upper(category) .. "**\n" .. table.concat(entries, "\n"))
         end
     end
     if #sections == 0 then
@@ -1847,59 +1744,6 @@ local webhookSecretRewardBaselineAvailable = false
 local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
-end
-
-local function ReadPlayerLevel()
-    local stats = player:FindFirstChild("_stats")
-    if stats then
-        for _, name in ipairs({"player_level", "level"}) do
-            local value = stats:FindFirstChild(name)
-            if value and value:IsA("ValueBase") then
-                local number = tonumber(value.Value)
-                if number then return number end
-            end
-        end
-    end
-    -- The game's LevelService derives level from player_xp; try its client module when available.
-    local ok, level = pcall(function()
-        local Loader = require(ReplicatedStorage.src.Loader)
-        local service = Loader.load_client_service(game, "LevelServiceClient")
-        if service and type(service.get_level) == "function" then
-            return service.get_level(player)
-        end
-        return nil
-    end)
-    return ok and tonumber(level) or nil
-end
-
-local function ReadMatchUnitLines()
-    local units = GetPlayerUnits()
-    local lines = {}
-    for _, unit in ipairs(units) do
-        local stats = unit:FindFirstChild("_stats")
-        if stats then
-            local idValue = stats:FindFirstChild("id")
-            local unitId = idValue and tostring(idValue.Value) or unit.Name
-            local def = LookupUnitData(unitId)
-            local displayName = (def and def.name) or unitId
-            local takedownValue = stats:FindFirstChild("takedown_count")
-            local damageValue = stats:FindFirstChild("total_damage")
-            local upgradeValue = stats:FindFirstChild("upgrade")
-            local maxUpgrade = stats:FindFirstChild("max_upgrade")
-            local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
-            local damage = damageValue and tonumber(damageValue.Value) or 0
-            local upgradeText = ""
-            if upgradeValue then
-                upgradeText = " · Upg " .. tostring(upgradeValue.Value)
-                if maxUpgrade then upgradeText = upgradeText .. "/" .. tostring(maxUpgrade.Value) end
-            end
-            table.insert(lines, string.format("• **%s** — Takedowns: **%s** · DMG: **%s**%s",
-                tostring(displayName), FormatNumber(takedowns), FormatCompact(damage), upgradeText))
-        end
-    end
-    table.sort(lines)
-    if #lines == 0 then return "No placed unit stats found" end
-    return table.concat(lines, "\n")
 end
 
 local function SendEndWebhook(currencyBaseline)
@@ -1943,40 +1787,13 @@ local function SendEndWebhook(currencyBaseline)
         result = resultDetails.result .. " | " .. result
     end
 
-    local unitLines = ReadMatchUnitLines()
-    local playerStatsText = BuildPlayerStatsText(currentCurrencies)
-    local playerLevel = ReadPlayerLevel()
-    local xp = currentCurrencies.XP or 0
-    local matchTime = resultDetails.Timer or "Unknown"
-    local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
-    local stageText = tostring(level)
-    local rewardText = BuildRewardText(before, currentCurrencies)
-    local matchResultText = (resultDetails.result and resultDetails.result ~= "" and resultDetails.result .. " — " or "")
-        .. result .. " — " .. tostring(matchTime) .. " — Wave " .. tostring(waveText) .. " — " .. stageText
-
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
-            title = "Anime Adventures",
-            description = string.format(
-                "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**🎁 Rewards**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
-                player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
-                playerStatsText, rewardText, unitLines, matchResultText),
-            color = secretRewardText:find("✨", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
-            image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
-            fields = {{
-                name = "🚨 SECRET REWARDS 🚨",
-                value = secretRewardText:sub(1, 1024),
-                inline = false,
-            }, {
-                name = "📦 Resource Rewards",
-                value = resourceText:sub(1, 1024),
-                inline = false,
-            }, {
-                name = "💰 Currency (Before → After | Change)",
-                value = currencyText:sub(1, 1024),
-                inline = false,
-            }},
+            title = "Stage Ended — " .. tostring(level),
+            description = string.format("**Player:** %s\n**Result:** %s\n\n**💎 SECRET REWARDS**\n%s\n\n**📦 Resource Rewards (from ResultsUI)**\n%s\n\n**💰 Currency (Before → After | Change)**\n%s",
+                player.Name, result, secretRewardText, resourceText, currencyText),
+            color = secretRewardText:find("⭐", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
@@ -3851,7 +3668,7 @@ local pendingUpgradeRequests = {}
 local pendingSpawnRequests = {}
 
 -- In-game cash (same value the game HUD uses for upgrade/placement affordability).
-GetInGameCash = function()
+local function GetInGameCash()
     local stats = player:FindFirstChild("_stats")
     local resource = stats and stats:FindFirstChild("resource")
     return resource and tonumber(resource.Value) or nil
