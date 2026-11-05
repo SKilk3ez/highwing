@@ -61,6 +61,16 @@ HubScale.Name = "HubScale"
 HubScale.Scale = 1
 HubScale.Parent = MainFrame
 
+-- Keep the mobile launcher in its own topmost ScreenGui so game UI layers
+-- cannot cover the toggle button while the hub window is hidden.
+FloatingScreenGui = Instance.new("ScreenGui")
+FloatingScreenGui.Name = "OctoputHub_FloatingLauncher"
+FloatingScreenGui.ResetOnSpawn = false
+FloatingScreenGui.IgnoreGuiInset = true
+FloatingScreenGui.DisplayOrder = 1000000
+FloatingScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+FloatingScreenGui.Parent = playerGui
+
 -- Mobile-friendly floating launcher. The image is cached locally through the executor
 -- because Roblox ImageLabel cannot display an arbitrary https URL directly.
 FLOATING_LOGO_URL = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png"
@@ -79,7 +89,7 @@ FloatingButton.Visible = true
 FloatingButton.ZIndex = 200
 FloatingButton.Image = ""
 FloatingButton.ScaleType = Enum.ScaleType.Fit
-FloatingButton.Parent = ScreenGui
+FloatingButton.Parent = FloatingScreenGui
 
 FloatingCorner = Instance.new("UICorner")
 FloatingCorner.CornerRadius = UDim.new(0, 16)
@@ -3330,6 +3340,16 @@ CreateToggle(MainPage, "Auto Start", "AutoStart", 1)
 CreateToggle(MainPage, "Auto Replay", "MainAutoReplay", 2)
 CreateToggle(MainPage, "Auto Next", "AutoNext", 3)
 CreateToggle(MainPage, "Auto Leave", "AutoLeave", 4)
+CreateSection(MainPage, "Return to Lobby", 5)
+CreateHint(MainPage, "Leave the current match and teleport back to the lobby.", 6, 28)
+ReturnToLobbyButton = CreateButton(MainPage, "Return to Lobby", 7, function()
+    local ok, err = pcall(function()
+        InvokeEndpoint("teleport_back_to_lobby")
+    end)
+    if not ok then
+        warn("[OctoputHub] Return to Lobby failed: " .. tostring(err))
+    end
+end)
 
 AutoPlayStatusCard = Instance.new("Frame")
 AutoPlayStatusCard.Size = UDim2.new(1, -10, 0, 38)
