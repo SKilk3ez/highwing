@@ -1802,22 +1802,64 @@ function BuildRewardText(before, after)
     return table.concat(parts, " · ")
 end
 
+function ReadAuthoritativeResultSettings()
+    -- game.lua ResultsUI.new() stores the ResultsUI ScreenGui in screenGUI,
+    -- and ResultsUI.show_results(settings) stores the exact server result in .settings.
+    local results = playerGui:FindFirstChild("ResultsUI")
+    if not results or results.Enabled ~= true or type(getgc) ~= "function" then return nil end
+
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return nil end
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" and object.screenGUI == results then
+            local settings = object.settings
+            if type(settings) == "table" and type(settings.victory) == "boolean"
+                and type(settings.stats) == "table" then
+                return settings
+            end
+        end
+    end
+    return nil
+end
+
 function GetResultDetails()
     local details = {}
+    local settings = ReadAuthoritativeResultSettings()
+    if settings then
+        details.authoritative = true
+        details.settings = settings
+        details.result = settings.victory and "VICTORY!!!" or "DEFEAT"
+        details.level = tostring(settings.title or "Unknown stage")
+
+        local stats = settings.stats or {}
+        if tonumber(stats.time_taken) then
+            local totalSeconds = math.ceil(tonumber(stats.time_taken))
+            details.Timer = string.format("%02d:%02d", math.floor(totalSeconds / 60), totalSeconds % 60)
+        end
+        if tonumber(stats.waves_completed) then
+            details.WavesCompleted = tostring(math.floor(tonumber(stats.waves_completed)))
+        end
+        return details
+    end
+
+    -- UI fallback for executors where the ResultsUI controller cannot be read.
     local results = playerGui:FindFirstChild("ResultsUI")
     local holder = results and results:FindFirstChild("Holder")
-    if holder then
+    if results and results.Enabled == true and holder and holder.Visible == true then
         local levelName = holder:FindFirstChild("LevelName")
         if levelName and levelName:IsA("TextLabel") then details.level = levelName.Text end
         local title = holder:FindFirstChild("Title")
         if title and title:IsA("TextLabel") then details.result = title.Text end
-        local difficulty = holder:FindFirstChild("Difficulty")
-        if difficulty and difficulty:IsA("TextLabel") then details.difficulty = difficulty.Text end
         local middle = holder:FindFirstChild("Middle")
         if middle then
-            for _, childName in ipairs({"Timer", "WavesCompleted"}) do
-                local child = middle:FindFirstChild(childName)
-                if child and child:IsA("TextLabel") then details[childName] = child.Text end
+            local timer = middle:FindFirstChild("Timer")
+            if timer and timer:IsA("TextLabel") then
+                details.Timer = tostring(timer.Text):gsub("^Total Time:%s*", "")
+            end
+            local waves = middle:FindFirstChild("WavesCompleted")
+            if waves and waves:IsA("TextLabel") then
+                details.WavesCompleted = tostring(waves.Text):gsub("^Waves Completed:%s*", "")
             end
         end
     end
@@ -1962,7 +2004,7 @@ function ReadSecretRewardSnapshot()
 end
 
 function BuildSecretRewardLines(before, after)
-    local totals = { ["Secret Unit"] = {}, ["Secret Portal"] = {}, ["Secret Item"] = {} }
+    local totals = { ["Secret Unit"] = {}, ["Secret Portal"] = {} }
     for key, reward in pairs(after or {}) do
         if not (before and before[key]) and totals[reward.category] then
             local name = reward.name or "Unknown"
@@ -1971,20 +2013,81 @@ function BuildSecretRewardLines(before, after)
     end
 
     local sections = {}
-    for _, category in ipairs({"Secret Unit", "Secret Portal", "Secret Item"}) do
+    for _, category in ipairs({"Secret Unit", "Secret Portal"}) do
         local entries = {}
         for name, count in pairs(totals[category]) do
             table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
         end
         table.sort(entries)
         if #entries > 0 then
-            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n" .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
+            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n"
+                .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
         end
     end
-    if #sections == 0 then
-        return "No new Secret Unit / Secret Portal rewards detected"
-    end
+    if #sections == 0 then return nil end
     return table.concat(sections, "\n\n")
+end
+
+function BuildMatchRewardLines(resultDetails)
+    local settings = resultDetails and resultDetails.settings
+    local lines = {}
+    if type(settings) == "table" then
+        local rewardFields = {
+            { key = "xp_reward", label = "XP" },
+            { key = "gold_reward", label = "Gold" },
+            { key = "gem_reward", label = "Gems" },
+            { key = "trophy_reward", label = "Trophies" },
+        }
+        for _, entry in ipairs(rewardFields) do
+            local amount = tonumber(settings[entry.key])
+            if amount and amount > 0 then
+                table.insert(lines, string.format("• **%s:** +%s", entry.label, FormatNumber(amount)))
+            end
+        end
+        if type(settings.resource_reward) == "table" then
+            local resourceEntries = {}
+            for resourceName, amount in pairs(settings.resource_reward) do
+                if tonumber(amount) and tonumber(amount) > 0 then
+                    local rawName = tostring(resourceName)
+                    local label = rawName:gsub("_", " "):gsub("(%l)(%u)", "%1 %2"):gsub("(%a)([%w']*)", function(first, rest)
+                        return first:upper() .. rest
+                    end)
+                    table.insert(resourceEntries, { key = resourceName, label = label, amount = tonumber(amount) })
+                end
+            end
+            table.sort(resourceEntries, function(a, b) return a.label < b.label end)
+            for _, entry in ipairs(resourceEntries) do
+                table.insert(lines, string.format("• **%s:** +%s", entry.label, FormatNumber(entry.amount)))
+            end
+        end
+    end
+
+    -- Fallback: read the exact visible reward amounts rendered by ResultsUI.
+    if #lines == 0 then
+        local results = playerGui:FindFirstChild("ResultsUI")
+        local holder = results and results:FindFirstChild("Holder")
+        local scroll = holder and holder:FindFirstChild("LevelRewards")
+        scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
+        if scroll then
+            local labels = {
+                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "XP",
+            }
+            for _, frame in ipairs(scroll:GetChildren()) do
+                if frame:IsA("GuiObject") and frame.Visible then
+                    local main = frame:FindFirstChild("Main")
+                    local amount = main and main:FindFirstChild("Amount")
+                    if amount and amount:IsA("TextLabel") and amount.Text ~= "" then
+                        local label = labels[frame.Name]
+                        if frame.Name == "ResourceReward" then label = "Resource" end
+                        if label then table.insert(lines, "• **" .. label .. ":** " .. amount.Text) end
+                    end
+                end
+            end
+        end
+    end
+
+    if #lines == 0 then return "No match rewards reported by ResultsUI" end
+    return table.concat(lines, "\n")
 end
 
 webhookCurrencyBefore = nil
@@ -2062,26 +2165,13 @@ function ReadMatchUnitLines()
     return table.concat(entries, "\n")
 end
 
-function ResolveWebhookOutcome(resultDetails, data)
-    -- game.lua ResultsUI.show_results() sets Holder.Title.Text to
-    -- "VICTORY!!!" or "DEFEAT". Prefer that authoritative visible result.
+function ResolveWebhookOutcome(resultDetails)
+    -- Only trust the current ResultsUI controller settings / current result title.
+    -- Never use generic _DATA Won/Victory flags: they can be stale across matches.
     local title = string.upper(tostring(resultDetails and resultDetails.result or ""))
-    if title:find("VICTORY", 1, true) then
-        return "Victory"
-    elseif title:find("DEFEAT", 1, true) then
-        return "Defeat"
-    end
-
-    -- Fallback for modes where ResultsUI has not populated its title yet.
-    if data then
-        for _, flagName in ipairs({"Won", "Victory", "GameWon"}) do
-            local flag = data:FindFirstChild(flagName)
-            if flag and flag:IsA("ValueBase") and type(flag.Value) == "boolean" then
-                return flag.Value and "Victory" or "Defeat"
-            end
-        end
-    end
-    return "Ended"
+    if title:find("DEFEAT", 1, true) then return "Defeat" end
+    if title:find("VICTORY", 1, true) then return "Victory" end
+    return "Unknown"
 end
 
 function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable, unitLinesSnapshot)
@@ -2092,44 +2182,46 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         return false
     end
 
-    -- Let reward/stat updates settle, while keeping this match's baseline local.
-    task.wait(2)
-    local data = workspace:FindFirstChild("_DATA")
-    local resultDetails = GetResultDetails()
-    local outcome = ResolveWebhookOutcome(resultDetails, data)
-    local result = outcome
-    if data then
-        local wave = data:FindFirstChild("Wave") or data:FindFirstChild("CurrentWave")
-        if wave then
-            result = result .. " | Wave " .. tostring(wave.Value)
+    -- game_finished calls ResultsUI.show_results(settings). Wait for that exact
+    -- settings payload to become available before reading the match result.
+    local resultDetails
+    for attempt = 1, 12 do
+        local currentSettings = ReadAuthoritativeResultSettings()
+        if currentSettings and currentSettings ~= webhookResultSettingsAtStart then
+            resultDetails = GetResultDetails()
+            if resultDetails.authoritative then break end
+        end
+        task.wait(0.5)
+    end
+    resultDetails = resultDetails or GetResultDetails()
+    -- If no fresh server result payload appeared, do not reuse a previous run's
+    -- victory/defeat title from a still-open ResultsUI.
+    if not resultDetails.authoritative and resultDetails.result == webhookResultTitleAtStart then
+        resultDetails.result = nil
+    end
+    local outcome = ResolveWebhookOutcome(resultDetails)
+
+    local secretRewardText
+    if secretBaselineAvailable then
+        local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
+        if secretRewardsAvailable then
+            secretRewardText = BuildSecretRewardLines(secretBaseline, secretRewardsAfter)
         end
     end
 
-    local currentCurrencies = ReadPlayerCurrencies()
-    local before = currencyBaseline or currentCurrencies
-    local currencyText = BuildCurrencyLines(before, currentCurrencies)
-    local resourceRewards = ReadResultResourceRewards()
-    local resourceText = BuildResourceRewardLines(resourceRewards)
-    local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
-    local secretRewardText
-    if secretBaselineAvailable and secretRewardsAvailable then
-        secretRewardText = BuildSecretRewardLines(secretBaseline, secretRewardsAfter)
-    else
-        secretRewardText = "Inventory snapshot unavailable; Secret rewards could not be verified"
-    end
-    local level = resultDetails.level or "Unknown stage"
-
     local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
-    local playerStatsText = BuildPlayerStatsText(currentCurrencies)
+    local playerStatsText = BuildPlayerStatsText(ReadPlayerCurrencies())
     local playerLevel = ReadPlayerLevel()
+    local currentCurrencies = ReadPlayerCurrencies()
     local xp = currentCurrencies.XP or 0
     local matchTime = resultDetails.Timer or "Unknown"
-    local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
-    local stageText = tostring(level)
+    local waveText = resultDetails.WavesCompleted or "Unknown"
+    local stageText = tostring(resultDetails.level or "Unknown stage")
     local outcomeLabel = outcome == "Victory" and "🟩 **VICTORY**"
-        or (outcome == "Defeat" and "🟥 **DEFEAT**" or "⚪ **ENDED**")
-    local matchResultText = outcomeLabel .. " — " .. tostring(matchTime)
-        .. " — Wave " .. tostring(waveText) .. " — " .. stageText
+        or (outcome == "Defeat" and "🟥 **DEFEAT**" or "⚪ **UNKNOWN RESULT**")
+    local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
+        .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
+    local rewardText = BuildMatchRewardLines(resultDetails)
 
     local function LimitEmbedText(value, limit)
         value = tostring(value or "")
@@ -2142,33 +2234,34 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
         playerStatsText, unitLines, matchResultText)
 
+    local fields = {{
+        name = "🎁 Match Rewards",
+        value = LimitEmbedText(rewardText, 900),
+        inline = false,
+    }}
+    -- Show this section only when a new Secret Unit or Secret Portal was found.
+    if secretRewardText then
+        table.insert(fields, {
+            name = "🚨 SECRET REWARDS 🚨",
+            value = LimitEmbedText(secretRewardText, 900),
+            inline = false,
+        })
+    end
+
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
             title = outcome == "Victory" and "Anime Adventures — 🏆 VICTORY"
-                or (outcome == "Defeat" and "Anime Adventures — DEFEAT" or "Anime Adventures — MATCH ENDED"),
+                or (outcome == "Defeat" and "Anime Adventures — DEFEAT" or "Anime Adventures — MATCH RESULT"),
             description = LimitEmbedText(description, 2400),
             color = outcome == "Victory" and 5763719
                 or (outcome == "Defeat" and 15548997 or 9807270),
             image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
-            fields = {{
-                name = "🚨 SECRET REWARDS 🚨",
-                value = LimitEmbedText(secretRewardText, 900),
-                inline = false,
-            }, {
-                name = "🎁 Rewards",
-                value = LimitEmbedText(resourceText, 900),
-                inline = false,
-            }, {
-                name = "💰 Currency (Before → After | Change)",
-                value = LimitEmbedText(currencyText, 900),
-                inline = false,
-            }},
+            fields = fields,
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
 
-    -- Retry transient transport/Discord errors; don't silently swallow failures.
     local lastError = "Unknown HTTP error"
     for attempt = 1, 3 do
         local ok, response = pcall(HttpPost, url, body)
@@ -2179,9 +2272,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         end
         lastError = message
         warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. " failed: " .. tostring(message))
-        if attempt < 3 then
-            task.wait(attempt * 2)
-        end
+        if attempt < 3 then task.wait(attempt * 2) end
     end
     warn("[Octoput Hub Webhook] Giving up after 3 attempts: " .. tostring(lastError))
     return false
@@ -4370,6 +4461,9 @@ webhookCurrencyBefore = nil
 webhookSecretRewardBefore = nil
 webhookSecretRewardBaselineAvailable = false
 webhookUnitLinesSnapshot = nil
+webhookResultTitleAtStart = nil
+webhookResultsVisibleAtStart = false
+webhookResultSettingsAtStart = nil
 
 task.spawn(function()
     while true do
@@ -4391,13 +4485,6 @@ task.spawn(function()
                 local resultDetails = GetResultDetails()
                 resultTitle = string.upper(tostring(resultDetails.result or ""))
             end
-            -- ResultsUI.show_results() sets the title to VICTORY!!! or DEFEAT.
-            -- Use that explicit result as an end signal even if the monitor missed
-            -- the short GameStarted=true window or _UNITS was already cleaned up.
-            local resultScreenConfirmed = resultsVisible
-                and (resultTitle:find("VICTORY", 1, true) ~= nil
-                    or resultTitle:find("DEFEAT", 1, true) ~= nil)
-
             -- Do not treat GameFinished=false by itself as proof of a live match;
             -- that value can also exist while the player is in the lobby.
             local startedByFlag = gameStarted ~= nil and gameStarted.Value == true
@@ -4415,10 +4502,20 @@ task.spawn(function()
                     webhookSent = false
                     webhookRetryAt = 0
                     webhookUnitLinesSnapshot = nil
+                    webhookResultTitleAtStart = resultTitle
+                    webhookResultsVisibleAtStart = resultsVisible
+                    webhookResultSettingsAtStart = ReadAuthoritativeResultSettings()
                 end
             end
 
-            local hasEnded = finished or resultScreenConfirmed
+            local resultTitleIsFresh = resultTitle ~= "" and resultTitle ~= webhookResultTitleAtStart
+            local resultsScreenAppeared = resultsVisible and not webhookResultsVisibleAtStart
+            local resultScreenConfirmed = resultsVisible and resultTitle ~= ""
+                and (resultTitleIsFresh or resultsScreenAppeared)
+            -- GameFinished is the primary lifecycle signal. ResultsUI is only a
+            -- fallback after this monitor has observed this match become active,
+            -- so a previous match's still-open VICTORY screen cannot end a new run.
+            local hasEnded = finished or (webhookGameWasActive and resultScreenConfirmed)
             if hasEnded and not webhookEndDetected then
                 -- Capture final per-unit takedowns before cleanup when possible.
                 -- Do not require webhookGameWasActive: some matches transition to
