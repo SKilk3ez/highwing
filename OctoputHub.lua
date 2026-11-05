@@ -1014,8 +1014,8 @@ end
 -- through further_modifiers.cursed and exposes the effective cooldown in
 -- _stats.active_attack_cooldown on the deployed model.
 BUFF_ROTATION_ATTACKS = {
-    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical" },
-    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic" },
+    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander" },
+    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong" },
 }
 BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false }
 BUFF_ROTATION_CURSE_CACHE = {}
@@ -1117,30 +1117,48 @@ end
 
 function GetBuffRotationGroups()
     local groups = {}
-    local passiveElfyCount = 0
+    local elfyCount = 0
     for _, unit in ipairs(GetPlayerUnits()) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
             local rawId = GetRawUnitId(unit)
             local unitData = LookupUnitData(rawId)
-            local activeValue = stats:FindFirstChild("active_attack")
-            local activeId = activeValue and tostring(activeValue.Value) or "nil"
-
-            -- Elfy (Sylph) is a passive range aura, not an Active ability.
-            -- Identify it from both the deployed ID and the loaded game.lua data
-            -- so naming/ID formatting differences do not hide it from the UI.
             local normalizedRawId = NormalizeName(rawId)
             local normalizedDataId = NormalizeName(unitData and unitData.id)
             local normalizedDataName = NormalizeName(unitData and unitData.name)
             local isElfySylph = normalizedRawId == "leafaevolved"
                 or normalizedDataId == "leafaevolved"
                 or normalizedDataName == "elfysylph"
-            if isElfySylph then
-                passiveElfyCount = passiveElfyCount + 1
+
+            -- Match the game's UnitUpgrade UI: it resolves the active from
+            -- UnitServiceCore.get_active_id(unit), which reads the live
+            -- _stats.active_attack value. Some units (including Elfy/Sylph)
+            -- receive their Verdant Enchantment active dynamically even though
+            -- the static Units entry has no active_attack field.
+            local activeValue = stats:FindFirstChild("active_attack")
+            local activeId = activeValue and tostring(activeValue.Value) or "nil"
+            if activeId == "" or activeId == "nil" then
+                activeId = nil
             end
 
-            local definition = BUFF_ROTATION_ATTACKS[activeId]
-            if definition and (not unitData or unitData._show_as_buff_unit ~= false) then
+            if isElfySylph then
+                elfyCount = elfyCount + 1
+                if activeId then
+                    -- Elfy's live ActiveButton is the Verdant Enchantment
+                    -- shown in the user's screenshot. The static game.lua unit
+                    -- record omits this runtime active, so classify by unit ID
+                    -- and use the live active_attack ID/cooldown from _stats.
+                    -- The 30s duration is an estimate for cadence reporting;
+                    -- cast eligibility always uses the game's live cooldown.
+                    BUFF_ROTATION_ATTACKS[activeId] = BUFF_ROTATION_ATTACKS[activeId]
+                        or { name = "Elfy (Sylph) - Verdant Enchantment", duration = 30, buff = "Magic", unit = "elfy" }
+                end
+            end
+
+            local definition = activeId and BUFF_ROTATION_ATTACKS[activeId] or nil
+            local isKnownBuffUnit = isElfySylph
+                or (type(unitData) == "table" and unitData._show_as_buff_unit == true)
+            if definition and isKnownBuffUnit then
                 local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
                 local lastCastValue = stats:FindFirstChild("last_active_cast")
                 if cooldownValue and lastCastValue then
@@ -1182,12 +1200,6 @@ function GetBuffRotationGroups()
         table.sort(group.units, function(a, b)
             return tostring(a.uuid) < tostring(b.uuid)
         end)
-
-        -- The game's native Auto Active worker does NOT schedule one cast at
-        -- cooldown/count intervals. It independently checks every unit's own
-        -- active cooldown and requests each ready unit (with a 0.5s per-unit
-        -- request guard). Mirror that behavior below. For the UI, estimate the
-        -- group's sustainable cadence from the sum of each unit's cast rate.
         local totalRate = 0
         for _, entry in ipairs(group.units) do
             totalRate = totalRate + (1 / math.max(0.1, entry.cooldown))
@@ -1199,7 +1211,7 @@ function GetBuffRotationGroups()
         group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / safeDuration))
         group.sustainable = totalRate >= (1 / safeDuration)
     end
-    return groups, passiveElfyCount
+    return groups, elfyCount
 end
 
 function SetBuffRotationStatus(message, color)
@@ -3472,7 +3484,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Commander / Windsong: Active rotation checks the game's per-unit + global cooldown. Commander, Windsong and Elfy (Sylph) are auto-placed in one nearby buff cluster. Elfy (Sylph) has no active_attack in game.lua; the game marks its buff range on placement.", 6, 42)
+CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph): Auto Buff Rotation reads each placed unit's live active_attack and the game's per-unit + global cooldown. Elfy's Verdant Enchantment is resolved from its live _stats because it is omitted from the static Units record. All buff units are auto-placed in one nearby cluster.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -5118,12 +5130,10 @@ task.spawn(function()
     end
 end)
 
--- Adaptive Commander / Windsong Active rotation.
--- Use AttacksReplicate.get_current_active_attack_cooldown so the game's own
--- per-unit cooldown AND shared GLOBAL_ATTACK_COOLDOWNS are checked before
--- requesting an Active. Elfy (Sylph) has no active_attack in game.lua; it is
--- included in clustered buff placement and its buff-range highlighting is
--- automatic when placed.
+-- Adaptive Commander / Windsong / Elfy (Sylph) Active rotation.
+-- Elfy's static Units record omits the Verdant Enchantment active, but its
+-- live UnitUpgrade UI exposes the active through _stats.active_attack. Resolve
+-- and rotate that runtime active just like Commander and Windsong.
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -5147,8 +5157,7 @@ task.spawn(function()
             local statusParts = {}
             local hasActionableUnits = false
 
-            for _, attackId in ipairs({ "erwin:buff_units", "wendy:buff_units" }) do
-                local group = liveGroups[attackId]
+            for attackId, group in pairs(liveGroups) do
                 if group and #group.units > 0 then
                     hasActionableUnits = true
                     local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
@@ -5242,12 +5251,12 @@ task.spawn(function()
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
             if not hasActionableUnits then
                 if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) has no Active skill in game.lua; the game marks its buff range on placement. Auto Place keeps buff units clustered.", Color3.fromRGB(255, 190, 100))
+                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) detected, but its live Verdant Enchantment active is not exposed yet. Select the unit once, then retry.", Color3.fromRGB(255, 190, 100))
                 else
-                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong buff units detected.", Color3.fromRGB(160, 160, 180))
+                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong / Elfy active buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
             else
-                local suffix = passiveElfyCount > 0 and " | Elfy (Sylph): no Active skill; range marker on placement" or ""
+                local suffix = passiveElfyCount > 0 and " | Elfy detected" or ""
                 SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
             end
         end)
