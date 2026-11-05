@@ -4291,14 +4291,9 @@ task.spawn(function()
             if State.AutoPlace then
                 local equipped = EnrichEquipped(GetEquippedUnitList())
                 if #equipped > 0 then
-                    -- Auto Upgrade Farm First: other units may only be placed with money
-                    -- left over after the next farm upgrade is covered.
-                    local farmReserve = 0
-                    local currentCash = nil
-                    if State.AutoUpgrade and State.AutoUpgradeFarmFirst then
-                        farmReserve = GetNextFarmUpgradeCost(myUnits) or 0
-                        if farmReserve > 0 then currentCash = GetInGameCash() end
-                    end
+                    -- Farm First controls upgrade priority only. It must not reserve
+                    -- cash or block placement of other equipped units while Farm upgrades
+                    -- are still pending.
 
                     -- Only consider units we can currently afford, so an expensive unit
                     -- never blocks cheaper ones from being placed.
@@ -4319,15 +4314,7 @@ task.spawn(function()
                     local missingFirst = {}
                     for _, unitInfo in ipairs(equipped) do
                         local uuidKey = tostring(unitInfo.uuid or "")
-                        local farmUpgradeAllowsPlacement = true
-                        if farmUpgradeAllowsPlacement and farmReserve > 0 and not IsFarmInfo(unitInfo) then
-                            local unitCost = tonumber(unitInfo.cost) or 0
-                            if currentCash ~= nil and currentCash - unitCost < farmReserve then
-                                farmUpgradeAllowsPlacement = false
-                            end
-                        end
                         if uuidKey ~= "" and not pendingSpawnRequests[uuidKey]
-                            and farmUpgradeAllowsPlacement
                             and (cashNow == nil or (tonumber(unitInfo.cost) or 0) <= cashNow)
                             and CanPlaceConfigured(unitInfo, wave) then
                             table.insert(eligible, unitInfo)
