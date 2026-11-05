@@ -61,16 +61,6 @@ HubScale.Name = "HubScale"
 HubScale.Scale = 1
 HubScale.Parent = MainFrame
 
--- Keep the mobile launcher in its own topmost ScreenGui so game UI layers
--- cannot cover the toggle button while the hub window is hidden.
-FloatingScreenGui = Instance.new("ScreenGui")
-FloatingScreenGui.Name = "OctoputHub_FloatingLauncher"
-FloatingScreenGui.ResetOnSpawn = false
-FloatingScreenGui.IgnoreGuiInset = true
-FloatingScreenGui.DisplayOrder = 1000000
-FloatingScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
-FloatingScreenGui.Parent = playerGui
-
 -- Mobile-friendly floating launcher. The image is cached locally through the executor
 -- because Roblox ImageLabel cannot display an arbitrary https URL directly.
 FLOATING_LOGO_URL = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png"
@@ -89,7 +79,7 @@ FloatingButton.Visible = true
 FloatingButton.ZIndex = 200
 FloatingButton.Image = ""
 FloatingButton.ScaleType = Enum.ScaleType.Fit
-FloatingButton.Parent = FloatingScreenGui
+FloatingButton.Parent = ScreenGui
 
 FloatingCorner = Instance.new("UICorner")
 FloatingCorner.CornerRadius = UDim.new(0, 16)
@@ -442,7 +432,6 @@ AllowSave = false
 
 State = {
     AutoPlace = false,
-    ShowPlacementHighlights = false, -- temporary placement-debug overlay; intentionally not saved
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
     AutoBuffRotation = false,
@@ -1028,12 +1017,10 @@ BUFF_ROTATION_ATTACKS = {
     ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical" },
     ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic" },
 }
-BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false, requestBusyAt = 0, recoveryCount = 0 }
+BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false }
 BUFF_ROTATION_CURSE_CACHE = {}
 BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
 BUFF_ROTATION_PENDING_TIMEOUT = 4.5
-BUFF_ROTATION_REQUEST_LOCK_TIMEOUT = 8.0
-BUFF_ROTATION_RECOVERY_BACKOFF = 1.25
 BUFF_ROTATION_SAFETY_MARGIN = 0.75
 
 function GetOwnedUnitRecordForPlacedUnit(unit)
@@ -1598,15 +1585,11 @@ function PlacementIsClear(pos, kind)
     end
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     local deadFolder = workspace:FindFirstChild("_DEAD_UNITS")
-    local debugFolder = workspace:FindFirstChild("__OctoputPlacementDebug", true)
     if unitsFolder then
         table.insert(ignore, unitsFolder)
     end
     if deadFolder then
         table.insert(ignore, deadFolder)
-    end
-    if debugFolder then
-        table.insert(ignore, debugFolder)
     end
     rayParams.FilterDescendantsInstances = ignore
 
@@ -1759,13 +1742,9 @@ function IsBuffUnitInfo(info)
     return type(data) == "table" and data._show_as_buff_unit == true
 end
 
-function GetBuffTypePlacementCFrame(info, placedUnits, fallbackIndex)
+function GetBuffTypePlacementCFrame(info, placedUnits)
     if not IsBuffUnitInfo(info) then return nil, nil end
 
-    -- Buff units are exempt from the Auto Play > Hybrid Units surface filters.
-    -- They may use either Ground or Hill so the same-type rotation cluster can
-    -- be formed even when Place on Ground / Place on Hill is disabled.
-    local kind = "hybrid"
     local targetId = NormalizeName(info.unitId)
     local anchor = nil
     local sameTypeCount = 0
@@ -1779,12 +1758,11 @@ function GetBuffTypePlacementCFrame(info, placedUnits, fallbackIndex)
         end
     end
 
-    -- First copy: use the normal placement search, but allow both surfaces.
-    if not anchor then
-        return GetPlacementCFrame(fallbackIndex or 1, kind)
-    end
+    -- The first copy keeps the existing placement behavior; later copies
+    -- search concentric rings around that type's first placed copy.
+    if not anchor then return nil, nil end
 
-    -- Later copies search concentric rings around that type's first placed copy.
+    local kind = ResolvePlacementKind(info.unitId)
     local anchorCF = anchor:GetPivot()
     local center = anchorCF.Position
     local spacing = 4.2
@@ -1806,203 +1784,6 @@ function GetBuffTypePlacementCFrame(info, placedUnits, fallbackIndex)
     end
     return nil, kind
 end
-
--- Temporary Auto Place diagnostic: collect every nearby candidate accepted by
--- the same surface / road / spacing checks used by the placement worker.
--- This is a visual aid for the Hub's placement search, not the game's full
--- placement preview hitbox (which is generated from each unit's actual model).
-function GetPlacementDebugCandidates(info, placedUnits, fallbackIndex)
-    local results = {}
-    if not info then return results end
-
-    local function AddPathCandidates(kind)
-        local lane = GetPath1Lane()
-        local points = lane and GetPathPoints(lane) or {}
-        if #points >= 2 then
-            local preferred = math.clamp(tonumber(State.PlacePercent) or 0, 0, 100) / 100
-            local center, look = GetPointOnPolyline(points, preferred)
-            local right = look:Cross(Vector3.new(0, 1, 0))
-            if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
-            local forward = Vector3.new(look.X, 0, look.Z)
-            if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
-
-            local spacing = 3.8
-            local maxRing = 5 -- same as normal ground/hybrid placement; bounded for debug performance
-            local offsets = { Vector2.new(0, 0) }
-            for ring = 1, maxRing do
-                local ringOffsets = {}
-                for q = -ring, ring do
-                    for r = -ring, ring do
-                        local hex = -q - r
-                        if math.max(math.abs(q), math.abs(r), math.abs(hex)) == ring then
-                            table.insert(ringOffsets, Vector2.new(spacing * (q + r * 0.5), spacing * (r * 0.8660254038)))
-                        end
-                    end
-                end
-                table.sort(ringOffsets, function(a, b)
-                    return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
-                end)
-                for _, offset in ipairs(ringOffsets) do table.insert(offsets, offset) end
-            end
-            for _, offset in ipairs(offsets) do
-                local candidate = center + right * offset.X + forward * offset.Y
-                local finalPos = PlacementIsClear(candidate, kind)
-                if finalPos then table.insert(results, finalPos) end
-            end
-        else
-            local char = player.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if hrp then
-                local index = math.max(1, math.floor(tonumber(fallbackIndex) or 1))
-                local angle = (index * 45) * (math.pi / 180)
-                local distance = 6 + math.floor(index / 8) * 5
-                for ring = 0, 5 do
-                    local radius = distance + ring * 4
-                    for direction = 0, 7 do
-                        local a = angle + direction * (math.pi / 4)
-                        local candidate = hrp.Position + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
-                        local finalPos = PlacementIsClear(candidate, kind)
-                        if finalPos then table.insert(results, finalPos) end
-                    end
-                end
-            end
-        end
-    end
-
-    if IsBuffUnitInfo(info) then
-        local targetId = NormalizeName(info.unitId)
-        local anchor = nil
-        for _, unit in ipairs(placedUnits or {}) do
-            local rawId = GetRawUnitId(unit)
-            local data = LookupUnitData(rawId)
-            if NormalizeName(rawId) == targetId and type(data) == "table" and data._show_as_buff_unit == true then
-                anchor = unit
-                break
-            end
-        end
-        if anchor then
-            local center = anchor:GetPivot().Position
-            for ring = 1, 4 do
-                local radius = 4.2 * ring
-                for step = 0, 7 do
-                    local angle = (step * math.pi / 4) + (ring % 2) * (math.pi / 8)
-                    local candidate = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-                    local finalPos = PlacementIsClear(candidate, "hybrid")
-                    if finalPos then table.insert(results, finalPos) end
-                end
-            end
-        else
-            AddPathCandidates("hybrid")
-        end
-        return results
-    end
-
-    local primary = ResolvePlacementKind(info.unitId)
-    AddPathCandidates(primary)
-    if IsFarmInfo(info) then
-        for _, extraKind in ipairs({ "ground", "hill", "hybrid" }) do
-            if extraKind ~= primary then AddPathCandidates(extraKind) end
-        end
-    end
-    return results
-end
-
-PLACEMENT_DEBUG_FOLDER = nil
-PLACEMENT_DEBUG_MAX_MARKERS = 240
-
-function ClearPlacementDebugMarkers()
-    if PLACEMENT_DEBUG_FOLDER then
-        pcall(function() PLACEMENT_DEBUG_FOLDER:ClearAllChildren() end)
-    end
-end
-
-function GetPlacementDebugColor(info)
-    local name = string.lower(tostring(info and (info.displayName or info.name) or info and info.unitId or ""))
-    if name:find("commander", 1, true) or name:find("erwin", 1, true) then
-        return Color3.fromRGB(70, 190, 255)
-    elseif name:find("windsong", 1, true) or name:find("wendy", 1, true) then
-        return Color3.fromRGB(190, 115, 255)
-    elseif name:find("elfy", 1, true) or name:find("sylph", 1, true) then
-        return Color3.fromRGB(90, 235, 150)
-    end
-    return Color3.fromRGB(255, 205, 85)
-end
-
-function RefreshPlacementDebugMarkers()
-    if not State.ShowPlacementHighlights then return end
-    if IsInLobby() then
-        ClearPlacementDebugMarkers()
-        if PlacementDebugStatus then PlacementDebugStatus.Text = "Enter a match to scan placement spots." end
-        return
-    end
-
-    if not PLACEMENT_DEBUG_FOLDER or not PLACEMENT_DEBUG_FOLDER.Parent then
-        PLACEMENT_DEBUG_FOLDER = Instance.new("Folder")
-        PLACEMENT_DEBUG_FOLDER.Name = "__OctoputPlacementDebug"
-        PLACEMENT_DEBUG_FOLDER.Parent = workspace:FindFirstChild("ignore") or workspace
-    end
-    ClearPlacementDebugMarkers()
-
-    local equipped = EnrichEquipped(GetEquippedUnitList())
-    local placed = GetPlayerUnits()
-    local wave = GetCurrentWave()
-    local seen = {}
-    local count = 0
-
-    for index, info in ipairs(equipped) do
-        if CanPlaceConfigured(info, wave) then
-            local positions = GetPlacementDebugCandidates(info, placed, #placed + index)
-            local color = GetPlacementDebugColor(info)
-            for _, pos in ipairs(positions) do
-                local positionKey = tostring(math.floor(pos.X * 2 + 0.5)) .. ":" .. tostring(math.floor(pos.Y * 2 + 0.5)) .. ":" .. tostring(math.floor(pos.Z * 2 + 0.5))
-                local unitKey = NormalizeName(info.unitId)
-                local key = positionKey .. ":" .. unitKey
-                if not seen[key] and count < PLACEMENT_DEBUG_MAX_MARKERS then
-                    seen[key] = true
-                    local marker = Instance.new("Part")
-                    marker.Name = "ValidPlacementSpot"
-                    marker.Shape = Enum.PartType.Cylinder
-                    marker.Size = Vector3.new(0.14, 0.9, 0.9)
-                    marker.CFrame = CFrame.new(pos + Vector3.new(0, 0.12 + ((index - 1) % 3) * 0.08, 0)) * CFrame.Angles(0, 0, math.rad(90))
-                    marker.Anchored = true
-                    marker.CanCollide = false
-                    marker.CanTouch = false
-                    marker.CanQuery = false
-                    marker.CastShadow = false
-                    marker.Material = Enum.Material.Neon
-                    marker.Color = color
-                    marker.Transparency = 0.12
-                    marker.Parent = PLACEMENT_DEBUG_FOLDER
-                    count = count + 1
-                end
-            end
-        end
-        if count >= PLACEMENT_DEBUG_MAX_MARKERS then break end
-    end
-
-    if PlacementDebugStatus then
-        PlacementDebugStatus.Text = count > 0
-            and ("Showing " .. tostring(count) .. " Hub candidate spots. Commander = blue, Windsong = purple, Elfy = green. Overlapping unit spots are layered.")
-            or "No valid candidate spots found for the currently eligible equipped units."
-    end
-end
-
--- Keep this diagnostic opt-in and throttled; it performs extra raycasts only
--- while the temporary Highlight toggle is enabled.
-task.spawn(function()
-    while true do
-        task.wait(1.5)
-        if State.ShowPlacementHighlights then
-            local ok, err = pcall(RefreshPlacementDebugMarkers)
-            if not ok then
-                warn("[OctoputHub] Placement debug error: " .. tostring(err))
-                if PlacementDebugStatus then PlacementDebugStatus.Text = "Debug scan error; see executor console." end
-            end
-        elseif PLACEMENT_DEBUG_FOLDER and #PLACEMENT_DEBUG_FOLDER:GetChildren() > 0 then
-            ClearPlacementDebugMarkers()
-        end
-    end
-end)
 
 function CountCategory(myUnits, pred)
     local n = 0
@@ -3542,16 +3323,6 @@ CreateToggle(MainPage, "Auto Start", "AutoStart", 1)
 CreateToggle(MainPage, "Auto Replay", "MainAutoReplay", 2)
 CreateToggle(MainPage, "Auto Next", "AutoNext", 3)
 CreateToggle(MainPage, "Auto Leave", "AutoLeave", 4)
-CreateSection(MainPage, "Return to Lobby", 5)
-CreateHint(MainPage, "Leave the current match and teleport back to the lobby.", 6, 28)
-ReturnToLobbyButton = CreateButton(MainPage, "Return to Lobby", 7, function()
-    local ok, err = pcall(function()
-        InvokeEndpoint("teleport_back_to_lobby")
-    end)
-    if not ok then
-        warn("[OctoputHub] Return to Lobby failed: " .. tostring(err))
-    end
-end)
 
 AutoPlayStatusCard = Instance.new("Frame")
 AutoPlayStatusCard.Size = UDim2.new(1, -10, 0, 38)
@@ -3586,85 +3357,17 @@ function UpdateAutoPlayStatus(text, color)
 end
 
 CreateToggle(AutoPlayPage, "Auto Place Units", "AutoPlace", 1)
-
--- Temporary diagnostic sub-frame placed directly under Auto Place.
-PlacementDebugPanel = Instance.new("Frame")
-PlacementDebugPanel.Name = "PlacementDebugPanel"
-PlacementDebugPanel.Size = UDim2.new(1, -10, 0, 82)
-PlacementDebugPanel.BackgroundColor3 = Color3.fromRGB(17, 23, 32)
-PlacementDebugPanel.BorderSizePixel = 0
-PlacementDebugPanel.LayoutOrder = 2
-PlacementDebugPanel.ZIndex = 12
-PlacementDebugPanel.Parent = AutoPlayPage
-local PlacementDebugCorner = Instance.new("UICorner")
-PlacementDebugCorner.CornerRadius = UDim.new(0, 7)
-PlacementDebugCorner.Parent = PlacementDebugPanel
-local PlacementDebugStroke = Instance.new("UIStroke")
-PlacementDebugStroke.Color = Color3.fromRGB(55, 105, 145)
-PlacementDebugStroke.Transparency = 0.25
-PlacementDebugStroke.Thickness = 1
-PlacementDebugStroke.Parent = PlacementDebugPanel
-local PlacementDebugTitle = Instance.new("TextLabel")
-PlacementDebugTitle.Size = UDim2.new(1, -20, 0, 22)
-PlacementDebugTitle.Position = UDim2.new(0, 10, 0, 5)
-PlacementDebugTitle.BackgroundTransparency = 1
-PlacementDebugTitle.Text = "PLACEMENT DEBUG  •  TEMPORARY"
-PlacementDebugTitle.TextColor3 = Color3.fromRGB(100, 195, 255)
-PlacementDebugTitle.TextSize = 11
-PlacementDebugTitle.Font = Enum.Font.GothamBold
-PlacementDebugTitle.TextXAlignment = Enum.TextXAlignment.Left
-PlacementDebugTitle.ZIndex = 13
-PlacementDebugTitle.Parent = PlacementDebugPanel
-local PlacementDebugToggle = Instance.new("TextButton")
-PlacementDebugToggle.Size = UDim2.new(0, 54, 0, 25)
-PlacementDebugToggle.Position = UDim2.new(1, -64, 0, 31)
-PlacementDebugToggle.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
-PlacementDebugToggle.Text = "OFF"
-PlacementDebugToggle.TextColor3 = Color3.fromRGB(230, 230, 240)
-PlacementDebugToggle.TextSize = 11
-PlacementDebugToggle.Font = Enum.Font.GothamBold
-PlacementDebugToggle.ZIndex = 14
-PlacementDebugToggle.Parent = PlacementDebugPanel
-local PlacementDebugToggleCorner = Instance.new("UICorner")
-PlacementDebugToggleCorner.CornerRadius = UDim.new(0, 5)
-PlacementDebugToggleCorner.Parent = PlacementDebugToggle
-PlacementDebugStatus = Instance.new("TextLabel")
-PlacementDebugStatus.Size = UDim2.new(1, -82, 0, 42)
-PlacementDebugStatus.Position = UDim2.new(0, 10, 0, 29)
-PlacementDebugStatus.BackgroundTransparency = 1
-PlacementDebugStatus.Text = "Highlight valid placement spots around the selected path position."
-PlacementDebugStatus.TextColor3 = Color3.fromRGB(165, 175, 190)
-PlacementDebugStatus.TextSize = 10
-PlacementDebugStatus.Font = Enum.Font.Gotham
-PlacementDebugStatus.TextWrapped = true
-PlacementDebugStatus.TextXAlignment = Enum.TextXAlignment.Left
-PlacementDebugStatus.TextYAlignment = Enum.TextYAlignment.Center
-PlacementDebugStatus.ZIndex = 13
-PlacementDebugStatus.Parent = PlacementDebugPanel
-PlacementDebugToggle.MouseButton1Click:Connect(function()
-    State.ShowPlacementHighlights = not State.ShowPlacementHighlights
-    local enabled = State.ShowPlacementHighlights
-    PlacementDebugToggle.Text = enabled and "ON" or "OFF"
-    PlacementDebugToggle.BackgroundColor3 = enabled and Color3.fromRGB(0, 145, 105) or Color3.fromRGB(45, 45, 58)
-    if not enabled and ClearPlacementDebugMarkers then
-        ClearPlacementDebugMarkers()
-        PlacementDebugStatus.Text = "Highlight disabled."
-    else
-        PlacementDebugStatus.Text = "Scanning valid placement spots..."
-    end
-end)
-
-CreateSingleSlider(AutoPlayPage, "Cluster Position (Path)", "0% path start    100% path end", 3, 0, 100, function()
+CreateSingleSlider(AutoPlayPage, "Cluster Position (Path)", "0% path start    100% path end", 2, 0, 100, function()
     return State.PlacePercent
 end, function(value)
     State.PlacePercent = value
 end)
-CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 4)
-CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 5)
-CreateSection(AutoPlayPage, "Buff Rotation", 6)
-CreateHint(AutoPlayPage, "Checks every placed Commander / Windsong independently and casts each one as soon as its live Active Cooldown is ready. Estimates whether the current unit count can sustain the 30s buff.", 7, 42)
-BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 8, 36)
-CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 9, function(enabled)
+CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
+CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
+CreateSection(AutoPlayPage, "Buff Rotation", 5)
+CreateHint(AutoPlayPage, "Checks every placed Commander / Windsong independently and casts each one as soon as its live Active Cooldown is ready. Estimates whether the current unit count can sustain the 30s buff.", 6, 42)
+BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
+CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
         BUFF_ROTATION_RUNTIME.groups = {}
         SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
@@ -3672,21 +3375,21 @@ CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 9, function
         SetBuffRotationStatus("Auto Buff: Detecting placed buff units...", Color3.fromRGB(100, 190, 255))
     end
 end)
-CreateSection(AutoPlayPage, "Hybrid Units", 23)
-CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 24, 28)
-CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 25)
-CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 26)
-HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 27, 32)
+CreateSection(AutoPlayPage, "Hybrid Units", 22)
+CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
+CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
+CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 25)
+HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 26, 32)
 
-CreateSection(AutoPlayPage, "Unit Configuration", 28)
-CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 29, 28)
+CreateSection(AutoPlayPage, "Unit Configuration", 27)
+CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 28, 28)
 
 UnitConfigHolder = Instance.new("Frame")
 UnitConfigHolder.Name = "UnitConfigHolder"
 UnitConfigHolder.Size = UDim2.new(1, -10, 0, 0)
 UnitConfigHolder.AutomaticSize = Enum.AutomaticSize.Y
 UnitConfigHolder.BackgroundTransparency = 1
-UnitConfigHolder.LayoutOrder = 30
+UnitConfigHolder.LayoutOrder = 29
 UnitConfigHolder.ZIndex = 12
 UnitConfigHolder.Parent = AutoPlayPage
 UnitConfigList = Instance.new("UIListLayout")
@@ -5322,29 +5025,16 @@ task.spawn(function()
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
                 BUFF_ROTATION_RUNTIME.groups = {}
                 BUFF_ROTATION_RUNTIME.requestBusy = false
-                BUFF_ROTATION_RUNTIME.requestBusyAt = 0
                 return
             end
             if IsInLobby() or not workspace:FindFirstChild("_UNITS") then
                 SetBuffRotationStatus("Auto Buff: Waiting for match...", Color3.fromRGB(160, 160, 180))
                 BUFF_ROTATION_RUNTIME.groups = {}
                 BUFF_ROTATION_RUNTIME.requestBusy = false
-                BUFF_ROTATION_RUNTIME.requestBusyAt = 0
                 return
             end
 
             local now = tick()
-            -- Watchdog: the game's active endpoint can yield. If one request
-            -- never returns, release the global client-side lock so other buff
-            -- units can continue to be evaluated and recovered.
-            if BUFF_ROTATION_RUNTIME.requestBusy
-                and BUFF_ROTATION_RUNTIME.requestBusyAt > 0
-                and now - BUFF_ROTATION_RUNTIME.requestBusyAt > BUFF_ROTATION_REQUEST_LOCK_TIMEOUT then
-                BUFF_ROTATION_RUNTIME.requestBusy = false
-                BUFF_ROTATION_RUNTIME.requestBusyAt = 0
-                BUFF_ROTATION_RUNTIME.recoveryCount = BUFF_ROTATION_RUNTIME.recoveryCount + 1
-                warn("[OctoputHub] Buff loop recovery: released stale active-request lock")
-            end
             local liveGroups, passiveElfyCount = GetBuffRotationGroups()
             local nextRuntimeGroups = {}
             local statusParts = {}
@@ -5358,7 +5048,7 @@ task.spawn(function()
                 if group and #group.units > 0 then
                     hasActionableUnits = true
                     local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
-                        or { seenCast = {}, pending = {}, lastRequest = {}, retryAfter = {}, recovery = 0 }
+                        or { seenCast = {}, pending = {}, lastRequest = {} }
                     local liveSet = {}
                     local ready = {}
 
@@ -5379,15 +5069,10 @@ task.spawn(function()
                                 runtime.pending[unit] = nil
                                 pending = nil
                             elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
-                                -- Placement timing/cooldown replication can lag the
-                                -- local rotation estimate. Drop only this unit's
-                                -- pending state, then briefly back off and rescan its
-                                -- live cooldown/last-cast values before retrying.
+                                -- The request did not produce a cast. Clear it and
+                                -- retry on the next eligible scan, not after a full
+                                -- rotation interval.
                                 runtime.pending[unit] = nil
-                                runtime.retryAfter[unit] = now + BUFF_ROTATION_RECOVERY_BACKOFF
-                                runtime.recovery = (runtime.recovery or 0) + 1
-                                BUFF_ROTATION_RUNTIME.recoveryCount = BUFF_ROTATION_RUNTIME.recoveryCount + 1
-                                warn("[OctoputHub] Buff loop recovery: resync " .. tostring(entry.uuid))
                                 pending = nil
                             end
                         end
@@ -5397,9 +5082,7 @@ task.spawn(function()
                         local busy = busyValue and busyValue.Value == true
                         local remaining = entry.cooldown - (now - entry.lastCast)
                         local lastRequest = runtime.lastRequest[unit] or -math.huge
-                        local retryAfter = runtime.retryAfter[unit] or 0
                         if not pending and not busy and remaining <= 0
-                            and now >= retryAfter
                             and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                             table.insert(ready, entry)
                         end
@@ -5410,7 +5093,6 @@ task.spawn(function()
                             runtime.seenCast[unit] = nil
                             runtime.pending[unit] = nil
                             runtime.lastRequest[unit] = nil
-                            runtime.retryAfter[unit] = nil
                         end
                     end
 
@@ -5434,7 +5116,6 @@ task.spawn(function()
                     if #ready > 0 and not BUFF_ROTATION_RUNTIME.requestBusy then
                         local chosen = ready[1]
                         BUFF_ROTATION_RUNTIME.requestBusy = true
-                        BUFF_ROTATION_RUNTIME.requestBusyAt = now
                         runtime.lastRequest[chosen.model] = now
                         runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
                         task.spawn(function()
@@ -5469,7 +5150,6 @@ task.spawn(function()
                                 runtime.pending[chosen.model] = nil
                             end
                             BUFF_ROTATION_RUNTIME.requestBusy = false
-                            BUFF_ROTATION_RUNTIME.requestBusyAt = 0
                         end)
                     end
 
@@ -5486,9 +5166,7 @@ task.spawn(function()
                 end
             else
                 local suffix = passiveElfyCount > 0 and " | Elfy waiting for live active_attack" or ""
-                local recoverySuffix = BUFF_ROTATION_RUNTIME.recoveryCount > 0
-                    and (" | Auto Recovery: " .. tostring(BUFF_ROTATION_RUNTIME.recoveryCount)) or ""
-                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix .. recoverySuffix, Color3.fromRGB(100, 220, 160))
+                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
             end
         end)
         if not rotationOk then
@@ -5602,12 +5280,21 @@ task.spawn(function()
                         end
                         for _, chosen in ipairs(eligible) do
                             local placeIndex = #myUnits + math.random(1, 12)
-                            local cframe, kind = GetBuffTypePlacementCFrame(chosen, myUnits, placeIndex)
-                            if not cframe and not IsBuffUnitInfo(chosen) then
-                                -- Non-buff units retain their original placement fallback.
-                                -- Buff units never fall back to the Hybrid Units surface
-                                -- filters; if their cluster has no valid slot, retry later.
-                                cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
+                            local cframe, kind = GetBuffTypePlacementCFrame(chosen, myUnits)
+                            if not cframe then
+                                -- First copy of a buff type, or no valid nearby
+                                -- cluster slot: retain the existing placement method
+                                -- for the first copy only. Existing groups do not
+                                -- scatter elsewhere when their local area is full.
+                                if not IsBuffUnitInfo(chosen) or not (function()
+                                    local wanted = NormalizeName(chosen.unitId)
+                                    for _, unit in ipairs(myUnits) do
+                                        if NormalizeName(GetRawUnitId(unit)) == wanted then return true end
+                                    end
+                                    return false
+                                end)() then
+                                    cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
+                                end
                             end
                             if cframe then
                                 local countBefore = CountPlacedInfo(chosen)
