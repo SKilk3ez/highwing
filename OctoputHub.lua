@@ -2855,56 +2855,84 @@ local function RefreshUnitConfigUI()
     end
 end
 
--- Portal page: inventory selection and tier priority are kept separate from Auto Play.
-CreateSection(PortalPage, "Select Portal", 1)
-CreateHint(PortalPage, "เลือกประเภทประตูที่ต้องการเปิดจากประตูที่มีอยู่ใน Inventory", 2, 28)
+-- Portal page: inventory-based portal types + game-defined tier selection.
+local PortalSelectionContainer = Instance.new("Frame")
+PortalSelectionContainer.Name = "PortalSelectionContainer"
+PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 174)
+PortalSelectionContainer.BackgroundTransparency = 1
+PortalSelectionContainer.LayoutOrder = 1
+PortalSelectionContainer.ZIndex = 12
+PortalSelectionContainer.Parent = PortalPage
 
-local PortalInventoryList = Instance.new("ScrollingFrame")
-PortalInventoryList.Name = "PortalInventoryList"
-PortalInventoryList.Size = UDim2.new(1, -10, 0, 116)
-PortalInventoryList.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-PortalInventoryList.BorderSizePixel = 0
-PortalInventoryList.ScrollBarThickness = 4
-PortalInventoryList.CanvasSize = UDim2.new(0, 0, 0, 0)
-PortalInventoryList.LayoutOrder = 3
-PortalInventoryList.ZIndex = 12
-PortalInventoryList.Parent = PortalPage
-local PortalInventoryCorner = Instance.new("UICorner")
-PortalInventoryCorner.CornerRadius = UDim.new(0, 6)
-PortalInventoryCorner.Parent = PortalInventoryList
-local PortalInventoryLayout = Instance.new("UIListLayout")
-PortalInventoryLayout.Padding = UDim.new(0, 3)
-PortalInventoryLayout.SortOrder = Enum.SortOrder.LayoutOrder
-PortalInventoryLayout.Parent = PortalInventoryList
-PortalInventoryLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    PortalInventoryList.CanvasSize = UDim2.new(0, 0, 0, PortalInventoryLayout.AbsoluteContentSize.Y + 6)
-end)
+local PortalColumnsLayout = Instance.new("UIListLayout")
+PortalColumnsLayout.FillDirection = Enum.FillDirection.Horizontal
+PortalColumnsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+PortalColumnsLayout.VerticalAlignment = Enum.VerticalAlignment.Top
+PortalColumnsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PortalColumnsLayout.Padding = UDim.new(0, 8)
+PortalColumnsLayout.Parent = PortalSelectionContainer
 
-CreateSection(PortalPage, "Select Tier", 4)
-CreateHint(PortalPage, "เลือกได้หลาย Tier ระบบจะเปิด Tier สูงสุดก่อน แล้วจึงไล่ลงมาต่ำสุด", 5, 28)
-local PortalTierList = Instance.new("ScrollingFrame")
-PortalTierList.Name = "PortalTierList"
-PortalTierList.Size = UDim2.new(1, -10, 0, 104)
-PortalTierList.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-PortalTierList.BorderSizePixel = 0
-PortalTierList.ScrollBarThickness = 4
-PortalTierList.CanvasSize = UDim2.new(0, 0, 0, 0)
-PortalTierList.LayoutOrder = 6
-PortalTierList.ZIndex = 12
-PortalTierList.Parent = PortalPage
-local PortalTierCorner = Instance.new("UICorner")
-PortalTierCorner.CornerRadius = UDim.new(0, 6)
-PortalTierCorner.Parent = PortalTierList
-local PortalTierLayout = Instance.new("UIListLayout")
-PortalTierLayout.Padding = UDim.new(0, 3)
-PortalTierLayout.SortOrder = Enum.SortOrder.LayoutOrder
-PortalTierLayout.Parent = PortalTierList
-PortalTierLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    PortalTierList.CanvasSize = UDim2.new(0, 0, 0, PortalTierLayout.AbsoluteContentSize.Y + 6)
-end)
+local function CreatePortalSelectionColumn(name, title, hint, order)
+    local column = Instance.new("Frame")
+    column.Name = name
+    column.Size = UDim2.new(0.5, -4, 1, 0)
+    column.BackgroundTransparency = 1
+    column.LayoutOrder = order
+    column.ZIndex = 12
+    column.Parent = PortalSelectionContainer
 
-local PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 7, 30)
-local PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 8, function() end)
+    local columnLayout = Instance.new("UIListLayout")
+    columnLayout.FillDirection = Enum.FillDirection.Vertical
+    columnLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    columnLayout.Padding = UDim.new(0, 3)
+    columnLayout.Parent = column
+
+    local heading = CreateSection(column, title, 1)
+    heading.Size = UDim2.new(1, -4, 0, 20)
+    local description = CreateHint(column, hint, 2, 28)
+    description.Size = UDim2.new(1, -4, 0, 28)
+
+    local list = Instance.new("ScrollingFrame")
+    list.Name = name .. "List"
+    list.Size = UDim2.new(1, -4, 0, 116)
+    list.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = 3
+    list.CanvasSize = UDim2.new(0, 0, 0, 0)
+    list.LayoutOrder = 3
+    list.ZIndex = 12
+    list.Parent = column
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = list
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 3)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = list
+    layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        list.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 6)
+    end)
+
+    return list
+end
+
+local PortalInventoryList = CreatePortalSelectionColumn(
+    "PortalInventoryColumn",
+    "Select Portal",
+    "เลือกประเภท Portal จาก Inventory",
+    1
+)
+local PortalTierList = CreatePortalSelectionColumn(
+    "PortalTierColumn",
+    "Select Tier",
+    "เลือก Tier จาก T สูงสุดลงมาต่ำสุด",
+    2
+)
+
+local PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 2, 30)
+local PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
 PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
 local function FindLocalInventoryProfile()
@@ -2962,36 +2990,20 @@ local function GetOwnedPortals()
 end
 
 local portalInventoryCache = {}
-local function RefreshPortalUI()
-    for _, child in ipairs(PortalInventoryList:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
-    end
+local function RefreshPortalTierUI()
     for _, child in ipairs(PortalTierList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
 
-    local portals, err = GetOwnedPortals()
-    portalInventoryCache = portals
-    if err then PortalStatus.Text = err; return end
-
-    local availableTiers, tierCounts = {}, {}
-    for _, portal in ipairs(portals) do
-        for _, entry in ipairs(portal.entries) do
-            availableTiers[entry.tier] = true
-            tierCounts[entry.tier] = (tierCounts[entry.tier] or 0) + 1
-        end
-    end
-    local tierList = {}
-    for tier in pairs(availableTiers) do table.insert(tierList, tier) end
-    table.sort(tierList, function(a, b) return a > b end)
-
-    for index, tier in ipairs(tierList) do
+    -- Tier definitions found in robloxgame.lua: Tier 1 through Tier 12.
+    -- Show the full list regardless of what is currently owned in Inventory.
+    for index, tier in ipairs({12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1}) do
         local selected = State.SelectedPortalTiers[tostring(tier)] == true
         local button = Instance.new("TextButton")
-        button.Size = UDim2.new(1, -8, 0, 27)
+        button.Size = UDim2.new(1, -8, 0, 25)
         button.BackgroundColor3 = selected and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(38, 38, 50)
-        button.Text = (selected and "✓  " or "□  ") .. "Tier " .. tostring(tier) .. "   (" .. tostring(tierCounts[tier] or 0) .. " portal(s))"
-        button.TextColor3 = Color3.new(1,1,1)
+        button.Text = (selected and "✓  " or "□  ") .. "T" .. tostring(tier)
+        button.TextColor3 = Color3.new(1, 1, 1)
         button.TextSize = 11
         button.Font = Enum.Font.Gotham
         button.TextXAlignment = Enum.TextXAlignment.Left
@@ -3002,8 +3014,21 @@ local function RefreshPortalUI()
             local key = tostring(tier)
             State.SelectedPortalTiers[key] = not State.SelectedPortalTiers[key] and true or nil
             SaveConfig()
-            RefreshPortalUI()
+            RefreshPortalTierUI()
         end)
+    end
+end
+
+local function RefreshPortalUI()
+    for _, child in ipairs(PortalInventoryList:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+
+    local portals, err = GetOwnedPortals()
+    portalInventoryCache = portals
+    if err then
+        PortalStatus.Text = err
+        return
     end
 
     for index, portal in ipairs(portals) do
@@ -3012,7 +3037,7 @@ local function RefreshPortalUI()
         button.Size = UDim2.new(1, -8, 0, 28)
         button.BackgroundColor3 = selected and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(38, 38, 50)
         button.Text = (selected and "✓  " or "□  ") .. portal.name .. "  x" .. tostring(portal.count)
-        button.TextColor3 = Color3.new(1,1,1)
+        button.TextColor3 = Color3.new(1, 1, 1)
         button.TextSize = 11
         button.Font = Enum.Font.Gotham
         button.TextXAlignment = Enum.TextXAlignment.Left
@@ -3027,8 +3052,9 @@ local function RefreshPortalUI()
     end
     PortalStatus.Text = string.format("Found %d portal type(s). Select portals and tiers, then enable Auto Open Portal.", #portals)
 end
+RefreshPortalTierUI()
 PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
-CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 9)
+CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 4)
 
 local portalOpenBusy = false
 local portalLastRefresh = 0
@@ -3204,7 +3230,7 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
         username = "Octoput Hub",
         embeds = {{
             title = "Webhook Test",
-            description = string.format("**Player:** %s\nTest message from Octoput Hub.", player.Name),
+            description = string.format("**Player:** %s\n\n**📊 PLAYER STATS**\n%s\n\nTest message from Octoput Hub.", player.Name, BuildPlayerStatsText(ReadPlayerCurrencies())),
             color = 5814783,
             timestamp = DateTime.now():ToIsoDate(),
         }},
