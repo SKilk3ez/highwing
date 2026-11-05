@@ -1489,6 +1489,9 @@ local function ReadPlayerCurrencies()
                 elseif name:sub(1, 9) == "_resource" then
                     local resourceName = name:sub(10):gsub("^_+", "")
                     values[resourceName] = child.Value
+                    if resourceName:lower():find("summer", 1, true) and resourceName:lower():find("pearl", 1, true) then
+                        values.SummerPearls = child.Value
+                    end
                 elseif name:lower():find("summerpearls", 1, true) then
                     values.SummerPearls = child.Value
                 end
@@ -1622,6 +1625,7 @@ task.spawn(function()
                 "PLAYER: " .. tostring(player.DisplayName or player.Name),
                 "CASH: " .. (cash ~= nil and FormatCompact(cash) or "N/A"),
                 "GEMS: " .. FormatCompact(currencies.Gems or 0) .. "     GOLD: " .. FormatCompact(currencies.Gold or 0),
+                "SUMMER PEARLS: " .. FormatCompact(currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls or 0),
                 "XP: " .. FormatCompact(currencies.XP or 0) .. "     TROPHIES: " .. FormatCompact(currencies.Trophies or 0),
             }
             MatchStatsLabel.Text = table.concat(statLines, "\n")
@@ -1824,11 +1828,11 @@ local function BuildSecretRewardLines(before, after)
     for _, category in ipairs({"Secret Unit", "Secret Portal", "Secret Item"}) do
         local entries = {}
         for name, count in pairs(totals[category]) do
-            table.insert(entries, string.format("⭐ **%s** ×%d", name, count))
+            table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
         end
         table.sort(entries)
         if #entries > 0 then
-            table.insert(sections, "**💎 " .. string.upper(category) .. "**\n" .. table.concat(entries, "\n"))
+            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n" .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
         end
     end
     if #sections == 0 then
@@ -1843,6 +1847,59 @@ local webhookSecretRewardBaselineAvailable = false
 local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
+end
+
+local function ReadPlayerLevel()
+    local stats = player:FindFirstChild("_stats")
+    if stats then
+        for _, name in ipairs({"player_level", "level"}) do
+            local value = stats:FindFirstChild(name)
+            if value and value:IsA("ValueBase") then
+                local number = tonumber(value.Value)
+                if number then return number end
+            end
+        end
+    end
+    -- The game's LevelService derives level from player_xp; try its client module when available.
+    local ok, level = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local service = Loader.load_client_service(game, "LevelServiceClient")
+        if service and type(service.get_level) == "function" then
+            return service.get_level(player)
+        end
+        return nil
+    end)
+    return ok and tonumber(level) or nil
+end
+
+local function ReadMatchUnitLines()
+    local units = GetPlayerUnits()
+    local lines = {}
+    for _, unit in ipairs(units) do
+        local stats = unit:FindFirstChild("_stats")
+        if stats then
+            local idValue = stats:FindFirstChild("id")
+            local unitId = idValue and tostring(idValue.Value) or unit.Name
+            local def = LookupUnitData(unitId)
+            local displayName = (def and def.name) or unitId
+            local takedownValue = stats:FindFirstChild("takedown_count")
+            local damageValue = stats:FindFirstChild("total_damage")
+            local upgradeValue = stats:FindFirstChild("upgrade")
+            local maxUpgrade = stats:FindFirstChild("max_upgrade")
+            local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
+            local damage = damageValue and tonumber(damageValue.Value) or 0
+            local upgradeText = ""
+            if upgradeValue then
+                upgradeText = " · Upg " .. tostring(upgradeValue.Value)
+                if maxUpgrade then upgradeText = upgradeText .. "/" .. tostring(maxUpgrade.Value) end
+            end
+            table.insert(lines, string.format("• **%s** — Takedowns: **%s** · DMG: **%s**%s",
+                tostring(displayName), FormatNumber(takedowns), FormatCompact(damage), upgradeText))
+        end
+    end
+    table.sort(lines)
+    if #lines == 0 then return "No placed unit stats found" end
+    return table.concat(lines, "\n")
 end
 
 local function SendEndWebhook(currencyBaseline)
@@ -1886,13 +1943,40 @@ local function SendEndWebhook(currencyBaseline)
         result = resultDetails.result .. " | " .. result
     end
 
+    local unitLines = ReadMatchUnitLines()
+    local playerStatsText = BuildPlayerStatsText(currentCurrencies)
+    local playerLevel = ReadPlayerLevel()
+    local xp = currentCurrencies.XP or 0
+    local matchTime = resultDetails.Timer or "Unknown"
+    local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
+    local stageText = tostring(level)
+    local rewardText = BuildRewardText(before, currentCurrencies)
+    local matchResultText = (resultDetails.result and resultDetails.result ~= "" and resultDetails.result .. " — " or "")
+        .. result .. " — " .. tostring(matchTime) .. " — Wave " .. tostring(waveText) .. " — " .. stageText
+
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
-            title = "Stage Ended — " .. tostring(level),
-            description = string.format("**Player:** %s\n**Result:** %s\n\n**💎 SECRET REWARDS**\n%s\n\n**📦 Resource Rewards (from ResultsUI)**\n%s\n\n**💰 Currency (Before → After | Change)**\n%s",
-                player.Name, result, secretRewardText, resourceText, currencyText),
-            color = secretRewardText:find("⭐", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
+            title = "Anime Adventures",
+            description = string.format(
+                "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**🎁 Rewards**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
+                player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
+                playerStatsText, rewardText, unitLines, matchResultText),
+            color = secretRewardText:find("✨", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
+            image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
+            fields = {{
+                name = "🚨 SECRET REWARDS 🚨",
+                value = secretRewardText:sub(1, 1024),
+                inline = false,
+            }, {
+                name = "📦 Resource Rewards",
+                value = resourceText:sub(1, 1024),
+                inline = false,
+            }, {
+                name = "💰 Currency (Before → After | Change)",
+                value = currencyText:sub(1, 1024),
+                inline = false,
+            }},
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
