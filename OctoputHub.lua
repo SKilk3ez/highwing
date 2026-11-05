@@ -442,6 +442,7 @@ AllowSave = false
 
 State = {
     AutoPlace = false,
+    ShowPlacementHighlights = false, -- temporary placement-debug overlay; intentionally not saved
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
     AutoBuffRotation = false,
@@ -1597,11 +1598,15 @@ function PlacementIsClear(pos, kind)
     end
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     local deadFolder = workspace:FindFirstChild("_DEAD_UNITS")
+    local debugFolder = workspace:FindFirstChild("__OctoputPlacementDebug", true)
     if unitsFolder then
         table.insert(ignore, unitsFolder)
     end
     if deadFolder then
         table.insert(ignore, deadFolder)
+    end
+    if debugFolder then
+        table.insert(ignore, debugFolder)
     end
     rayParams.FilterDescendantsInstances = ignore
 
@@ -1801,6 +1806,203 @@ function GetBuffTypePlacementCFrame(info, placedUnits, fallbackIndex)
     end
     return nil, kind
 end
+
+-- Temporary Auto Place diagnostic: collect every nearby candidate accepted by
+-- the same surface / road / spacing checks used by the placement worker.
+-- This is a visual aid for the Hub's placement search, not the game's full
+-- placement preview hitbox (which is generated from each unit's actual model).
+function GetPlacementDebugCandidates(info, placedUnits, fallbackIndex)
+    local results = {}
+    if not info then return results end
+
+    local function AddPathCandidates(kind)
+        local lane = GetPath1Lane()
+        local points = lane and GetPathPoints(lane) or {}
+        if #points >= 2 then
+            local preferred = math.clamp(tonumber(State.PlacePercent) or 0, 0, 100) / 100
+            local center, look = GetPointOnPolyline(points, preferred)
+            local right = look:Cross(Vector3.new(0, 1, 0))
+            if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+            local forward = Vector3.new(look.X, 0, look.Z)
+            if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
+
+            local spacing = 3.8
+            local maxRing = 5 -- same as normal ground/hybrid placement; bounded for debug performance
+            local offsets = { Vector2.new(0, 0) }
+            for ring = 1, maxRing do
+                local ringOffsets = {}
+                for q = -ring, ring do
+                    for r = -ring, ring do
+                        local hex = -q - r
+                        if math.max(math.abs(q), math.abs(r), math.abs(hex)) == ring then
+                            table.insert(ringOffsets, Vector2.new(spacing * (q + r * 0.5), spacing * (r * 0.8660254038)))
+                        end
+                    end
+                end
+                table.sort(ringOffsets, function(a, b)
+                    return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
+                end)
+                for _, offset in ipairs(ringOffsets) do table.insert(offsets, offset) end
+            end
+            for _, offset in ipairs(offsets) do
+                local candidate = center + right * offset.X + forward * offset.Y
+                local finalPos = PlacementIsClear(candidate, kind)
+                if finalPos then table.insert(results, finalPos) end
+            end
+        else
+            local char = player.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local index = math.max(1, math.floor(tonumber(fallbackIndex) or 1))
+                local angle = (index * 45) * (math.pi / 180)
+                local distance = 6 + math.floor(index / 8) * 5
+                for ring = 0, 5 do
+                    local radius = distance + ring * 4
+                    for direction = 0, 7 do
+                        local a = angle + direction * (math.pi / 4)
+                        local candidate = hrp.Position + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
+                        local finalPos = PlacementIsClear(candidate, kind)
+                        if finalPos then table.insert(results, finalPos) end
+                    end
+                end
+            end
+        end
+    end
+
+    if IsBuffUnitInfo(info) then
+        local targetId = NormalizeName(info.unitId)
+        local anchor = nil
+        for _, unit in ipairs(placedUnits or {}) do
+            local rawId = GetRawUnitId(unit)
+            local data = LookupUnitData(rawId)
+            if NormalizeName(rawId) == targetId and type(data) == "table" and data._show_as_buff_unit == true then
+                anchor = unit
+                break
+            end
+        end
+        if anchor then
+            local center = anchor:GetPivot().Position
+            for ring = 1, 4 do
+                local radius = 4.2 * ring
+                for step = 0, 7 do
+                    local angle = (step * math.pi / 4) + (ring % 2) * (math.pi / 8)
+                    local candidate = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+                    local finalPos = PlacementIsClear(candidate, "hybrid")
+                    if finalPos then table.insert(results, finalPos) end
+                end
+            end
+        else
+            AddPathCandidates("hybrid")
+        end
+        return results
+    end
+
+    local primary = ResolvePlacementKind(info.unitId)
+    AddPathCandidates(primary)
+    if IsFarmInfo(info) then
+        for _, extraKind in ipairs({ "ground", "hill", "hybrid" }) do
+            if extraKind ~= primary then AddPathCandidates(extraKind) end
+        end
+    end
+    return results
+end
+
+PLACEMENT_DEBUG_FOLDER = nil
+PLACEMENT_DEBUG_MAX_MARKERS = 240
+
+function ClearPlacementDebugMarkers()
+    if PLACEMENT_DEBUG_FOLDER then
+        pcall(function() PLACEMENT_DEBUG_FOLDER:ClearAllChildren() end)
+    end
+end
+
+function GetPlacementDebugColor(info)
+    local name = string.lower(tostring(info and (info.displayName or info.name) or info and info.unitId or ""))
+    if name:find("commander", 1, true) or name:find("erwin", 1, true) then
+        return Color3.fromRGB(70, 190, 255)
+    elseif name:find("windsong", 1, true) or name:find("wendy", 1, true) then
+        return Color3.fromRGB(190, 115, 255)
+    elseif name:find("elfy", 1, true) or name:find("sylph", 1, true) then
+        return Color3.fromRGB(90, 235, 150)
+    end
+    return Color3.fromRGB(255, 205, 85)
+end
+
+function RefreshPlacementDebugMarkers()
+    if not State.ShowPlacementHighlights then return end
+    if IsInLobby() then
+        ClearPlacementDebugMarkers()
+        if PlacementDebugStatus then PlacementDebugStatus.Text = "Enter a match to scan placement spots." end
+        return
+    end
+
+    if not PLACEMENT_DEBUG_FOLDER or not PLACEMENT_DEBUG_FOLDER.Parent then
+        PLACEMENT_DEBUG_FOLDER = Instance.new("Folder")
+        PLACEMENT_DEBUG_FOLDER.Name = "__OctoputPlacementDebug"
+        PLACEMENT_DEBUG_FOLDER.Parent = workspace:FindFirstChild("ignore") or workspace
+    end
+    ClearPlacementDebugMarkers()
+
+    local equipped = EnrichEquipped(GetEquippedUnitList())
+    local placed = GetPlayerUnits()
+    local wave = GetCurrentWave()
+    local seen = {}
+    local count = 0
+
+    for index, info in ipairs(equipped) do
+        if CanPlaceConfigured(info, wave) then
+            local positions = GetPlacementDebugCandidates(info, placed, #placed + index)
+            local color = GetPlacementDebugColor(info)
+            for _, pos in ipairs(positions) do
+                local positionKey = tostring(math.floor(pos.X * 2 + 0.5)) .. ":" .. tostring(math.floor(pos.Y * 2 + 0.5)) .. ":" .. tostring(math.floor(pos.Z * 2 + 0.5))
+                local unitKey = NormalizeName(info.unitId)
+                local key = positionKey .. ":" .. unitKey
+                if not seen[key] and count < PLACEMENT_DEBUG_MAX_MARKERS then
+                    seen[key] = true
+                    local marker = Instance.new("Part")
+                    marker.Name = "ValidPlacementSpot"
+                    marker.Shape = Enum.PartType.Cylinder
+                    marker.Size = Vector3.new(0.14, 0.9, 0.9)
+                    marker.CFrame = CFrame.new(pos + Vector3.new(0, 0.12 + ((index - 1) % 3) * 0.08, 0)) * CFrame.Angles(0, 0, math.rad(90))
+                    marker.Anchored = true
+                    marker.CanCollide = false
+                    marker.CanTouch = false
+                    marker.CanQuery = false
+                    marker.CastShadow = false
+                    marker.Material = Enum.Material.Neon
+                    marker.Color = color
+                    marker.Transparency = 0.12
+                    marker.Parent = PLACEMENT_DEBUG_FOLDER
+                    count = count + 1
+                end
+            end
+        end
+        if count >= PLACEMENT_DEBUG_MAX_MARKERS then break end
+    end
+
+    if PlacementDebugStatus then
+        PlacementDebugStatus.Text = count > 0
+            and ("Showing " .. tostring(count) .. " Hub candidate spots. Commander = blue, Windsong = purple, Elfy = green. Overlapping unit spots are layered.")
+            or "No valid candidate spots found for the currently eligible equipped units."
+    end
+end
+
+-- Keep this diagnostic opt-in and throttled; it performs extra raycasts only
+-- while the temporary Highlight toggle is enabled.
+task.spawn(function()
+    while true do
+        task.wait(1.5)
+        if State.ShowPlacementHighlights then
+            local ok, err = pcall(RefreshPlacementDebugMarkers)
+            if not ok then
+                warn("[OctoputHub] Placement debug error: " .. tostring(err))
+                if PlacementDebugStatus then PlacementDebugStatus.Text = "Debug scan error; see executor console." end
+            end
+        elseif PLACEMENT_DEBUG_FOLDER and #PLACEMENT_DEBUG_FOLDER:GetChildren() > 0 then
+            ClearPlacementDebugMarkers()
+        end
+    end
+end)
 
 function CountCategory(myUnits, pred)
     local n = 0
@@ -3384,17 +3586,85 @@ function UpdateAutoPlayStatus(text, color)
 end
 
 CreateToggle(AutoPlayPage, "Auto Place Units", "AutoPlace", 1)
-CreateSingleSlider(AutoPlayPage, "Cluster Position (Path)", "0% path start    100% path end", 2, 0, 100, function()
+
+-- Temporary diagnostic sub-frame placed directly under Auto Place.
+PlacementDebugPanel = Instance.new("Frame")
+PlacementDebugPanel.Name = "PlacementDebugPanel"
+PlacementDebugPanel.Size = UDim2.new(1, -10, 0, 82)
+PlacementDebugPanel.BackgroundColor3 = Color3.fromRGB(17, 23, 32)
+PlacementDebugPanel.BorderSizePixel = 0
+PlacementDebugPanel.LayoutOrder = 2
+PlacementDebugPanel.ZIndex = 12
+PlacementDebugPanel.Parent = AutoPlayPage
+local PlacementDebugCorner = Instance.new("UICorner")
+PlacementDebugCorner.CornerRadius = UDim.new(0, 7)
+PlacementDebugCorner.Parent = PlacementDebugPanel
+local PlacementDebugStroke = Instance.new("UIStroke")
+PlacementDebugStroke.Color = Color3.fromRGB(55, 105, 145)
+PlacementDebugStroke.Transparency = 0.25
+PlacementDebugStroke.Thickness = 1
+PlacementDebugStroke.Parent = PlacementDebugPanel
+local PlacementDebugTitle = Instance.new("TextLabel")
+PlacementDebugTitle.Size = UDim2.new(1, -20, 0, 22)
+PlacementDebugTitle.Position = UDim2.new(0, 10, 0, 5)
+PlacementDebugTitle.BackgroundTransparency = 1
+PlacementDebugTitle.Text = "PLACEMENT DEBUG  •  TEMPORARY"
+PlacementDebugTitle.TextColor3 = Color3.fromRGB(100, 195, 255)
+PlacementDebugTitle.TextSize = 11
+PlacementDebugTitle.Font = Enum.Font.GothamBold
+PlacementDebugTitle.TextXAlignment = Enum.TextXAlignment.Left
+PlacementDebugTitle.ZIndex = 13
+PlacementDebugTitle.Parent = PlacementDebugPanel
+local PlacementDebugToggle = Instance.new("TextButton")
+PlacementDebugToggle.Size = UDim2.new(0, 54, 0, 25)
+PlacementDebugToggle.Position = UDim2.new(1, -64, 0, 31)
+PlacementDebugToggle.BackgroundColor3 = Color3.fromRGB(45, 45, 58)
+PlacementDebugToggle.Text = "OFF"
+PlacementDebugToggle.TextColor3 = Color3.fromRGB(230, 230, 240)
+PlacementDebugToggle.TextSize = 11
+PlacementDebugToggle.Font = Enum.Font.GothamBold
+PlacementDebugToggle.ZIndex = 14
+PlacementDebugToggle.Parent = PlacementDebugPanel
+local PlacementDebugToggleCorner = Instance.new("UICorner")
+PlacementDebugToggleCorner.CornerRadius = UDim.new(0, 5)
+PlacementDebugToggleCorner.Parent = PlacementDebugToggle
+PlacementDebugStatus = Instance.new("TextLabel")
+PlacementDebugStatus.Size = UDim2.new(1, -82, 0, 42)
+PlacementDebugStatus.Position = UDim2.new(0, 10, 0, 29)
+PlacementDebugStatus.BackgroundTransparency = 1
+PlacementDebugStatus.Text = "Highlight valid placement spots around the selected path position."
+PlacementDebugStatus.TextColor3 = Color3.fromRGB(165, 175, 190)
+PlacementDebugStatus.TextSize = 10
+PlacementDebugStatus.Font = Enum.Font.Gotham
+PlacementDebugStatus.TextWrapped = true
+PlacementDebugStatus.TextXAlignment = Enum.TextXAlignment.Left
+PlacementDebugStatus.TextYAlignment = Enum.TextYAlignment.Center
+PlacementDebugStatus.ZIndex = 13
+PlacementDebugStatus.Parent = PlacementDebugPanel
+PlacementDebugToggle.MouseButton1Click:Connect(function()
+    State.ShowPlacementHighlights = not State.ShowPlacementHighlights
+    local enabled = State.ShowPlacementHighlights
+    PlacementDebugToggle.Text = enabled and "ON" or "OFF"
+    PlacementDebugToggle.BackgroundColor3 = enabled and Color3.fromRGB(0, 145, 105) or Color3.fromRGB(45, 45, 58)
+    if not enabled and ClearPlacementDebugMarkers then
+        ClearPlacementDebugMarkers()
+        PlacementDebugStatus.Text = "Highlight disabled."
+    else
+        PlacementDebugStatus.Text = "Scanning valid placement spots..."
+    end
+end)
+
+CreateSingleSlider(AutoPlayPage, "Cluster Position (Path)", "0% path start    100% path end", 3, 0, 100, function()
     return State.PlacePercent
 end, function(value)
     State.PlacePercent = value
 end)
-CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
-CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
-CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Checks every placed Commander / Windsong independently and casts each one as soon as its live Active Cooldown is ready. Estimates whether the current unit count can sustain the 30s buff.", 6, 42)
-BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
-CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
+CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 4)
+CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 5)
+CreateSection(AutoPlayPage, "Buff Rotation", 6)
+CreateHint(AutoPlayPage, "Checks every placed Commander / Windsong independently and casts each one as soon as its live Active Cooldown is ready. Estimates whether the current unit count can sustain the 30s buff.", 7, 42)
+BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 8, 36)
+CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 9, function(enabled)
     if not enabled then
         BUFF_ROTATION_RUNTIME.groups = {}
         SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
@@ -3402,21 +3672,21 @@ CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function
         SetBuffRotationStatus("Auto Buff: Detecting placed buff units...", Color3.fromRGB(100, 190, 255))
     end
 end)
-CreateSection(AutoPlayPage, "Hybrid Units", 22)
-CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
-CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
-CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 25)
-HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 26, 32)
+CreateSection(AutoPlayPage, "Hybrid Units", 23)
+CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 24, 28)
+CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 25)
+CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 26)
+HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 27, 32)
 
-CreateSection(AutoPlayPage, "Unit Configuration", 27)
-CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 28, 28)
+CreateSection(AutoPlayPage, "Unit Configuration", 28)
+CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 29, 28)
 
 UnitConfigHolder = Instance.new("Frame")
 UnitConfigHolder.Name = "UnitConfigHolder"
 UnitConfigHolder.Size = UDim2.new(1, -10, 0, 0)
 UnitConfigHolder.AutomaticSize = Enum.AutomaticSize.Y
 UnitConfigHolder.BackgroundTransparency = 1
-UnitConfigHolder.LayoutOrder = 29
+UnitConfigHolder.LayoutOrder = 30
 UnitConfigHolder.ZIndex = 12
 UnitConfigHolder.Parent = AutoPlayPage
 UnitConfigList = Instance.new("UIListLayout")
