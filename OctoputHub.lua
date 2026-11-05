@@ -74,6 +74,50 @@ FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
 FloatingStroke.Transparency = 0.2
 FloatingStroke.Thickness = 1.5
 FloatingStroke.Parent = FloatingButton
+
+-- Mythic-style aura: layered soft borders with the same animated rainbow treatment
+-- used by the game's Mythic GUI gradient effects. The aura is only shown on hover.
+local FloatingAuraLayers = {}
+local MythicColorSequence = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(75, 235, 255)),
+    ColorSequenceKeypoint.new(0.20, Color3.fromRGB(90, 125, 255)),
+    ColorSequenceKeypoint.new(0.42, Color3.fromRGB(190, 90, 255)),
+    ColorSequenceKeypoint.new(0.62, Color3.fromRGB(255, 95, 190)),
+    ColorSequenceKeypoint.new(0.82, Color3.fromRGB(255, 190, 90)),
+    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(75, 235, 255)),
+})
+for index = 1, 3 do
+    local aura = Instance.new("Frame")
+    aura.Name = "MythicAura" .. index
+    aura.AnchorPoint = Vector2.new(0.5, 0.5)
+    aura.Position = UDim2.fromScale(0.5, 0.5)
+    aura.Size = UDim2.new(1, 8 + index * 7, 1, 8 + index * 7)
+    aura.BackgroundTransparency = 1
+    aura.BorderSizePixel = 0
+    aura.Visible = false
+    aura.ZIndex = FloatingButton.ZIndex - 1
+    aura.Parent = FloatingButton
+    local auraCorner = Instance.new("UICorner")
+    auraCorner.CornerRadius = UDim.new(0, 19 + index * 3)
+    auraCorner.Parent = aura
+    local auraStroke = Instance.new("UIStroke")
+    auraStroke.Name = "AuraStroke"
+    auraStroke.Thickness = index == 1 and 3 or (index == 2 and 5 or 7)
+    auraStroke.Transparency = index == 1 and 0.08 or (index == 2 and 0.32 or 0.58)
+    auraStroke.Parent = aura
+    local auraGradient = Instance.new("UIGradient")
+    auraGradient.Color = MythicColorSequence
+    auraGradient.Rotation = 0
+    auraGradient.Parent = auraStroke
+    table.insert(FloatingAuraLayers, { frame = aura, stroke = auraStroke, gradient = auraGradient })
+end
+local FloatingButtonScale = Instance.new("UIScale")
+FloatingButtonScale.Name = "PressScale"
+FloatingButtonScale.Scale = 1
+FloatingButtonScale.Parent = FloatingButton
+local FloatingStrokeGradient = Instance.new("UIGradient")
+FloatingStrokeGradient.Color = MythicColorSequence
+FloatingStrokeGradient.Parent = FloatingStroke
 local FloatingFallback = Instance.new("TextLabel")
 FloatingFallback.Name = "FallbackText"
 FloatingFallback.Size = UDim2.fromScale(1, 1)
@@ -250,11 +294,73 @@ UserInputService.InputEnded:Connect(function(input)
         floatingDragInput = nil
     end
 end)
+local floatingHover = false
+local floatingStrokeRotationTween
+local function SetFloatingAura(visible)
+    floatingHover = visible
+    for _, layer in ipairs(FloatingAuraLayers) do
+        if visible then layer.frame.Visible = true end
+        TweenService:Create(layer.stroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Transparency = visible and (layer == FloatingAuraLayers[1] and 0.08 or (layer == FloatingAuraLayers[2] and 0.32 or 0.58)) or 1
+        }):Play()
+    end
+    TweenService:Create(FloatingStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Transparency = visible and 0 or 0.2,
+        Thickness = visible and 2.2 or 1.5
+    }):Play()
+    if visible then
+        if floatingStrokeRotationTween then floatingStrokeRotationTween:Cancel() end
+        FloatingStrokeGradient.Rotation = 0
+        floatingStrokeRotationTween = TweenService:Create(FloatingStrokeGradient, TweenInfo.new(3.8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 })
+        floatingStrokeRotationTween:Play()
+        for _, layer in ipairs(FloatingAuraLayers) do
+            if layer.rotationTween then layer.rotationTween:Cancel() end
+            layer.gradient.Rotation = 0
+            local rotationTween = TweenService:Create(layer.gradient, TweenInfo.new(3.2 + (#FloatingAuraLayers * 0.25), Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 })
+            rotationTween:Play()
+            layer.rotationTween = rotationTween
+        end
+    else
+        if floatingStrokeRotationTween then floatingStrokeRotationTween:Cancel(); floatingStrokeRotationTween = nil end
+        for _, layer in ipairs(FloatingAuraLayers) do
+            if layer.rotationTween then layer.rotationTween:Cancel(); layer.rotationTween = nil end
+        end
+        task.delay(0.2, function()
+            if not floatingHover then
+                for _, layer in ipairs(FloatingAuraLayers) do layer.frame.Visible = false end
+            end
+        end)
+    end
+end
+
+FloatingButton.MouseEnter:Connect(function()
+    SetFloatingAura(true)
+end)
+FloatingButton.MouseLeave:Connect(function()
+    SetFloatingAura(false)
+end)
+FloatingButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        TweenService:Create(FloatingButtonScale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.9 }):Play()
+    end
+end)
+FloatingButton.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        TweenService:Create(FloatingButtonScale, TweenInfo.new(0.13, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+    end
+end)
 FloatingButton.Activated:Connect(function()
     if suppressFloatingClick then
         suppressFloatingClick = false
         return
     end
+    -- A short physical press/release animation, then toggle the hub.
+    TweenService:Create(FloatingButtonScale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.9 }):Play()
+    task.delay(0.08, function()
+        if FloatingButton and FloatingButton.Parent then
+            TweenService:Create(FloatingButtonScale, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+        end
+    end)
     MainFrame.Visible = not MainFrame.Visible
 end)
 
@@ -1489,6 +1595,9 @@ local function ReadPlayerCurrencies()
                 elseif name:sub(1, 9) == "_resource" then
                     local resourceName = name:sub(10):gsub("^_+", "")
                     values[resourceName] = child.Value
+                    if resourceName:lower():find("summer", 1, true) and resourceName:lower():find("pearl", 1, true) then
+                        values.SummerPearls = child.Value
+                    end
                 elseif name:lower():find("summerpearls", 1, true) then
                     values.SummerPearls = child.Value
                 end
@@ -1622,6 +1731,7 @@ task.spawn(function()
                 "PLAYER: " .. tostring(player.DisplayName or player.Name),
                 "CASH: " .. (cash ~= nil and FormatCompact(cash) or "N/A"),
                 "GEMS: " .. FormatCompact(currencies.Gems or 0) .. "     GOLD: " .. FormatCompact(currencies.Gold or 0),
+                "SUMMER PEARLS: " .. FormatCompact(currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls or 0),
                 "XP: " .. FormatCompact(currencies.XP or 0) .. "     TROPHIES: " .. FormatCompact(currencies.Trophies or 0),
             }
             MatchStatsLabel.Text = table.concat(statLines, "\n")
@@ -1824,11 +1934,11 @@ local function BuildSecretRewardLines(before, after)
     for _, category in ipairs({"Secret Unit", "Secret Portal", "Secret Item"}) do
         local entries = {}
         for name, count in pairs(totals[category]) do
-            table.insert(entries, string.format("⭐ **%s** ×%d", name, count))
+            table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
         end
         table.sort(entries)
         if #entries > 0 then
-            table.insert(sections, "**💎 " .. string.upper(category) .. "**\n" .. table.concat(entries, "\n"))
+            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n" .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
         end
     end
     if #sections == 0 then
@@ -1843,6 +1953,59 @@ local webhookSecretRewardBaselineAvailable = false
 local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
+end
+
+local function ReadPlayerLevel()
+    local stats = player:FindFirstChild("_stats")
+    if stats then
+        for _, name in ipairs({"player_level", "level"}) do
+            local value = stats:FindFirstChild(name)
+            if value and value:IsA("ValueBase") then
+                local number = tonumber(value.Value)
+                if number then return number end
+            end
+        end
+    end
+    -- The game's LevelService derives level from player_xp; try its client module when available.
+    local ok, level = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local service = Loader.load_client_service(game, "LevelServiceClient")
+        if service and type(service.get_level) == "function" then
+            return service.get_level(player)
+        end
+        return nil
+    end)
+    return ok and tonumber(level) or nil
+end
+
+local function ReadMatchUnitLines()
+    local units = GetPlayerUnits()
+    local lines = {}
+    for _, unit in ipairs(units) do
+        local stats = unit:FindFirstChild("_stats")
+        if stats then
+            local idValue = stats:FindFirstChild("id")
+            local unitId = idValue and tostring(idValue.Value) or unit.Name
+            local def = LookupUnitData(unitId)
+            local displayName = (def and def.name) or unitId
+            local takedownValue = stats:FindFirstChild("takedown_count")
+            local damageValue = stats:FindFirstChild("total_damage")
+            local upgradeValue = stats:FindFirstChild("upgrade")
+            local maxUpgrade = stats:FindFirstChild("max_upgrade")
+            local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
+            local damage = damageValue and tonumber(damageValue.Value) or 0
+            local upgradeText = ""
+            if upgradeValue then
+                upgradeText = " · Upg " .. tostring(upgradeValue.Value)
+                if maxUpgrade then upgradeText = upgradeText .. "/" .. tostring(maxUpgrade.Value) end
+            end
+            table.insert(lines, string.format("• **%s** — Takedowns: **%s** · DMG: **%s**%s",
+                tostring(displayName), FormatNumber(takedowns), FormatCompact(damage), upgradeText))
+        end
+    end
+    table.sort(lines)
+    if #lines == 0 then return "No placed unit stats found" end
+    return table.concat(lines, "\n")
 end
 
 local function SendEndWebhook(currencyBaseline)
@@ -1886,13 +2049,39 @@ local function SendEndWebhook(currencyBaseline)
         result = resultDetails.result .. " | " .. result
     end
 
+    local unitLines = ReadMatchUnitLines()
+    local playerStatsText = BuildPlayerStatsText(currentCurrencies)
+    local playerLevel = ReadPlayerLevel()
+    local xp = currentCurrencies.XP or 0
+    local matchTime = resultDetails.Timer or "Unknown"
+    local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
+    local stageText = tostring(level)
+    local matchResultText = (resultDetails.result and resultDetails.result ~= "" and resultDetails.result .. " — " or "")
+        .. result .. " — " .. tostring(matchTime) .. " — Wave " .. tostring(waveText) .. " — " .. stageText
+
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
-            title = "Stage Ended — " .. tostring(level),
-            description = string.format("**Player:** %s\n**Result:** %s\n\n**💎 SECRET REWARDS**\n%s\n\n**📦 Resource Rewards (from ResultsUI)**\n%s\n\n**💰 Currency (Before → After | Change)**\n%s",
-                player.Name, result, secretRewardText, resourceText, currencyText),
-            color = secretRewardText:find("⭐", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
+            title = "Anime Adventures",
+            description = string.format(
+                "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
+                player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
+                playerStatsText, unitLines, matchResultText),
+            color = secretRewardText:find("✨", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
+            image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
+            fields = {{
+                name = "🚨 SECRET REWARDS 🚨",
+                value = secretRewardText:sub(1, 1024),
+                inline = false,
+            }, {
+                name = "🎁 Rewards",
+                value = resourceText:sub(1, 1024),
+                inline = false,
+            }, {
+                name = "💰 Currency (Before → After | Change)",
+                value = currencyText:sub(1, 1024),
+                inline = false,
+            }},
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
