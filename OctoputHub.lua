@@ -460,6 +460,10 @@ State = {
     AutoOpenPortal = false,
     SelectedPortalTypes = {},
     SelectedPortalTiers = {},
+    SnipeBanner = "",
+    SnipeTargets = {},
+    SnipeGemLimit = 0,
+    SnipeSummonCount = 10,
 }
 
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
@@ -583,6 +587,10 @@ function CopyStateForSave()
         AutoOpenPortal = State.AutoOpenPortal,
         SelectedPortalTypes = State.SelectedPortalTypes,
         SelectedPortalTiers = State.SelectedPortalTiers,
+        SnipeBanner = State.SnipeBanner,
+        SnipeTargets = State.SnipeTargets,
+        SnipeGemLimit = State.SnipeGemLimit,
+        SnipeSummonCount = State.SnipeSummonCount,
     }
 end
 
@@ -658,6 +666,16 @@ function ApplySavedTable(saved)
         end
         State.SelectedPortalTiers = selected
     end
+    if type(saved.SnipeBanner) == "string" then State.SnipeBanner = saved.SnipeBanner end
+    if type(saved.SnipeTargets) == "table" then
+        local targets = {}
+        for id, enabled in pairs(saved.SnipeTargets) do
+            if type(id) == "string" and enabled == true then targets[id] = true end
+        end
+        State.SnipeTargets = targets
+    end
+    if type(saved.SnipeGemLimit) == "number" then State.SnipeGemLimit = math.max(0, math.floor(saved.SnipeGemLimit)) end
+    if saved.SnipeSummonCount == 1 or saved.SnipeSummonCount == 10 then State.SnipeSummonCount = saved.SnipeSummonCount end
     if type(saved.UnitNames) == "table" then
         local names = {}
         for id, name in pairs(saved.UnitNames) do
@@ -3046,6 +3064,7 @@ PortalPage = CreateTab("Portal", 3)
 EventPage = CreateTab("Event", 4)
 WebhookPage = CreateTab("Webhook", 5)
 MiscPage = CreateTab("Misc", 6)
+SummonPage = CreateTab("Snipe Summon", 7)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -4071,6 +4090,416 @@ pcall(function()
         end)
     end)
 end)
+
+-- [[ SNIPE SUMMON ]] --
+-- Watches the selected live banner and stops as soon as a newly obtained target unit is detected.
+SnipeRuntime = { Running = false, StopReason = "Idle", LastAction = "" }
+SnipeBannerOptions = {}
+SnipeUnitOptions = {}
+SnipeBannerList = nil
+SnipeUnitList = nil
+SnipeStatusLabel = nil
+SnipeBannerSelectedLabel = nil
+SnipeTargetCountLabel = nil
+SnipeStartButton = nil
+SnipeRefreshButton = nil
+SnipeModeButton = nil
+
+local function SnipeMakeLabel(parent, text, order, height, color)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, -10, 0, height or 22)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = color or Color3.fromRGB(220, 220, 235)
+    label.TextSize = 12
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextWrapped = true
+    label.LayoutOrder = order
+    label.ZIndex = 13
+    label.Parent = parent
+    return label
+end
+
+local function SnipeGetGameData()
+    local ok, bannersData, unitsData = pcall(function()
+        local loader = require(ReplicatedStorage:WaitForChild("src"):WaitForChild("Loader"))
+        local dataPath = loader.DATA_PATH
+        assert(dataPath, "Game DATA_PATH is not ready")
+        local bannerModule = dataPath:FindFirstChild("Banners", true)
+        local unitModule = dataPath:FindFirstChild("Units", true)
+        assert(bannerModule and unitModule, "Banner/Unit data modules not found")
+        return require(bannerModule), require(unitModule)
+    end)
+    if ok then return bannersData, unitsData end
+    return nil, nil, tostring(bannersData)
+end
+
+local function SnipeGetBannerUnitData(bannerId)
+    local ok, bannerUnits = pcall(function()
+        local remote = ReplicatedStorage:WaitForChild("endpoints"):WaitForChild("client_to_server"):WaitForChild("get_hatch_setup_data")
+        return remote:InvokeServer()
+    end)
+    if not ok or type(bannerUnits) ~= "table" then return nil end
+    -- The endpoint's first return value is the BANNER_UNITS table.
+    return bannerUnits[bannerId], bannerUnits
+end
+
+local function SnipeGetLiveBannerIds()
+    local ids, seen = {}, {}
+    local shop = workspace:FindFirstChild("_shop")
+    local bannerFolder = shop and shop:FindFirstChild("_banners")
+    if bannerFolder then
+        for _, child in ipairs(bannerFolder:GetChildren()) do
+            if child.Name ~= "ComingSoon" and not seen[child.Name] then
+                seen[child.Name] = true
+                table.insert(ids, child.Name)
+            end
+        end
+    end
+    table.sort(ids)
+    return ids
+end
+
+local function SnipeResolveUnitIds(raw, unitsData)
+    local ids, seen = {}, {}
+    local function add(id)
+        if type(id) == "string" and unitsData[id] and not seen[id] then
+            seen[id] = true
+            table.insert(ids, id)
+        end
+    end
+    local function walk(value, depth)
+        if depth > 8 then return end
+        if type(value) == "string" then
+            add(value)
+        elseif type(value) == "table" then
+            for key, child in pairs(value) do
+                if type(key) == "string" then add(key) end
+                walk(child, depth + 1)
+            end
+        end
+    end
+    walk(raw, 0)
+    table.sort(ids, function(a, b)
+        local an = (unitsData[a] and unitsData[a].name) or a
+        local bn = (unitsData[b] and unitsData[b].name) or b
+        return tostring(an):lower() < tostring(bn):lower()
+    end)
+    return ids
+end
+
+local function SnipeClearList(frame)
+    if not frame then return end
+    for _, child in ipairs(frame:GetChildren()) do
+        if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end
+    end
+end
+
+local function SnipeBuildBannerList()
+    SnipeBannerOptions = SnipeGetLiveBannerIds()
+    SnipeClearList(SnipeBannerList)
+    if not SnipeBannerList then return end
+    for index, bannerId in ipairs(SnipeBannerOptions) do
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -6, 0, 30)
+        button.BackgroundColor3 = State.SnipeBanner == bannerId and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(31, 31, 43)
+        button.TextColor3 = Color3.fromRGB(235, 235, 245)
+        button.TextSize = 11
+        button.Font = Enum.Font.GothamMedium
+        button.Text = bannerId
+        button.TextXAlignment = Enum.TextXAlignment.Left
+        button.LayoutOrder = index
+        button.ZIndex = 14
+        button.Parent = SnipeBannerList
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.Parent = button
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 5)
+        corner.Parent = button
+        button.MouseButton1Click:Connect(function()
+            State.SnipeBanner = bannerId
+            State.SnipeTargets = {}
+            SaveConfig()
+            if SnipeBannerSelectedLabel then SnipeBannerSelectedLabel.Text = "Selected Banner: " .. bannerId end
+            SnipeBuildBannerList()
+            SnipeBuildUnitList()
+        end)
+    end
+    if #SnipeBannerOptions == 0 then
+        SnipeMakeLabel(SnipeBannerList, "No banner frames found. Open the game lobby first.", 1, 28, Color3.fromRGB(235, 170, 100))
+    end
+end
+
+function SnipeBuildUnitList()
+    SnipeClearList(SnipeUnitList)
+    SnipeUnitOptions = {}
+    if not SnipeUnitList then return end
+    local bannersData, unitsData = SnipeGetGameData()
+    if not bannersData or not unitsData then
+        SnipeMakeLabel(SnipeUnitList, "Unable to load game unit data. Press Refresh.", 1, 30, Color3.fromRGB(235, 170, 100))
+        return
+    end
+    if State.SnipeBanner == "" or not bannersData[State.SnipeBanner] then
+        SnipeMakeLabel(SnipeUnitList, "Select a banner first.", 1, 26)
+        return
+    end
+    local bannerUnitData = SnipeGetBannerUnitData(State.SnipeBanner)
+    if not bannerUnitData then
+        SnipeMakeLabel(SnipeUnitList, "This banner has no active unit data right now. Try Refresh later.", 1, 38, Color3.fromRGB(235, 170, 100))
+        return
+    end
+    local ids = SnipeResolveUnitIds(bannerUnitData, unitsData)
+    SnipeUnitOptions = ids
+    for index, unitId in ipairs(ids) do
+        local unitInfo = unitsData[unitId]
+        local unitName = (unitInfo and unitInfo.name) or unitId
+        local selected = State.SnipeTargets[unitId] == true
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -6, 0, 30)
+        button.BackgroundColor3 = selected and Color3.fromRGB(0, 115, 95) or Color3.fromRGB(31, 31, 43)
+        button.TextColor3 = Color3.fromRGB(235, 235, 245)
+        button.TextSize = 11
+        button.Font = Enum.Font.GothamMedium
+        button.TextXAlignment = Enum.TextXAlignment.Left
+        button.Text = (selected and "[✓]  " or "[ ]  ") .. tostring(unitName) .. "  (" .. unitId .. ")"
+        button.LayoutOrder = index
+        button.ZIndex = 14
+        button.Parent = SnipeUnitList
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 8)
+        pad.Parent = button
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 5)
+        corner.Parent = button
+        button.MouseButton1Click:Connect(function()
+            if State.SnipeTargets[unitId] == true then
+                State.SnipeTargets[unitId] = nil
+            else
+                State.SnipeTargets[unitId] = true
+            end
+            SaveConfig()
+            SnipeBuildUnitList()
+        end)
+    end
+    if #ids == 0 then
+        SnipeMakeLabel(SnipeUnitList, "No unit IDs were found in this banner's data.", 1, 30, Color3.fromRGB(235, 170, 100))
+    end
+    local count = 0
+    for _, enabled in pairs(State.SnipeTargets) do if enabled then count += 1 end end
+    if SnipeTargetCountLabel then SnipeTargetCountLabel.Text = "Selected targets: " .. count end
+end
+
+local function SnipeFindOwnedUnits()
+    if type(getgc) ~= "function" then return nil end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local collection = object.collection
+            if type(collection) == "table" and collection.player == player then
+                local profile = collection.collection_profile_data
+                if type(profile) == "table" and type(profile.owned_units) == "table" then
+                    return profile.owned_units
+                end
+            end
+            if object.player == player and type(object.collection_profile_data) == "table" and type(object.collection_profile_data.owned_units) == "table" then
+                return object.collection_profile_data.owned_units
+            end
+        end
+    end
+    return nil
+end
+
+local function SnipeCountTargets(owned, targets)
+    local counts = {}
+    for _, unit in pairs(owned) do
+        if type(unit) == "table" and type(unit.unit_id) == "string" and targets[unit.unit_id] then
+            counts[unit.unit_id] = (counts[unit.unit_id] or 0) + 1
+        end
+    end
+    return counts
+end
+
+local function SnipeHasNewTarget(owned, before, targets)
+    local after = SnipeCountTargets(owned, targets)
+    for unitId, count in pairs(after) do
+        if count > (before[unitId] or 0) then return true, unitId end
+    end
+    return false
+end
+
+local function SnipeSetStatus(message, color)
+    SnipeRuntime.LastAction = message
+    if SnipeStatusLabel then
+        SnipeStatusLabel.Text = "Status: " .. message
+        SnipeStatusLabel.TextColor3 = color or Color3.fromRGB(190, 210, 230)
+    end
+end
+
+local function SnipeStop(reason)
+    SnipeRuntime.Running = false
+    SnipeRuntime.StopReason = reason or "Stopped"
+    SnipeSetStatus(SnipeRuntime.StopReason, Color3.fromRGB(235, 180, 100))
+    if SnipeStartButton then SnipeStartButton.Text = "Start Snipe Summon" end
+end
+
+local function SnipeStart()
+    if SnipeRuntime.Running then SnipeStop("Stopped by user") return end
+    if State.SnipeBanner == "" then SnipeSetStatus("Select a banner first", Color3.fromRGB(235, 100, 100)) return end
+    if not workspace:FindFirstChild("_shop") then SnipeSetStatus("Snipe Summon is available in the lobby only", Color3.fromRGB(235, 100, 100)) return end
+    local targetCount = 0
+    for _, enabled in pairs(State.SnipeTargets) do if enabled then targetCount += 1 end end
+    if targetCount == 0 then SnipeSetStatus("Select at least one target unit", Color3.fromRGB(235, 100, 100)) return end
+    local owned = SnipeFindOwnedUnits()
+    if not owned then
+        SnipeSetStatus("Cannot access owned-unit data; stopped safely", Color3.fromRGB(235, 100, 100))
+        return
+    end
+    local bannersData = SnipeGetGameData()
+    if not bannersData or not bannersData[State.SnipeBanner] then
+        SnipeSetStatus("Selected banner is not available in game data", Color3.fromRGB(235, 100, 100))
+        return
+    end
+    local config = bannersData[State.SnipeBanner]
+    if not config.gem_cost then
+        SnipeSetStatus("Selected banner does not use Gems", Color3.fromRGB(235, 100, 100))
+        return
+    end
+    local remote
+    local remoteOk = pcall(function()
+        remote = ReplicatedStorage:WaitForChild("endpoints"):WaitForChild("client_to_server"):WaitForChild("buy_from_banner")
+        assert(remote:IsA("RemoteFunction"), "buy_from_banner is not a RemoteFunction")
+    end)
+    if not remoteOk or not remote then SnipeSetStatus("Summon endpoint not found", Color3.fromRGB(235, 100, 100)) return end
+
+    local targetSnapshot = SnipeCountTargets(owned, State.SnipeTargets)
+    local gemStat = player:FindFirstChild("_stats") and player._stats:FindFirstChild("gem_amount")
+    if not gemStat then SnipeSetStatus("Gem balance value not found", Color3.fromRGB(235, 100, 100)) return end
+    local startingGems = gemStat.Value
+    local gemLimit = math.max(0, tonumber(State.SnipeGemLimit) or 0)
+    local summonCount = State.SnipeSummonCount == 1 and 1 or 10
+    local estimatedCost = tonumber(config.gem_cost) or 0
+    if summonCount == 10 then estimatedCost *= 10 end
+    if estimatedCost <= 0 then SnipeSetStatus("Could not determine banner Gem cost", Color3.fromRGB(235, 100, 100)) return end
+
+    SnipeRuntime.Running = true
+    SnipeRuntime.StopReason = "Running"
+    if SnipeStartButton then SnipeStartButton.Text = "Stop Snipe Summon" end
+    SnipeSetStatus("Watching " .. State.SnipeBanner .. " | Targets: " .. targetCount, Color3.fromRGB(100, 220, 160))
+    task.spawn(function()
+        while SnipeRuntime.Running do
+            if not player.Parent then SnipeStop("Player unavailable") break end
+            local currentGems = tonumber(gemStat.Value) or 0
+            local spent = math.max(0, startingGems - currentGems)
+            if gemLimit > 0 and spent + estimatedCost > gemLimit then
+                SnipeStop("Gem limit reached (spent " .. spent .. ")")
+                break
+            end
+            if currentGems < estimatedCost then
+                SnipeStop("Not enough Gems for next summon")
+                break
+            end
+            local liveUnits = SnipeGetBannerUnitData(State.SnipeBanner)
+            if not liveUnits then
+                SnipeSetStatus("Waiting for selected banner data...", Color3.fromRGB(235, 180, 100))
+                task.wait(5)
+            else
+                local ok, result = pcall(function()
+                    return remote:InvokeServer(State.SnipeBanner, summonCount == 10 and "gems10" or "gems")
+                end)
+                if not ok then
+                    SnipeStop("Summon request failed: " .. tostring(result))
+                    break
+                end
+                SnipeSetStatus("Summon request sent | Gems spent: " .. math.max(0, startingGems - (tonumber(gemStat.Value) or 0)), Color3.fromRGB(100, 190, 255))
+                local found = false
+                for _ = 1, 12 do
+                    task.wait(0.5)
+                    local liveOwned = SnipeFindOwnedUnits() or owned
+                    local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
+                    if hasTarget then
+                        local _, unitsData = SnipeGetGameData()
+                        local unitName = unitsData and unitsData[unitId] and unitsData[unitId].name or unitId
+                        SnipeStop("TARGET OBTAINED: " .. tostring(unitName))
+                        found = true
+                        break
+                    end
+                    if not SnipeRuntime.Running then break end
+                end
+                if found then break end
+                if SnipeRuntime.Running then task.wait(1.2) end
+            end
+        end
+    end)
+end
+
+CreateSection(SummonPage, "SNIPE SUMMON", 1)
+CreateHint(SummonPage, "Choose a banner and one or more target units. The system sends summons only to the selected banner and stops when a new target unit appears in your collection.", 2, 42)
+SnipeBannerSelectedLabel = SnipeMakeLabel(SummonPage, "Selected Banner: " .. (State.SnipeBanner ~= "" and State.SnipeBanner or "None"), 3, 22, Color3.fromRGB(120, 190, 255))
+CreateSection(SummonPage, "1. SELECT BANNER", 4)
+SnipeBannerList = Instance.new("ScrollingFrame")
+SnipeBannerList.Size = UDim2.new(1, -10, 0, 104)
+SnipeBannerList.BackgroundColor3 = Color3.fromRGB(18, 18, 25)
+SnipeBannerList.BorderSizePixel = 0
+SnipeBannerList.ScrollBarThickness = 3
+SnipeBannerList.CanvasSize = UDim2.new(0, 0, 0, 0)
+SnipeBannerList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+SnipeBannerList.LayoutOrder = 5
+SnipeBannerList.ZIndex = 13
+SnipeBannerList.Parent = SummonPage
+local bannerLayout = Instance.new("UIListLayout")
+bannerLayout.Padding = UDim.new(0, 4)
+bannerLayout.SortOrder = Enum.SortOrder.LayoutOrder
+bannerLayout.Parent = SnipeBannerList
+local bannerPadding = Instance.new("UIPadding")
+bannerPadding.PaddingTop = UDim.new(0, 4)
+bannerPadding.PaddingBottom = UDim.new(0, 4)
+bannerPadding.PaddingLeft = UDim.new(0, 4)
+bannerPadding.PaddingRight = UDim.new(0, 4)
+bannerPadding.Parent = SnipeBannerList
+CreateSection(SummonPage, "2. SELECT TARGET UNITS (MULTI-SELECT)", 6)
+SnipeTargetCountLabel = SnipeMakeLabel(SummonPage, "Selected targets: 0", 7, 20, Color3.fromRGB(120, 190, 255))
+SnipeUnitList = Instance.new("ScrollingFrame")
+SnipeUnitList.Size = UDim2.new(1, -10, 0, 154)
+SnipeUnitList.BackgroundColor3 = Color3.fromRGB(18, 18, 25)
+SnipeUnitList.BorderSizePixel = 0
+SnipeUnitList.ScrollBarThickness = 3
+SnipeUnitList.CanvasSize = UDim2.new(0, 0, 0, 0)
+SnipeUnitList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+SnipeUnitList.LayoutOrder = 8
+SnipeUnitList.ZIndex = 13
+SnipeUnitList.Parent = SummonPage
+local unitLayout = Instance.new("UIListLayout")
+unitLayout.Padding = UDim.new(0, 4)
+unitLayout.SortOrder = Enum.SortOrder.LayoutOrder
+unitLayout.Parent = SnipeUnitList
+local unitPadding = Instance.new("UIPadding")
+unitPadding.PaddingTop = UDim.new(0, 4)
+unitPadding.PaddingBottom = UDim.new(0, 4)
+unitPadding.PaddingLeft = UDim.new(0, 4)
+unitPadding.PaddingRight = UDim.new(0, 4)
+unitPadding.Parent = SnipeUnitList
+CreateTextBox(SummonPage, "Gem Limit (0 = unlimited)", "Example: 5000", 9, function(value)
+    State.SnipeGemLimit = math.max(0, math.floor(tonumber(value) or 0))
+    SaveConfig()
+end, tostring(State.SnipeGemLimit or 0))
+SnipeModeButton = CreateButton(SummonPage, "Summon Mode: 10x (click to switch)", 10, function()
+    State.SnipeSummonCount = State.SnipeSummonCount == 10 and 1 or 10
+    SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x" or "1x") .. " (click to switch)"
+    SaveConfig()
+end)
+SnipeRefreshButton = CreateButton(SummonPage, "Refresh Banners / Units", 11, function()
+    SnipeBuildBannerList()
+    SnipeBuildUnitList()
+    SnipeSetStatus("Lists refreshed", Color3.fromRGB(100, 220, 160))
+end)
+SnipeStatusLabel = SnipeMakeLabel(SummonPage, "Status: Idle", 12, 34, Color3.fromRGB(190, 210, 230))
+SnipeStartButton = CreateButton(SummonPage, "Start Snipe Summon", 13, SnipeStart)
+SnipeBuildBannerList()
+SnipeBuildUnitList()
+SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x" or "1x") .. " (click to switch)"
 
 AllowSave = true
 if State.BlackScreen then
