@@ -434,6 +434,7 @@ State = {
     AutoPlace = false,
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
+    AutoBuffRotation = false,
     PlacePercent = 0,
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
@@ -563,6 +564,7 @@ function CopyStateForSave()
         AutoPlace = State.AutoPlace,
         AutoUpgrade = State.AutoUpgrade,
         AutoUpgradeFarmFirst = State.AutoUpgradeFarmFirst,
+        AutoBuffRotation = State.AutoBuffRotation,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
         AutoEventQuests = State.AutoEventQuests,
@@ -618,7 +620,7 @@ function ApplySavedTable(saved)
         return
     end
     local boolKeys = {
-        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst",
+        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
         "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
@@ -1005,6 +1007,171 @@ function EnrichEquipped(list)
         end
     end
     return list
+end
+
+-- Auto Buff Rotation: read the deployed unit's live active cooldown and its
+-- matching owned-unit Curse data. Game.lua applies Curse cooldown modifiers
+-- through further_modifiers.cursed and exposes the effective cooldown in
+-- _stats.active_attack_cooldown on the deployed model.
+BUFF_ROTATION_ATTACKS = {
+    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical" },
+    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic" },
+}
+BUFF_ROTATION_RUNTIME = { groups = {}, lastRequestAt = 0 }
+BUFF_ROTATION_CURSE_CACHE = {}
+BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
+BUFF_ROTATION_PENDING_TIMEOUT = 4.5
+
+function GetOwnedUnitRecordForPlacedUnit(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return nil end
+    local uuidValue = unit._stats:FindFirstChild("uuid")
+    if not uuidValue then return nil end
+    local uuid = tostring(uuidValue.Value or "")
+    if uuid == "" then return nil end
+
+    local ok, owned = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+        if ucs and type(ucs.get_equipped_unit_by_uuid) == "function" then
+            return ucs.get_equipped_unit_by_uuid(uuid)
+        end
+    end)
+    if ok and type(owned) == "table" then return owned end
+    return nil
+end
+
+function GetUnitCurseCooldownInfo(unit)
+    local stats = unit and unit:FindFirstChild("_stats")
+    local uuidValue = stats and stats:FindFirstChild("uuid")
+    local uuid = uuidValue and tostring(uuidValue.Value or "") or ""
+    if uuid ~= "" then
+        local cached = BUFF_ROTATION_CURSE_CACHE[uuid]
+        if cached and tick() - cached.time < 5 then
+            return cached.hasCurse, cached.reduction, cached.known
+        end
+    end
+
+    local owned = GetOwnedUnitRecordForPlacedUnit(unit)
+    if type(owned) ~= "table" then
+        if uuid ~= "" then
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = false }
+        end
+        return false, 0, false
+    end
+
+    local modifiers = owned.further_modifiers
+    local cursed = type(modifiers) == "table" and modifiers.cursed or nil
+    if type(cursed) ~= "table" then
+        -- The owned record and modifier container were read successfully, so
+        -- absence of the cursed entry means this unit has no Curse.
+        if uuid ~= "" then
+            BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = false, reduction = 0, known = true }
+        end
+        return false, 0, true
+    end
+
+    local reduction = 0
+    for _, key in ipairs({ "positive_buff", "negative_buff" }) do
+        local mod = cursed[key]
+        if type(mod) == "table"
+            and (mod.stat_id == "attack_cooldown" or mod.stat_id == "active_attack_cooldown")
+            and tonumber(mod.stat_mod) and tonumber(mod.stat_mod) < 0 then
+            reduction = reduction + tonumber(mod.stat_mod)
+        end
+    end
+    local hasCurse = reduction < 0
+    if uuid ~= "" then
+        BUFF_ROTATION_CURSE_CACHE[uuid] = { time = tick(), hasCurse = hasCurse, reduction = reduction, known = true }
+    end
+    return hasCurse, reduction, true
+end
+
+function GetBuffRotationGroups()
+    local groups = {}
+    local passiveElfyCount = 0
+    for _, unit in ipairs(GetPlayerUnits()) do
+        local stats = unit:FindFirstChild("_stats")
+        if stats then
+            local rawId = GetRawUnitId(unit)
+            local unitData = LookupUnitData(rawId)
+            local activeValue = stats:FindFirstChild("active_attack")
+            local activeId = activeValue and tostring(activeValue.Value) or "nil"
+
+            -- Current game.lua defines Elfy (Sylph) as a buff-highlight unit but
+            -- does not give leafa_evolved an active_attack. It is therefore not
+            -- safe to send use_active_attack for it; count it for the status UI.
+            if NormalizeName(rawId) == "leafaevolved" and activeId == "nil" then
+                passiveElfyCount = passiveElfyCount + 1
+            end
+
+            local definition = BUFF_ROTATION_ATTACKS[activeId]
+            if definition and (not unitData or unitData._show_as_buff_unit ~= false) then
+                local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
+                local lastCastValue = stats:FindFirstChild("last_active_cast")
+                if cooldownValue and lastCastValue then
+                    local hasCurse, curseReduction, curseKnown = GetUnitCurseCooldownInfo(unit)
+                    local group = groups[activeId]
+                    if not group then
+                        group = {
+                            attackId = activeId,
+                            name = definition.name,
+                            buff = definition.buff,
+                            duration = definition.duration,
+                            units = {},
+                            curseCount = 0,
+                            curseKnownCount = 0,
+                            maxCooldown = 0,
+                        }
+                        groups[activeId] = group
+                    end
+                    local cooldown = math.max(0.1, tonumber(cooldownValue.Value) or definition.duration * 2)
+                    local lastCast = tonumber(lastCastValue.Value) or 0
+                    table.insert(group.units, {
+                        model = unit,
+                        uuid = stats:FindFirstChild("uuid") and tostring(stats.uuid.Value) or tostring(unit),
+                        cooldown = cooldown,
+                        lastCast = lastCast,
+                        hasCurse = hasCurse,
+                        curseReduction = curseReduction,
+                        curseKnown = curseKnown,
+                    })
+                    if hasCurse then group.curseCount = group.curseCount + 1 end
+                    if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
+                    group.maxCooldown = math.max(group.maxCooldown, cooldown)
+                end
+            end
+        end
+    end
+
+    for _, group in pairs(groups) do
+        table.sort(group.units, function(a, b)
+            return tostring(a.uuid) < tostring(b.uuid)
+        end)
+        -- A unit must be ready again by its next turn. The interval is derived
+        -- from the slowest live active cooldown divided by the available copies.
+        -- It is capped by the 30s buff duration; live readiness checks below
+        -- prevent early casts when a single unit cannot sustain a continuous loop.
+        group.interval = math.max(0.75, math.min(group.duration, group.maxCooldown / math.max(1, #group.units)))
+    end
+    return groups, passiveElfyCount
+end
+
+function SetBuffRotationStatus(message, color)
+    if BuffRotationStatus then
+        BuffRotationStatus.Text = message
+        BuffRotationStatus.TextColor3 = color or Color3.fromRGB(160, 160, 180)
+    end
+end
+
+function GetBuffRotationCurseMode(group)
+    if group.curseKnownCount < #group.units then
+        return "Cooldown Curse unknown"
+    elseif group.curseCount == #group.units then
+        return "Curse"
+    elseif group.curseCount > 0 then
+        return "Mixed Cooldown Curse"
+    end
+    return "No Cooldown Curse"
 end
 
 -- Detect farm units from both their displayed name and unit database metadata.
@@ -3116,6 +3283,17 @@ end, function(value)
 end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
+CreateSection(AutoPlayPage, "Buff Rotation", 5)
+CreateHint(AutoPlayPage, "Automatically detects Curse cooldown reductions and adapts the buff timing from each placed unit's live Active Cooldown.", 6, 32)
+BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
+CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
+    if not enabled then
+        BUFF_ROTATION_RUNTIME.groups = {}
+        SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
+    else
+        SetBuffRotationStatus("Auto Buff: Detecting placed buff units...", Color3.fromRGB(100, 190, 255))
+    end
+end)
 CreateSection(AutoPlayPage, "Hybrid Units", 22)
 CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
 CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
@@ -4748,6 +4926,154 @@ task.spawn(function()
         if not upgradeOk then
             warn("[OctoputHub] Upgrade worker error: " .. tostring(upgradeErr))
             task.wait(1)
+        end
+    end
+end)
+
+-- Adaptive Commander / Windsong buff rotation.
+-- Cast confirmation is based on last_active_cast changing, not on the remote's
+-- return value. This lets the next interval self-correct after missed/late casts.
+task.spawn(function()
+    while true do
+        task.wait(0.25)
+        local rotationOk, rotationErr = pcall(function()
+            if not State.AutoBuffRotation then
+                SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
+                BUFF_ROTATION_RUNTIME.groups = {}
+                return
+            end
+            if IsInLobby() or not workspace:FindFirstChild("_UNITS") then
+                SetBuffRotationStatus("Auto Buff: Waiting for match...", Color3.fromRGB(160, 160, 180))
+                BUFF_ROTATION_RUNTIME.groups = {}
+                return
+            end
+
+            local now = tick()
+            local liveGroups, passiveElfyCount = GetBuffRotationGroups()
+            local nextRuntimeGroups = {}
+            local statusParts = {}
+            local hasActionableUnits = false
+
+            for _, attackId in ipairs({ "erwin:buff_units", "wendy:buff_units" }) do
+                local group = liveGroups[attackId]
+                if group and #group.units > 0 then
+                    hasActionableUnits = true
+                    local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
+                        or { seenCast = {}, pending = {}, nextAt = now, initialized = false, latestCast = 0, cursor = 1 }
+                    local interval = group.interval
+
+                    if not runtime.initialized then
+                        runtime.initialized = true
+                        local latest = 0
+                        for _, entry in ipairs(group.units) do
+                            runtime.seenCast[entry.model] = entry.lastCast
+                            latest = math.max(latest, entry.lastCast)
+                        end
+                        runtime.latestCast = latest
+                        runtime.nextAt = latest > 0 and math.max(now, latest + interval) or now
+                        runtime.interval = interval
+                    elseif not runtime.interval or math.abs(runtime.interval - interval) > 0.25 then
+                        runtime.interval = interval
+                        runtime.nextAt = runtime.latestCast > 0 and math.max(now, runtime.latestCast + interval) or now
+                    end
+
+                    local liveSet = {}
+                    for _, entry in ipairs(group.units) do
+                        local unit = entry.model
+                        liveSet[unit] = true
+                        local seen = runtime.seenCast[unit]
+                        if seen == nil then
+                            runtime.seenCast[unit] = entry.lastCast
+                        elseif entry.lastCast > seen + 0.05 then
+                            runtime.seenCast[unit] = entry.lastCast
+                            runtime.pending[unit] = nil
+                            if entry.lastCast > (runtime.latestCast or 0) then
+                                runtime.latestCast = entry.lastCast
+                                runtime.nextAt = entry.lastCast + interval
+                            end
+                        end
+
+                        local pending = runtime.pending[unit]
+                        if pending then
+                            if entry.lastCast > (pending.before or 0) + 0.05 then
+                                runtime.pending[unit] = nil
+                            elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
+                                runtime.pending[unit] = nil
+                                runtime.nextAt = math.min(runtime.nextAt or now, now + 1)
+                            end
+                        end
+                    end
+                    for unit in pairs(runtime.seenCast) do
+                        if not liveSet[unit] then
+                            runtime.seenCast[unit] = nil
+                            runtime.pending[unit] = nil
+                        end
+                    end
+
+                    local curseMode = GetBuffRotationCurseMode(group)
+                    table.insert(statusParts, string.format("%s: %s | %d units | %.1fs", group.name, curseMode, #group.units, interval))
+
+                    if now >= (runtime.nextAt or now)
+                        and now - (BUFF_ROTATION_RUNTIME.lastRequestAt or 0) >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                        local ready = {}
+                        local nextReadyAt = math.huge
+                        for _, entry in ipairs(group.units) do
+                            local unit = entry.model
+                            local stats = unit and unit:FindFirstChild("_stats")
+                            local busyValue = stats and stats:FindFirstChild("active_queued_or_using")
+                            local busy = busyValue and busyValue.Value == true
+                            local pending = runtime.pending[unit]
+                            local remaining = entry.cooldown - (now - entry.lastCast)
+                            if not pending then
+                                if not busy and remaining <= 0 then
+                                    table.insert(ready, entry)
+                                elseif not busy then
+                                    nextReadyAt = math.min(nextReadyAt, now + math.max(0.1, remaining))
+                                end
+                            end
+                        end
+
+                        table.sort(ready, function(a, b)
+                            if math.abs(a.lastCast - b.lastCast) < 0.05 then
+                                return tostring(a.uuid) < tostring(b.uuid)
+                            end
+                            return a.lastCast < b.lastCast
+                        end)
+
+                        if #ready > 0 then
+                            local chosen = ready[1]
+                            local before = chosen.lastCast
+                            runtime.pending[chosen.model] = { time = now, before = before }
+                            runtime.nextAt = now + interval
+                            BUFF_ROTATION_RUNTIME.lastRequestAt = now
+                            -- This is the same endpoint used by the game's own Active button.
+                            InvokeEndpoint("use_active_attack", chosen.model)
+                        elseif nextReadyAt < math.huge then
+                            runtime.nextAt = math.max(now + 0.2, nextReadyAt)
+                        else
+                            runtime.nextAt = now + 0.5
+                        end
+                    end
+                    nextRuntimeGroups[attackId] = runtime
+                end
+            end
+
+            BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
+            if not hasActionableUnits then
+                if passiveElfyCount > 0 then
+                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) has no active_attack in current game.lua; Commander / Windsong are required for active rotation.", Color3.fromRGB(255, 190, 100))
+                else
+                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong buff units detected.", Color3.fromRGB(160, 160, 180))
+                end
+            else
+                local suffix = passiveElfyCount > 0 and " | Elfy has no active_attack" or ""
+                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
+            end
+        end)
+        if not rotationOk then
+            warn("[OctoputHub] Auto Buff Rotation error: " .. tostring(rotationErr))
+            SetBuffRotationStatus("Auto Buff: Worker error (see executor console)", Color3.fromRGB(255, 100, 100))
+            task.wait(0.75)
         end
     end
 end)
