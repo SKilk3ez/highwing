@@ -1013,15 +1013,30 @@ end
 -- matching owned-unit Curse data. Game.lua applies Curse cooldown modifiers
 -- through further_modifiers.cursed and exposes the effective cooldown in
 -- _stats.active_attack_cooldown on the deployed model.
+--
+-- Buff loop formula (game.lua):
+--   active cooldown  C = active_attack_stats.attack_cooldown (60s for Commander/Windsong)
+--                        * calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown")
+--                      = base * max(0.6, (1 + cursed attack_cooldown mods) * level/artifact mods)
+--   buff duration    D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
+--   unit SPD         = 1 / C (casts per second); group rate R = sum(1 / C_i)
+--   loop is seamless when R >= 1 / D, i.e. units needed = ceil(C / D)
+-- The worker recasts one unit only when the group's current buff is about to
+-- expire (lastGroupCast + D - lead), so casts are staggered instead of all
+-- units firing together and leaving a gap afterwards.
 BUFF_ROTATION_ATTACKS = {
-    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander" },
-    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong" },
+    ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander", baseCooldown = 60 },
+    ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong", baseCooldown = 60 },
 }
-BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false }
+BUFF_ROTATION_ELFY_DEFAULT = { name = "Elfy (Sylph) - Verdant Enchantment", duration = 30, buff = "Magic", unit = "elfy" }
+BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false, requestStarted = 0, ownCast = {} }
 BUFF_ROTATION_CURSE_CACHE = {}
+BUFF_ROTATION_MULT_CACHE = {}
 BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
 BUFF_ROTATION_PENDING_TIMEOUT = 4.5
 BUFF_ROTATION_SAFETY_MARGIN = 0.75
+BUFF_ROTATION_REQUEST_TIMEOUT = 8
+BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN = 60
 
 function GetOwnedUnitRecordForPlacedUnit(unit)
     if not unit or not unit:FindFirstChild("_stats") then return nil end
@@ -1090,102 +1105,293 @@ function GetUnitCurseCooldownInfo(unit)
     return hasCooldownModifier, modifierSum, true, factor
 end
 
-BUFF_ROTATION_ATTACKS_REPLICATE = nil
-function GetActiveAttackCooldownState(unit, attackId, fallbackCooldown, lastCast, now)
-    -- Mirror game.lua's native Auto Active worker (around line 91749):
-    -- it checks each unit's own active_attack_cooldown and last_active_cast.
-    -- It deliberately does NOT gate casts on GLOBAL_ATTACK_COOLDOWNS; doing so
-    -- prevents same-type buff units from rotating even though native Auto Active
-    -- continues to request each ready unit independently.
-    local stats = unit and unit:FindFirstChild("_stats")
-    local cdValue = stats and stats:FindFirstChild("active_attack_cooldown")
-    local castValue = stats and stats:FindFirstChild("last_active_cast")
-    local cooldown = cdValue and tonumber(cdValue.Value) or tonumber(fallbackCooldown) or 60
-    local castAt = castValue and tonumber(castValue.Value) or tonumber(lastCast) or 0
-    local remaining = cooldown - (now - castAt)
-    return false, remaining <= 0, cooldown, math.max(0, remaining), true
+function GetAttacksData()
+    if AttacksDataCache then
+        return AttacksDataCache
+    end
+    local ok, data = pcall(function()
+        return require(ReplicatedStorage.src.Data.Attacks)
+    end)
+    if ok and type(data) == "table" then
+        AttacksDataCache = data
+        return AttacksDataCache
+    end
+    return {}
 end
 
-function GetBuffRotationGroups()
+-- Read the buff time from Attacks[attackId].aoe[*].hit.buffs[*].time
+-- (erwin:buff_units / wendy:buff_units = 30s). Works for Elfy's runtime
+-- Verdant Enchantment as well, because the live Attacks module contains it.
+function GetAttackBuffDuration(attackId, fallback)
+    local attack = attackId and GetAttacksData()[attackId] or nil
+    local best = nil
+    local function scanHit(hit)
+        if type(hit) ~= "table" or type(hit.buffs) ~= "table" then return end
+        for _, buff in pairs(hit.buffs) do
+            local t = type(buff) == "table" and tonumber(buff.time) or nil
+            if t and t > 0 and (not best or t > best) then
+                best = t
+            end
+        end
+    end
+    if type(attack) == "table" then
+        scanHit(attack.hit)
+        if type(attack.hit) == "table" then
+            for _, hit in pairs(attack.hit) do
+                if type(hit) == "table" then scanHit(hit) end
+            end
+        end
+        if type(attack.aoe) == "table" then
+            for _, entry in pairs(attack.aoe) do
+                if type(entry) == "table" then scanHit(entry.hit) end
+            end
+        end
+    end
+    return best or fallback or 30
+end
+
+function GetAttackDisplayName(attackId, fallback)
+    local attack = attackId and GetAttacksData()[attackId] or nil
+    if type(attack) == "table" and type(attack.name) == "string" and attack.name ~= "" then
+        return attack.name
+    end
+    return fallback
+end
+
+-- Mirrors UnitServiceCore.get_active_stats_used(): unit active_attack_stats
+-- first, otherwise the first upgrade that defines active_attack_stats.
+function GetUnitActiveBaseCooldown(unitData, upgradeLevel)
+    if type(unitData) ~= "table" then return nil end
+    local stats = unitData.active_attack_stats
+    if type(stats) == "table" and tonumber(stats.attack_cooldown) then
+        return tonumber(stats.attack_cooldown)
+    end
+    if type(unitData.upgrade) == "table" then
+        local lvl = math.min(tonumber(upgradeLevel) or #unitData.upgrade, #unitData.upgrade)
+        local found = nil
+        for i = 1, lvl do
+            local upg = unitData.upgrade[i]
+            if type(upg) == "table" and type(upg.active_attack_stats) == "table"
+                and tonumber(upg.active_attack_stats.attack_cooldown) then
+                found = tonumber(upg.active_attack_stats.attack_cooldown)
+            end
+        end
+        if found then return found end
+        for _, upg in pairs(unitData.upgrade) do
+            if type(upg) == "table" and type(upg.active_attack_stats) == "table"
+                and tonumber(upg.active_attack_stats.attack_cooldown) then
+                return tonumber(upg.active_attack_stats.attack_cooldown)
+            end
+        end
+    end
+    return nil
+end
+
+-- Active cooldown multiplier exactly as game.lua computes it:
+-- UnitServiceCore.calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown").
+-- For "active_" stats the game strips the prefix, skips trait multipliers, adds
+-- cursed positive_buff + negative_buff attack_cooldown mods, applies level /
+-- artifact modifiers and clamps the result to >= 0.6.
+-- Fallback when the core service is unavailable: max(0.6, 1 + curseSum).
+function GetActiveCooldownMultiplier(unit, curseSum)
+    local stats = unit and unit:FindFirstChild("_stats")
+    local uuidValue = stats and stats:FindFirstChild("uuid")
+    local uuid = uuidValue and tostring(uuidValue.Value or "") or ""
+    if uuid ~= "" then
+        local cached = BUFF_ROTATION_MULT_CACHE[uuid]
+        if cached and tick() - cached.time < 5 then
+            return cached.mult, cached.source, cached.speedStat
+        end
+    end
+
+    local owned = GetOwnedUnitRecordForPlacedUnit(unit)
+    local mult, source = nil, "curse"
+    local speedStat = nil
+    if type(owned) == "table" then
+        if type(owned.trait_stats) == "table" then
+            speedStat = tonumber(owned.trait_stats.speed_stat)
+        end
+        local ok, value = pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            local core = Loader.load_core_service(game, "UnitServiceCore")
+            if core and type(core.calculate_static_stat_multiplier) == "function" then
+                return core.calculate_static_stat_multiplier(owned, owned.xp or 0, "active_attack_cooldown", nil)
+            end
+        end)
+        if ok and tonumber(value) and tonumber(value) > 0 then
+            mult = tonumber(value)
+            source = "game"
+        end
+    end
+    if not mult then
+        mult = math.max(0.6, 1 + (tonumber(curseSum) or 0))
+    end
+    if not speedStat and unit then
+        speedStat = tonumber(unit:GetAttribute("speed_stat"))
+    end
+    if uuid ~= "" then
+        BUFF_ROTATION_MULT_CACHE[uuid] = { time = tick(), mult = mult, source = source, speedStat = speedStat }
+    end
+    return mult, source, speedStat
+end
+
+BUFF_ROTATION_ATTACKS_REPLICATE = nil
+function GetActiveAttackCooldownState(entry, now)
+    -- Mirror game.lua AttacksReplicate.get_current_active_attack_cooldown():
+    -- busy while _stats.active_queued_or_using is true, otherwise ready when
+    -- active_attack_cooldown - (tick() - last_active_cast) <= 0.
+    if entry.queued then
+        return true, false, entry.cooldown, entry.cooldown
+    end
+    local remaining = entry.cooldown - (now - entry.lastCast)
+    return false, remaining <= 0, entry.cooldown, math.max(0, remaining)
+end
+
+function IsElfySylphUnit(rawId, unitData)
+    for _, value in ipairs({ rawId, unitData and unitData.id }) do
+        local id = NormalizeName(value)
+        if id == "leafaevolved" or (id:find("leafa", 1, true) and id:find("evolved", 1, true)) then
+            return true
+        end
+    end
+    -- NormalizeName keeps parentheses, so "Elfy (Sylph)" -> "elfy(sylph)".
+    local name = NormalizeName(unitData and unitData.name)
+    if name:find("sylph", 1, true) then
+        return true
+    end
+    if type(unitData) == "table" and type(unitData.evolved) == "table" and unitData.evolved.from == "leafa" then
+        return true
+    end
+    return false
+end
+
+function IsElfyFamilyUnit(rawId, unitData)
+    if IsElfySylphUnit(rawId, unitData) then return true end
+    local id = NormalizeName(rawId)
+    local name = NormalizeName(unitData and unitData.name)
+    return id:find("leafa", 1, true) ~= nil or name:find("elfy", 1, true) ~= nil
+end
+
+function GetBuffRotationGroups(now)
+    now = now or tick()
     local groups = {}
-    local elfyCount = 0
+    local elfyInfo = { total = 0, withoutActive = 0 }
+    local liveModels = {}
     for _, unit in ipairs(GetPlayerUnits()) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
+            liveModels[unit] = true
             local rawId = GetRawUnitId(unit)
             local unitData = LookupUnitData(rawId)
-            local normalizedRawId = NormalizeName(rawId)
-            local normalizedDataId = NormalizeName(unitData and unitData.id)
-            local normalizedDataName = NormalizeName(unitData and unitData.name)
-            local isElfySylph = normalizedRawId == "leafaevolved"
-                or normalizedDataId == "leafaevolved"
-                or normalizedDataName == "elfysylph"
 
-            -- Match the game's UnitUpgrade UI: it resolves the active from
-            -- UnitServiceCore.get_active_id(unit), which reads the live
-            -- _stats.active_attack value. Some units (including Elfy/Sylph)
-            -- receive their Verdant Enchantment active dynamically even though
-            -- the static Units entry has no active_attack field.
+            -- Same source as UnitServiceCore.get_active_id(): the live
+            -- _stats.active_attack value. Elfy (Sylph) gets Verdant
+            -- Enchantment at runtime even though its static Units record has
+            -- no active_attack field.
             local activeValue = stats:FindFirstChild("active_attack")
             local activeId = activeValue and tostring(activeValue.Value) or "nil"
             if activeId == "" or activeId == "nil" then
                 activeId = nil
             end
 
-            if isElfySylph then
-                elfyCount = elfyCount + 1
-                if activeId then
-                    -- Elfy's live ActiveButton is the Verdant Enchantment
-                    -- shown in the user's screenshot. The static game.lua unit
-                    -- record omits this runtime active, so classify by unit ID
-                    -- and use the live active_attack ID/cooldown from _stats.
-                    -- The 30s duration is an estimate for cadence reporting;
-                    -- cast eligibility always uses the game's live cooldown.
-                    BUFF_ROTATION_ATTACKS[activeId] = BUFF_ROTATION_ATTACKS[activeId]
-                        or { name = "Elfy (Sylph) - Verdant Enchantment", duration = 30, buff = "Magic", unit = "elfy" }
+            local isElfy = IsElfyFamilyUnit(rawId, unitData)
+            if isElfy then
+                elfyInfo.total = elfyInfo.total + 1
+                if not activeId then
+                    elfyInfo.withoutActive = elfyInfo.withoutActive + 1
                 end
             end
 
             local definition = activeId and BUFF_ROTATION_ATTACKS[activeId] or nil
-            local isKnownBuffUnit = isElfySylph
-                or (type(unitData) == "table" and unitData._show_as_buff_unit == true)
-            if definition and isKnownBuffUnit then
-                local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
-                local lastCastValue = stats:FindFirstChild("last_active_cast")
-                if cooldownValue and lastCastValue then
-                    local hasCurse, curseReduction, curseKnown, curseFactor = GetUnitCurseCooldownInfo(unit)
-                    local group = groups[activeId]
-                    if not group then
-                        group = {
-                            attackId = activeId,
-                            name = definition.name,
-                            buff = definition.buff,
-                            duration = definition.duration,
-                            units = {},
-                            curseCount = 0,
-                            curseKnownCount = 0,
-                            maxCooldown = 0,
-                        }
-                        groups[activeId] = group
-                    end
-                    local cooldown = math.max(0.1, tonumber(cooldownValue.Value) or definition.duration * 2)
-                    local lastCast = tonumber(lastCastValue.Value) or 0
-                    table.insert(group.units, {
-                        model = unit,
-                        uuid = stats:FindFirstChild("uuid") and tostring(stats.uuid.Value) or tostring(unit),
-                        cooldown = cooldown,
-                        lastCast = lastCast,
-                        hasCurse = hasCurse,
-                        curseReduction = curseReduction,
-                        curseFactor = curseFactor or 1,
-                        curseKnown = curseKnown,
-                        spd = 1 / cooldown,
-                    })
-                    if hasCurse then group.curseCount = group.curseCount + 1 end
-                    if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
-                    group.maxCooldown = math.max(group.maxCooldown, cooldown)
-                end
+            if not definition and activeId and isElfy then
+                definition = {
+                    name = "Elfy (Sylph) - " .. tostring(GetAttackDisplayName(activeId, "Verdant Enchantment")),
+                    duration = BUFF_ROTATION_ELFY_DEFAULT.duration,
+                    buff = BUFF_ROTATION_ELFY_DEFAULT.buff,
+                    unit = "elfy",
+                }
+                BUFF_ROTATION_ATTACKS[activeId] = definition
             end
+
+            if definition then
+                local upgradeValue = stats:FindFirstChild("upgrade")
+                local upgradeLevel = upgradeValue and tonumber(upgradeValue.Value) or 0
+                local baseCooldown = GetUnitActiveBaseCooldown(unitData, upgradeLevel)
+                if not baseCooldown and type(unitData) == "table" and type(unitData.evolved) == "table" then
+                    baseCooldown = GetUnitActiveBaseCooldown(LookupUnitData(unitData.evolved.from), upgradeLevel)
+                end
+                baseCooldown = baseCooldown or definition.baseCooldown
+
+                local hasCurse, curseReduction, curseKnown, curseFactor = GetUnitCurseCooldownInfo(unit)
+                local multiplier, multSource, speedStat = GetActiveCooldownMultiplier(unit, curseReduction)
+                local expectedCooldown = baseCooldown and (baseCooldown * multiplier) or nil
+
+                -- The live value is what the game itself uses for readiness, so
+                -- it is authoritative. Fall back to the game formula when the
+                -- unit does not expose active_attack_cooldown (Elfy runtime active).
+                local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
+                local liveCooldown = cooldownValue and tonumber(cooldownValue.Value) or nil
+                if liveCooldown and liveCooldown <= 0 then liveCooldown = nil end
+                local cooldown = liveCooldown or expectedCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+                cooldown = math.max(0.1, cooldown)
+
+                local lastCastValue = stats:FindFirstChild("last_active_cast")
+                local liveLastCast = lastCastValue and tonumber(lastCastValue.Value) or nil
+                local ownCast = BUFF_ROTATION_RUNTIME.ownCast[unit] or 0
+                local lastCast = liveLastCast or ownCast
+
+                local queuedValue = stats:FindFirstChild("active_queued_or_using")
+                local queued = queuedValue and queuedValue.Value == true or false
+
+                local duration = GetAttackBuffDuration(activeId, definition.duration)
+
+                local group = groups[activeId]
+                if not group then
+                    group = {
+                        attackId = activeId,
+                        name = definition.name,
+                        buff = definition.buff,
+                        duration = duration,
+                        units = {},
+                        curseCount = 0,
+                        curseKnownCount = 0,
+                        maxCooldown = 0,
+                        baseCooldown = baseCooldown,
+                        isElfy = definition.unit == "elfy",
+                    }
+                    groups[activeId] = group
+                end
+                group.duration = math.max(group.duration or 0, duration)
+
+                table.insert(group.units, {
+                    model = unit,
+                    uuid = stats:FindFirstChild("uuid") and tostring(stats.uuid.Value) or tostring(unit),
+                    cooldown = cooldown,
+                    liveCooldown = liveCooldown,
+                    expectedCooldown = expectedCooldown,
+                    baseCooldown = baseCooldown,
+                    multiplier = multiplier,
+                    multSource = multSource,
+                    speedStat = speedStat,
+                    lastCast = lastCast,
+                    hasLiveCast = liveLastCast ~= nil,
+                    queued = queued,
+                    hasCurse = hasCurse,
+                    curseReduction = curseReduction,
+                    curseFactor = curseFactor or 1,
+                    curseKnown = curseKnown,
+                    spd = 1 / cooldown,
+                })
+                if hasCurse then group.curseCount = group.curseCount + 1 end
+                if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
+                group.maxCooldown = math.max(group.maxCooldown, cooldown)
+            end
+        end
+    end
+
+    for model in pairs(BUFF_ROTATION_RUNTIME.ownCast) do
+        if not liveModels[model] then
+            BUFF_ROTATION_RUNTIME.ownCast[model] = nil
         end
     end
 
@@ -1194,25 +1400,30 @@ function GetBuffRotationGroups()
             return tostring(a.uuid) < tostring(b.uuid)
         end)
         local totalRate = 0
-        local spdTotal = 0
+        local multTotal = 0
         for _, entry in ipairs(group.units) do
-            -- The deployed _stats.active_attack_cooldown is the final in-game
-            -- cooldown after Curse, traits, artifacts and level modifiers.
-            -- Use it as the authoritative SPD source, not a guessed base value.
             entry.spd = 1 / math.max(0.1, entry.cooldown)
-            spdTotal = spdTotal + entry.spd
             totalRate = totalRate + entry.spd
+            multTotal = multTotal + (entry.multiplier or 1)
         end
+        local n = #group.units
         group.totalRate = totalRate
-        group.totalSPD = spdTotal
-        group.averageSPD = #group.units > 0 and (spdTotal / #group.units) or 0
+        group.totalSPD = totalRate
+        group.averageSPD = n > 0 and (totalRate / n) or 0
+        group.averageMultiplier = n > 0 and (multTotal / n) or 1
+        -- Average spacing between casts if every unit is used as soon as it is ready.
         group.interval = totalRate > 0 and (1 / totalRate) or math.huge
-        group.averageCooldown = #group.units > 0 and (#group.units / math.max(totalRate, 0.000001)) or math.huge
-        local safeDuration = math.max(1, group.duration - BUFF_ROTATION_SAFETY_MARGIN)
-        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / safeDuration))
-        group.sustainable = totalRate >= (1 / safeDuration)
+        group.averageCooldown = n > 0 and (n / math.max(totalRate, 0.000001)) or math.huge
+        -- Seamless loop needs one cast every D seconds: R >= 1 / D.
+        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / math.max(1, group.duration)))
+        group.sustainable = totalRate >= (1 / math.max(1, group.duration)) - 1e-6
+        -- Recast lead before expiry. Using a lead shortens the effective cycle,
+        -- so only use as much lead as the group's SPD can afford:
+        --   sum((D - lead) / C_i) >= 1  ->  lead <= D - 1 / R
+        local affordable = totalRate > 0 and (group.duration - 1 / totalRate) or 0
+        group.lead = math.clamp(affordable, 0, BUFF_ROTATION_SAFETY_MARGIN)
     end
-    return groups, elfyCount
+    return groups, elfyInfo
 end
 
 function SetBuffRotationStatus(message, color)
@@ -3485,7 +3696,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph): Auto Buff Rotation mirrors the game's native Auto Active loop, checking each unit's live active_attack_cooldown and last_active_cast independently. SPD uses the final live cooldown after Curse and other modifiers; Curse math follows game.lua. Elfy's Verdant Enchantment is detected from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
+CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph) buff loop: each unit's cooldown C = base active CD (60s) x Curse/level multiplier (min 0.6), SPD = 1/C. One unit is cast only when the current buff (D = 30s) is about to expire, so buffs chain without overlap. Seamless when sum(1/C) >= 1/D (units needed = ceil(C/D)). Elfy's Verdant Enchantment is read from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -5131,10 +5342,64 @@ task.spawn(function()
     end
 end)
 
--- Adaptive Commander / Windsong / Elfy (Sylph) Active rotation.
+-- Adaptive Commander / Windsong / Elfy (Sylph) buff loop.
 -- Elfy's static Units record omits the Verdant Enchantment active, but its
 -- live UnitUpgrade UI exposes the active through _stats.active_attack. Resolve
 -- and rotate that runtime active just like Commander and Windsong.
+--
+-- Loop rule per buff type (attack id):
+--   buffEnd = lastGroupCast + D
+--   cast ONE ready unit when tick() >= buffEnd - lead
+-- Each unit's readiness uses its own cooldown (SPD after Curse), so units with
+-- different Curse modifiers rotate correctly without overlapping buffs.
+function SendBuffActiveRequest(runtime, entry, now)
+    BUFF_ROTATION_RUNTIME.requestBusy = true
+    BUFF_ROTATION_RUNTIME.requestStarted = now
+    runtime.lastRequest[entry.model] = now
+    runtime.pending = { model = entry.model, time = now, before = entry.lastCast }
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local unit = entry.model
+            local stats = unit and unit:FindFirstChild("_stats")
+            if not unit or not unit.Parent or not stats then
+                error("Buff unit is no longer deployed")
+            end
+            local CollectionService = game:GetService("CollectionService")
+            if CollectionService:HasTag(unit, "dying_units") then
+                error("Buff unit is dying")
+            end
+            -- Same request path as the game's ActiveButton / Auto Active
+            -- (_use_active_endpoint -> EndpointsClient "use_active_attack").
+            -- Actives with _sets_aoe_point need { aoe_point = position }.
+            local attack = GetAttacksData()[runtime.attackId]
+            local param = nil
+            if type(attack) == "table" and attack._sets_aoe_point then
+                local pos = GetPlacedBuffUnitPosition(unit)
+                if not pos and unit:FindFirstChild("HumanoidRootPart") then
+                    pos = unit.HumanoidRootPart.Position
+                end
+                param = pos and { aoe_point = pos } or nil
+            end
+            if param then
+                InvokeEndpoint("use_active_attack", unit, param)
+            else
+                InvokeEndpoint("use_active_attack", unit)
+            end
+            if not entry.hasLiveCast then
+                -- No replicated last_active_cast: track the cast ourselves.
+                BUFF_ROTATION_RUNTIME.ownCast[unit] = tick()
+            end
+        end)
+        if not ok then
+            warn("[OctoputHub] Buff request failed: " .. tostring(err))
+            if runtime.pending and runtime.pending.model == entry.model then
+                runtime.pending = nil
+            end
+        end
+        BUFF_ROTATION_RUNTIME.requestBusy = false
+    end)
+end
+
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -5153,122 +5418,150 @@ task.spawn(function()
             end
 
             local now = tick()
-            local liveGroups, passiveElfyCount = GetBuffRotationGroups()
+            if BUFF_ROTATION_RUNTIME.requestBusy
+                and now - (BUFF_ROTATION_RUNTIME.requestStarted or 0) > BUFF_ROTATION_REQUEST_TIMEOUT then
+                -- A request that never returned must not block every buff group.
+                BUFF_ROTATION_RUNTIME.requestBusy = false
+            end
+
+            local liveGroups, elfyInfo = GetBuffRotationGroups(now)
             local nextRuntimeGroups = {}
             local statusParts = {}
             local hasActionableUnits = false
 
+            local ordered = {}
             for attackId, group in pairs(liveGroups) do
                 if group and #group.units > 0 then
-                    hasActionableUnits = true
-                    local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
-                        or { seenCast = {}, pending = {}, lastRequest = {} }
-                    local liveSet = {}
-                    local ready = {}
+                    table.insert(ordered, group)
+                end
+            end
 
+            for _, group in ipairs(ordered) do
+                local attackId = group.attackId
+                hasActionableUnits = true
+                local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
+                    or { attackId = attackId, lastRequest = {}, pending = nil }
+                runtime.attackId = attackId
+
+                local liveSet = {}
+                local groupLastCast = 0
+                for _, entry in ipairs(group.units) do
+                    liveSet[entry.model] = true
+                    if entry.lastCast <= now + 1 and entry.lastCast > groupLastCast then
+                        groupLastCast = entry.lastCast
+                    end
+                end
+                for unit in pairs(runtime.lastRequest) do
+                    if not liveSet[unit] then
+                        runtime.lastRequest[unit] = nil
+                    end
+                end
+
+                -- Resolve the outstanding request: confirmed when the unit's
+                -- last_active_cast moves, dropped when it timed out.
+                local pending = runtime.pending
+                if pending then
+                    local pendingEntry = nil
                     for _, entry in ipairs(group.units) do
-                        local unit = entry.model
-                        liveSet[unit] = true
-                        local seen = runtime.seenCast[unit]
-                        if seen == nil then
-                            runtime.seenCast[unit] = entry.lastCast
-                        elseif entry.lastCast > seen + 0.05 then
-                            runtime.seenCast[unit] = entry.lastCast
-                            runtime.pending[unit] = nil
-                        end
-
-                        local pending = runtime.pending[unit]
-                        if pending then
-                            if entry.lastCast > (pending.before or 0) + 0.05 then
-                                runtime.pending[unit] = nil
-                                pending = nil
-                            elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
-                                -- The request did not produce a cast. Clear it and
-                                -- retry on the next eligible scan, not after a full
-                                -- rotation interval.
-                                runtime.pending[unit] = nil
-                                pending = nil
-                            end
-                        end
-
-                        local stats = unit and unit:FindFirstChild("_stats")
-                        local cooldownBusy, cooldownReady, effectiveCooldown, remaining =
-                            GetActiveAttackCooldownState(unit, attackId, entry.cooldown, entry.lastCast, now)
-                        local lastRequest = runtime.lastRequest[unit] or -math.huge
-                        if not pending and not cooldownBusy and cooldownReady
-                            and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
-                            table.insert(ready, entry)
+                        if entry.model == pending.model then
+                            pendingEntry = entry
+                            break
                         end
                     end
+                    if not pendingEntry then
+                        runtime.pending = nil
+                    elseif pendingEntry.lastCast > (pending.before or 0) + 0.05 then
+                        runtime.pending = nil
+                    elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
+                        runtime.pending = nil
+                    end
+                    pending = runtime.pending
+                end
 
-                    for unit in pairs(runtime.seenCast) do
-                        if not liveSet[unit] then
-                            runtime.seenCast[unit] = nil
-                            runtime.pending[unit] = nil
-                            runtime.lastRequest[unit] = nil
+                local effectiveLastCast = groupLastCast
+                if pending then
+                    effectiveLastCast = math.max(effectiveLastCast, pending.time)
+                end
+                local buffEnd = effectiveLastCast + group.duration
+                local castAt = buffEnd - (group.lead or 0)
+
+                local ready = {}
+                local nextReadyIn = math.huge
+                for _, entry in ipairs(group.units) do
+                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                    local lastRequest = runtime.lastRequest[entry.model] or -math.huge
+                    if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                        table.insert(ready, entry)
+                        nextReadyIn = 0
+                    elseif not busy then
+                        nextReadyIn = math.min(nextReadyIn, remaining)
+                    end
+                end
+                -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
+                table.sort(ready, function(a, b)
+                    if math.abs(a.lastCast - b.lastCast) < 0.05 then
+                        return tostring(a.uuid) < tostring(b.uuid)
+                    end
+                    return a.lastCast < b.lastCast
+                end)
+
+                local curseMode = GetBuffRotationCurseMode(group)
+                local avgCooldown = group.averageCooldown < math.huge and group.averageCooldown or 0
+                local formulaText
+                if group.baseCooldown then
+                    formulaText = string.format("CD %.1fs (base %gs x%.2f)", avgCooldown, group.baseCooldown, group.averageMultiplier or 1)
+                else
+                    formulaText = string.format("CD %.1fs", avgCooldown)
+                end
+                local capacityText = group.sustainable and "Loop OK"
+                    or ("Need " .. tostring(group.requiredUnitsEstimate) .. " units")
+                local waitText
+                if pending then
+                    waitText = "casting..."
+                elseif now >= castAt then
+                    waitText = nextReadyIn < math.huge and string.format("gap, ready %.1fs", nextReadyIn) or "gap"
+                else
+                    waitText = string.format("next %.1fs", castAt - now)
+                end
+                table.insert(statusParts, string.format("%s: %d units | %s | %s | buff %gs | %s | %s",
+                    group.name, #group.units, curseMode, formulaText, group.duration, capacityText, waitText))
+
+                group.castAt = castAt
+                group.runtime = runtime
+                group.ready = ready
+                group.pending = pending
+                nextRuntimeGroups[attackId] = runtime
+            end
+
+            -- The game client serializes active requests (one at a time); keep
+            -- that behaviour and give the slot to the group that is most overdue.
+            if not BUFF_ROTATION_RUNTIME.requestBusy then
+                local best = nil
+                for _, group in ipairs(ordered) do
+                    if not group.pending and #group.ready > 0 and now >= group.castAt then
+                        if not best or group.castAt < best.castAt then
+                            best = group
                         end
                     end
-
-                    table.sort(ready, function(a, b)
-                        if math.abs(a.lastCast - b.lastCast) < 0.05 then
-                            return tostring(a.uuid) < tostring(b.uuid)
-                        end
-                        return a.lastCast < b.lastCast
-                    end)
-
-                    local curseMode = GetBuffRotationCurseMode(group)
-                    local capacityText = group.sustainable and "Loop capacity OK"
-                        or ("Need about " .. tostring(group.requiredUnitsEstimate) .. " units total")
-                    local intervalText = group.interval < math.huge and string.format("%.1fs avg", group.interval) or "N/A"
-                    local spdText = string.format("%.4f SPD/unit", tonumber(group.averageSPD) or 0)
-                    table.insert(statusParts, string.format("%s: %s | %d units | %s | %s | %s",
-                        group.name, curseMode, #group.units, spdText, intervalText, capacityText))
-
-                    -- The game client serializes active requests globally, while
-                    -- keeping the 0.5s guard per unit. Reproduce that behavior;
-                    -- each unit is still checked independently every 0.1s.
-                    if #ready > 0 and not BUFF_ROTATION_RUNTIME.requestBusy then
-                        local chosen = ready[1]
-                        BUFF_ROTATION_RUNTIME.requestBusy = true
-                        runtime.lastRequest[chosen.model] = now
-                        runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
-                        task.spawn(function()
-                            local ok, err = pcall(function()
-                                local unit = chosen.model
-                                local stats = unit and unit:FindFirstChild("_stats")
-                                if not unit or not unit.Parent or not stats then
-                                    error("Buff unit is no longer deployed")
-                                end
-                                local CollectionService = game:GetService("CollectionService")
-                                if CollectionService:HasTag(unit, "dying_units") then
-                                    error("Buff unit is dying")
-                                end
-                                -- This is the same request path used by the game's
-                                -- Auto Active worker (v_u_12 -> EndpointsClient).
-                                InvokeEndpoint("use_active_attack", unit)
-                            end)
-                            if not ok then
-                                warn("[OctoputHub] Buff request failed: " .. tostring(err))
-                                runtime.pending[chosen.model] = nil
-                            end
-                            BUFF_ROTATION_RUNTIME.requestBusy = false
-                        end)
-                    end
-
-                    nextRuntimeGroups[attackId] = runtime
+                end
+                if best then
+                    SendBuffActiveRequest(best.runtime, best.ready[1], now)
                 end
             end
 
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
+            local elfySuffix = ""
+            if elfyInfo.withoutActive > 0 then
+                elfySuffix = string.format(" | Elfy x%d has no active (needs Elfy (Sylph) evolved)", elfyInfo.withoutActive)
+            end
             if not hasActionableUnits then
-                if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy detected, waiting for its live Verdant Enchantment active/cooldown stats...", Color3.fromRGB(255, 190, 100))
+                if elfyInfo.withoutActive > 0 then
+                    SetBuffRotationStatus("Auto Buff: Elfy detected, waiting for its live Verdant Enchantment active..." .. elfySuffix, Color3.fromRGB(255, 190, 100))
                 else
-                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong / Elfy active buff units detected.", Color3.fromRGB(160, 160, 180))
+                    SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong / Elfy (Sylph) buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
             else
-                local suffix = passiveElfyCount > 0 and " | Elfy detected" or ""
-                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
+                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. elfySuffix, Color3.fromRGB(100, 220, 160))
             end
         end)
         if not rotationOk then
