@@ -2024,36 +2024,67 @@ function ReadPlayerLevel()
 end
 
 function ReadMatchUnitLines()
+    -- Keep the webhook compact: one row per unit type, using the highest
+    -- takedown value reached by a single placed copy of that unit.
+    -- Do not add together every duplicate unit placed on the map.
     local units = GetPlayerUnits()
-    local lines = {}
+    local grouped = {}
+
     for _, unit in ipairs(units) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
             local idValue = stats:FindFirstChild("id")
             local unitId = idValue and tostring(idValue.Value) or unit.Name
             local def = LookupUnitData(unitId)
-            local displayName = (def and def.name) or unitId
+            local displayName = tostring((def and def.name) or unitId)
             local takedownValue = stats:FindFirstChild("takedown_count")
-            local damageValue = stats:FindFirstChild("total_damage")
-            local upgradeValue = stats:FindFirstChild("upgrade")
-            local maxUpgrade = stats:FindFirstChild("max_upgrade")
             local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
-            local damage = damageValue and tonumber(damageValue.Value) or 0
-            local upgradeText = ""
-            if upgradeValue then
-                upgradeText = " · Upg " .. tostring(upgradeValue.Value)
-                if maxUpgrade then upgradeText = upgradeText .. "/" .. tostring(maxUpgrade.Value) end
+            local key = NormalizeName(unitId)
+            local entry = grouped[key]
+
+            if not entry then
+                entry = { name = displayName, takedowns = takedowns }
+                grouped[key] = entry
+            elseif takedowns > entry.takedowns then
+                entry.takedowns = takedowns
             end
-            table.insert(lines, string.format("• **%s** — Takedowns: **%s** · DMG: **%s**%s",
-                tostring(displayName), FormatNumber(takedowns), FormatCompact(damage), upgradeText))
         end
     end
-    table.sort(lines)
-    if #lines == 0 then return "No placed unit stats found" end
-    return table.concat(lines, "\n")
+
+    local entries = {}
+    for _, entry in pairs(grouped) do
+        table.insert(entries, string.format("• **%s** — Takedowns: **%s**",
+            entry.name, FormatNumber(entry.takedowns)))
+    end
+    table.sort(entries)
+
+    if #entries == 0 then return "No placed unit stats found" end
+    return table.concat(entries, "\n")
 end
 
-function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable)
+function ResolveWebhookOutcome(resultDetails, data)
+    -- game.lua ResultsUI.show_results() sets Holder.Title.Text to
+    -- "VICTORY!!!" or "DEFEAT". Prefer that authoritative visible result.
+    local title = string.upper(tostring(resultDetails and resultDetails.result or ""))
+    if title:find("VICTORY", 1, true) then
+        return "Victory"
+    elseif title:find("DEFEAT", 1, true) then
+        return "Defeat"
+    end
+
+    -- Fallback for modes where ResultsUI has not populated its title yet.
+    if data then
+        for _, flagName in ipairs({"Won", "Victory", "GameWon"}) do
+            local flag = data:FindFirstChild(flagName)
+            if flag and flag:IsA("ValueBase") and type(flag.Value) == "boolean" then
+                return flag.Value and "Victory" or "Defeat"
+            end
+        end
+    end
+    return "Ended"
+end
+
+function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable, unitLinesSnapshot)
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
@@ -2064,12 +2095,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     -- Let reward/stat updates settle, while keeping this match's baseline local.
     task.wait(2)
     local data = workspace:FindFirstChild("_DATA")
-    local result = "Ended"
+    local resultDetails = GetResultDetails()
+    local outcome = ResolveWebhookOutcome(resultDetails, data)
+    local result = outcome
     if data then
-        local won = data:FindFirstChild("Won") or data:FindFirstChild("Victory") or data:FindFirstChild("GameWon")
-        if won then
-            result = (won.Value == true) and "Victory" or "Defeat"
-        end
         local wave = data:FindFirstChild("Wave") or data:FindFirstChild("CurrentWave")
         if wave then
             result = result .. " | Wave " .. tostring(wave.Value)
@@ -2079,7 +2108,6 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local currentCurrencies = ReadPlayerCurrencies()
     local before = currencyBaseline or currentCurrencies
     local currencyText = BuildCurrencyLines(before, currentCurrencies)
-    local resultDetails = GetResultDetails()
     local resourceRewards = ReadResultResourceRewards()
     local resourceText = BuildResourceRewardLines(resourceRewards)
     local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
@@ -2090,18 +2118,17 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         secretRewardText = "Inventory snapshot unavailable; Secret rewards could not be verified"
     end
     local level = resultDetails.level or "Unknown stage"
-    if resultDetails.result and resultDetails.result ~= "" then
-        result = resultDetails.result .. " | " .. result
-    end
 
-    local unitLines = ReadMatchUnitLines()
+    local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
     local playerStatsText = BuildPlayerStatsText(currentCurrencies)
     local playerLevel = ReadPlayerLevel()
     local xp = currentCurrencies.XP or 0
     local matchTime = resultDetails.Timer or "Unknown"
     local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
     local stageText = tostring(level)
-    local matchResultText = result .. " — " .. tostring(matchTime)
+    local outcomeLabel = outcome == "Victory" and "🟩 **VICTORY**"
+        or (outcome == "Defeat" and "🟥 **DEFEAT**" or "⚪ **ENDED**")
+    local matchResultText = outcomeLabel .. " — " .. tostring(matchTime)
         .. " — Wave " .. tostring(waveText) .. " — " .. stageText
 
     local function LimitEmbedText(value, limit)
@@ -2118,9 +2145,11 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
-            title = "Anime Adventures",
+            title = outcome == "Victory" and "Anime Adventures — 🏆 VICTORY"
+                or (outcome == "Defeat" and "Anime Adventures — DEFEAT" or "Anime Adventures — MATCH ENDED"),
             description = LimitEmbedText(description, 2400),
-            color = secretRewardText:find("✨", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
+            color = outcome == "Victory" and 5763719
+                or (outcome == "Defeat" and 15548997 or 9807270),
             image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
             fields = {{
                 name = "🚨 SECRET REWARDS 🚨",
@@ -4340,6 +4369,7 @@ webhookDataFolder = nil
 webhookCurrencyBefore = nil
 webhookSecretRewardBefore = nil
 webhookSecretRewardBaselineAvailable = false
+webhookUnitLinesSnapshot = nil
 
 task.spawn(function()
     while true do
@@ -4373,11 +4403,15 @@ task.spawn(function()
                     webhookEndDetected = false
                     webhookSent = false
                     webhookRetryAt = 0
+                    webhookUnitLinesSnapshot = nil
                 end
             end
 
             local hasEnded = finished or (resultsVisible and webhookGameWasActive)
             if hasEnded and webhookGameWasActive and not webhookEndDetected then
+                -- Capture each unit type's final per-instance takedown while the
+                -- match units still exist; ResultsUI may remain open after cleanup.
+                webhookUnitLinesSnapshot = ReadMatchUnitLines()
                 webhookEndDetected = true
                 webhookGameWasActive = false
             end
@@ -4388,8 +4422,9 @@ task.spawn(function()
                 local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
                 local secretBaseline = webhookSecretRewardBefore
                 local secretAvailable = webhookSecretRewardBaselineAvailable
+                local unitLinesSnapshot = webhookUnitLinesSnapshot
                 task.spawn(function()
-                    local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable)
+                    local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
                     webhookSending = false
                     if callOk and sendResult == true then
                         webhookSent = true
