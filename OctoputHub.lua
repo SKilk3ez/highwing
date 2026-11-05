@@ -46,6 +46,120 @@ HubScale.Name = "HubScale"
 HubScale.Scale = 1
 HubScale.Parent = MainFrame
 
+-- Mobile-friendly floating launcher. The image is cached locally through the executor
+-- because Roblox ImageLabel cannot display an arbitrary https URL directly.
+local FLOATING_LOGO_URL = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png"
+local FLOATING_LOGO_FILE = "OctoputHub/floating_logo.png"
+local FloatingButton = Instance.new("ImageButton")
+FloatingButton.Name = "FloatingOpenButton"
+FloatingButton.Size = UDim2.fromOffset(58, 58)
+FloatingButton.Position = UDim2.new(1, -78, 0.55, -29)
+FloatingButton.AnchorPoint = Vector2.new(0, 0)
+FloatingButton.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+FloatingButton.BackgroundTransparency = 0.08
+FloatingButton.BorderSizePixel = 0
+FloatingButton.AutoButtonColor = true
+FloatingButton.Active = true
+FloatingButton.Visible = true
+FloatingButton.ZIndex = 200
+FloatingButton.Image = ""
+FloatingButton.ScaleType = Enum.ScaleType.Fit
+FloatingButton.Parent = ScreenGui
+
+local FloatingCorner = Instance.new("UICorner")
+FloatingCorner.CornerRadius = UDim.new(0, 16)
+FloatingCorner.Parent = FloatingButton
+local FloatingStroke = Instance.new("UIStroke")
+FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
+FloatingStroke.Transparency = 0.2
+FloatingStroke.Thickness = 1.5
+FloatingStroke.Parent = FloatingButton
+local FloatingFallback = Instance.new("TextLabel")
+FloatingFallback.Name = "FallbackText"
+FloatingFallback.Size = UDim2.fromScale(1, 1)
+FloatingFallback.BackgroundTransparency = 1
+FloatingFallback.Text = "O"
+FloatingFallback.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloatingFallback.Font = Enum.Font.GothamBlack
+FloatingFallback.TextSize = 30
+FloatingFallback.ZIndex = 201
+FloatingFallback.Parent = FloatingButton
+
+-- Download/cache the GitHub image when the executor exposes file + custom-asset APIs.
+task.spawn(function()
+    local ok, asset = pcall(function()
+        local assetLoader = getcustomasset or getsynasset
+        if type(assetLoader) ~= "function" or type(writefile) ~= "function" then
+            error("Executor does not expose getcustomasset/getsynasset and writefile")
+        end
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("OctoputHub") then
+            pcall(makefolder, "OctoputHub")
+        end
+        local imageBytes = game:HttpGet(FLOATING_LOGO_URL)
+        assert(type(imageBytes) == "string" and #imageBytes > 0, "Logo download returned empty data")
+        writefile(FLOATING_LOGO_FILE, imageBytes)
+        return assetLoader(FLOATING_LOGO_FILE)
+    end)
+    if ok and type(asset) == "string" then
+        FloatingButton.Image = asset
+        FloatingFallback.Visible = false
+    else
+        warn("[OctoputHub] Floating logo could not load; using fallback icon. " .. tostring(asset))
+    end
+end)
+
+-- Drag with mouse or touch; tap/click toggles the hub window.
+local floatingDragging = false
+local floatingDragInput = nil
+local floatingDragStart = nil
+local floatingStartPosition = nil
+local floatingMoved = false
+local suppressFloatingClick = false
+FloatingButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        floatingDragging = true
+        floatingMoved = false
+        floatingDragStart = input.Position
+        floatingStartPosition = FloatingButton.Position
+        floatingDragInput = input.UserInputType == Enum.UserInputType.Touch and input or nil
+    end
+end)
+FloatingButton.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        floatingDragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if floatingDragging and floatingDragStart and (input.UserInputType == Enum.UserInputType.MouseMovement or input == floatingDragInput) then
+        local delta = input.Position - floatingDragStart
+        if math.abs(delta.X) > 5 or math.abs(delta.Y) > 5 then
+            floatingMoved = true
+        end
+        FloatingButton.Position = UDim2.new(
+            floatingStartPosition.X.Scale, floatingStartPosition.X.Offset + delta.X,
+            floatingStartPosition.Y.Scale, floatingStartPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if floatingDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+        floatingDragging = false
+        if floatingMoved then
+            suppressFloatingClick = true
+            task.delay(0.2, function() suppressFloatingClick = false end)
+        end
+        floatingDragStart = nil
+        floatingDragInput = nil
+    end
+end)
+FloatingButton.Activated:Connect(function()
+    if suppressFloatingClick then
+        suppressFloatingClick = false
+        return
+    end
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
 local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 10)
 MainCorner.Parent = MainFrame
