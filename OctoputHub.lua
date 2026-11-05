@@ -92,6 +92,59 @@ FloatingRainbow.Rotation = 0
 FloatingRainbow.Transparency = NumberSequence.new(1)
 FloatingRainbow.Parent = FloatingStroke
 
+-- Soft Mythic-style glow layers. These are isolated children of the floating
+-- launcher, so they follow its drag/press scale without touching other GUIs.
+-- The game source uses a private GUIAssets.EvolvedGlow template; its image asset
+-- is not exposed in robloxgame.lua, so these layered gradient strokes recreate
+-- the soft halo without depending on inaccessible game assets.
+local FloatingGlowLayers = {}
+local glowLayerSettings = {
+    { scale = 1.10, thickness = 3.5, transparency = 0.58, corner = 18 },
+    { scale = 1.20, thickness = 5.0, transparency = 0.76, corner = 20 },
+    { scale = 1.32, thickness = 6.5, transparency = 0.88, corner = 22 },
+}
+for index, settings in ipairs(glowLayerSettings) do
+    local glowFrame = Instance.new("Frame")
+    glowFrame.Name = "MythicGlowLayer" .. index
+    glowFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    glowFrame.Position = UDim2.fromScale(0.5, 0.5)
+    glowFrame.Size = UDim2.fromScale(settings.scale, settings.scale)
+    glowFrame.BackgroundTransparency = 1
+    glowFrame.BorderSizePixel = 0
+    glowFrame.Active = false
+    glowFrame.Selectable = false
+    glowFrame.ZIndex = FloatingButton.ZIndex
+    glowFrame.Parent = FloatingButton
+
+    local glowCorner = Instance.new("UICorner")
+    glowCorner.CornerRadius = UDim.new(0, settings.corner)
+    glowCorner.Parent = glowFrame
+
+    local glowStroke = Instance.new("UIStroke")
+    glowStroke.Name = "MythicGlowStroke"
+    glowStroke.Color = Color3.new(1, 1, 1)
+    glowStroke.Thickness = settings.thickness
+    glowStroke.Transparency = 1
+    glowStroke.Parent = glowFrame
+
+    local glowGradient = Instance.new("UIGradient")
+    glowGradient.Name = "MythicGlowGradient"
+    glowGradient.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0.00, Color3.fromRGB(255, 244, 102)),
+        ColorSequenceKeypoint.new(0.50, Color3.fromRGB(255, 119, 144)),
+        ColorSequenceKeypoint.new(1.00, Color3.fromRGB(90, 184, 255)),
+    })
+    glowGradient.Rotation = 45
+    glowGradient.Parent = glowStroke
+
+    table.insert(FloatingGlowLayers, {
+        frame = glowFrame,
+        stroke = glowStroke,
+        gradient = glowGradient,
+        targetTransparency = settings.transparency,
+    })
+end
+
 local FloatingButtonScale = Instance.new("UIScale")
 FloatingButtonScale.Name = "PressScale"
 FloatingButtonScale.Scale = 1
@@ -101,15 +154,26 @@ local floatingHovering = false
 local floatingPressTween = nil
 local floatingHoverTween = nil
 local floatingRainbowTween = nil
+local floatingGlowTweens = {}
+local floatingGlowRotationTweens = {}
 local function SetFloatingHover(isHovering)
     floatingHovering = isHovering
     if floatingHoverTween then floatingHoverTween:Cancel() end
-    floatingHoverTween = TweenService:Create(FloatingStroke, TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+    floatingHoverTween = TweenService:Create(FloatingStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
         Thickness = isHovering and 2.8 or 1.5,
         Transparency = isHovering and 0 or 0.2,
     })
     floatingHoverTween:Play()
     FloatingRainbow.Transparency = isHovering and NumberSequence.new(0) or NumberSequence.new(1)
+
+    for index, layer in ipairs(FloatingGlowLayers) do
+        if floatingGlowTweens[index] then floatingGlowTweens[index]:Cancel() end
+        floatingGlowTweens[index] = TweenService:Create(layer.stroke, TweenInfo.new(isHovering and 0.22 or 0.32, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Transparency = isHovering and layer.targetTransparency or 1,
+        })
+        floatingGlowTweens[index]:Play()
+    end
+
     if isHovering then
         if floatingRainbowTween then floatingRainbowTween:Cancel() end
         FloatingRainbow.Rotation = 0
@@ -117,9 +181,24 @@ local function SetFloatingHover(isHovering)
             Rotation = 360,
         })
         floatingRainbowTween:Play()
+        for index, layer in ipairs(FloatingGlowLayers) do
+            if floatingGlowRotationTweens[index] then floatingGlowRotationTweens[index]:Cancel() end
+            layer.gradient.Rotation = 45
+            floatingGlowRotationTweens[index] = TweenService:Create(layer.gradient, TweenInfo.new(2.4, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), {
+                Rotation = 405,
+            })
+            floatingGlowRotationTweens[index]:Play()
+        end
     else
         if floatingRainbowTween then floatingRainbowTween:Cancel(); floatingRainbowTween = nil end
         FloatingRainbow.Rotation = 0
+        for index, layer in ipairs(FloatingGlowLayers) do
+            if floatingGlowRotationTweens[index] then
+                floatingGlowRotationTweens[index]:Cancel()
+                floatingGlowRotationTweens[index] = nil
+            end
+            layer.gradient.Rotation = 45
+        end
     end
 end
 
@@ -149,6 +228,81 @@ FloatingFallback.TextSize = 30
 FloatingFallback.ZIndex = 201
 FloatingFallback.Parent = FloatingButton
 
+-- Match information panel for Blackscreen (reduce 3D render).
+-- Kept in this ScreenGui above the black overlay and isolated from the hub window.
+local MatchInfoPanel = Instance.new("Frame")
+MatchInfoPanel.Name = "BlackScreenMatchInfo"
+MatchInfoPanel.AnchorPoint = Vector2.new(0.5, 0.5)
+MatchInfoPanel.Position = UDim2.fromScale(0.5, 0.5)
+MatchInfoPanel.Size = UDim2.new(0.84, 0, 0, 286)
+local MatchPanelConstraint = Instance.new("UISizeConstraint")
+MatchPanelConstraint.MinSize = Vector2.new(280, 250)
+MatchPanelConstraint.MaxSize = Vector2.new(520, 286)
+MatchPanelConstraint.Parent = MatchInfoPanel
+MatchInfoPanel.BackgroundColor3 = Color3.fromRGB(12, 15, 24)
+MatchInfoPanel.BackgroundTransparency = 0.08
+MatchInfoPanel.BorderSizePixel = 0
+MatchInfoPanel.Visible = false
+MatchInfoPanel.ZIndex = 180
+MatchInfoPanel.Parent = ScreenGui
+local MatchPanelCorner = Instance.new("UICorner")
+MatchPanelCorner.CornerRadius = UDim.new(0, 18)
+MatchPanelCorner.Parent = MatchInfoPanel
+local MatchPanelStroke = Instance.new("UIStroke")
+MatchPanelStroke.Color = Color3.fromRGB(105, 125, 190)
+MatchPanelStroke.Thickness = 2
+MatchPanelStroke.Transparency = 0.12
+MatchPanelStroke.Parent = MatchInfoPanel
+
+local PromoLogo = Instance.new("ImageLabel")
+PromoLogo.Name = "PromoLogo"
+PromoLogo.Position = UDim2.fromOffset(18, 18)
+PromoLogo.Size = UDim2.fromOffset(82, 82)
+PromoLogo.BackgroundColor3 = Color3.fromRGB(25, 29, 43)
+PromoLogo.BackgroundTransparency = 0.05
+PromoLogo.BorderSizePixel = 0
+PromoLogo.ScaleType = Enum.ScaleType.Fit
+PromoLogo.ZIndex = 181
+PromoLogo.Parent = MatchInfoPanel
+local PromoLogoCorner = Instance.new("UICorner")
+PromoLogoCorner.CornerRadius = UDim.new(0, 14)
+PromoLogoCorner.Parent = PromoLogo
+local PromoLogoFallback = Instance.new("TextLabel")
+PromoLogoFallback.Size = UDim2.fromScale(1, 1)
+PromoLogoFallback.BackgroundTransparency = 1
+PromoLogoFallback.Text = "OCTOPUT HUB"
+PromoLogoFallback.TextColor3 = Color3.new(1, 1, 1)
+PromoLogoFallback.Font = Enum.Font.GothamBlack
+PromoLogoFallback.TextSize = 12
+PromoLogoFallback.ZIndex = 182
+PromoLogoFallback.Parent = PromoLogo
+
+local function MakeMatchLabel(name, position, size, text, textSize, color, font)
+    local label = Instance.new("TextLabel")
+    label.Name = name
+    label.Position = position
+    label.Size = size
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = color or Color3.fromRGB(235, 239, 255)
+    label.TextSize = textSize or 16
+    label.Font = font or Enum.Font.GothamMedium
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextYAlignment = Enum.TextYAlignment.Center
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.ZIndex = 181
+    label.Parent = MatchInfoPanel
+    return label
+end
+
+MakeMatchLabel("PromoTitle", UDim2.fromOffset(116, 18), UDim2.new(1, -134, 0, 30), "OCTOPUT HUB  |  LIVE MATCH", 19, Color3.fromRGB(255, 255, 255), Enum.Font.GothamBlack)
+local MatchStageLabel = MakeMatchLabel("Stage", UDim2.fromOffset(116, 53), UDim2.new(1, -134, 0, 25), "STAGE: Loading...", 15, Color3.fromRGB(190, 205, 255), Enum.Font.GothamBold)
+local MatchTimerLabel = MakeMatchLabel("ElapsedTime", UDim2.fromOffset(18, 119), UDim2.new(0.5, -25, 0, 32), "TIME  00:00:00", 21, Color3.fromRGB(120, 235, 180), Enum.Font.GothamBlack)
+local MatchWaveLabel = MakeMatchLabel("Wave", UDim2.new(0.5, 7, 0, 119), UDim2.new(0.5, -25, 0, 32), "WAVE  0", 21, Color3.fromRGB(255, 210, 120), Enum.Font.GothamBlack)
+local MatchStatsLabel = MakeMatchLabel("PlayerStats", UDim2.fromOffset(18, 166), UDim2.new(1, -36, 0, 98), "PLAYER STATS  |  Loading...", 15, Color3.fromRGB(225, 230, 245), Enum.Font.GothamMedium)
+MatchStatsLabel.TextYAlignment = Enum.TextYAlignment.Top
+MatchStatsLabel.TextWrapped = true
+
 -- Download/cache the GitHub image when the executor exposes file + custom-asset APIs.
 task.spawn(function()
     local ok, asset = pcall(function()
@@ -167,6 +321,8 @@ task.spawn(function()
     if ok and type(asset) == "string" then
         FloatingButton.Image = asset
         FloatingFallback.Visible = false
+        PromoLogo.Image = asset
+        PromoLogoFallback.Visible = false
     else
         warn("[OctoputHub] Floating logo could not load; using fallback icon. " .. tostring(asset))
     end
@@ -3673,6 +3829,75 @@ local function GetInGameCash()
     local resource = stats and stats:FindFirstChild("resource")
     return resource and tonumber(resource.Value) or nil
 end
+
+-- Live match information shown while Reduce 3D Render is active.
+local matchStartedAt = nil
+local lastMatchInfoRefresh = 0
+local function FormatElapsed(seconds)
+    seconds = math.max(0, math.floor(tonumber(seconds) or 0))
+    local hours = math.floor(seconds / 3600)
+    local minutes = math.floor((seconds % 3600) / 60)
+    local secs = seconds % 60
+    return string.format("%02d:%02d:%02d", hours, minutes, secs)
+end
+
+local function ReadCurrentStageName()
+    local results = playerGui:FindFirstChild("ResultsUI")
+    local holder = results and results:FindFirstChild("Holder")
+    local resultName = holder and holder:FindFirstChild("LevelName")
+    if resultName and resultName:IsA("TextLabel") and resultName.Text ~= "" then
+        return resultName.Text
+    end
+
+    local data = workspace:FindFirstChild("_DATA")
+    if data then
+        for _, name in ipairs({"LevelName", "StageName", "MapName", "Level", "Stage"}) do
+            local value = data:FindFirstChild(name)
+            if value and value:IsA("ValueBase") and tostring(value.Value) ~= "" then
+                return tostring(value.Value)
+            end
+        end
+    end
+    for _, name in ipairs({"_level_name", "_stage_name", "_map_name"}) do
+        local value = workspace:FindFirstChild(name)
+        if value and value:IsA("ValueBase") and tostring(value.Value) ~= "" then
+            return tostring(value.Value)
+        end
+    end
+    return "Unknown Stage"
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        task.wait(0.25)
+        local inMatch = workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
+        if inMatch then
+            if not matchStartedAt then matchStartedAt = os.clock() end
+        else
+            matchStartedAt = nil
+        end
+
+        local showPanel = State.BlackScreen == true and inMatch
+        MatchInfoPanel.Visible = showPanel
+        if showPanel and os.clock() - lastMatchInfoRefresh >= 0.5 then
+            lastMatchInfoRefresh = os.clock()
+            MatchTimerLabel.Text = "TIME  " .. FormatElapsed(matchStartedAt and (os.clock() - matchStartedAt) or 0)
+            MatchStageLabel.Text = "STAGE: " .. ReadCurrentStageName()
+            MatchWaveLabel.Text = "WAVE  " .. tostring(GetCurrentWave())
+
+            local currencies = ReadPlayerCurrencies()
+            local cash = GetInGameCash()
+            local statLines = {
+                "PLAYER: " .. tostring(player.DisplayName or player.Name),
+                "CASH: " .. (cash ~= nil and FormatCompact(cash) or "N/A"),
+                "GEMS: " .. FormatCompact(currencies.Gems or 0) .. "     GOLD: " .. FormatCompact(currencies.Gold or 0),
+                "SUMMER PEARLS: " .. FormatCompact(currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls or 0),
+                "XP: " .. FormatCompact(currencies.XP or 0) .. "     TROPHIES: " .. FormatCompact(currencies.Trophies or 0),
+            }
+            MatchStatsLabel.Text = table.concat(statLines, "\n")
+        end
+    end
+end)
 
 -- Cheapest next upgrade among farm units that still have farm upgrades pending.
 local function GetNextFarmUpgradeCost(myUnits)
