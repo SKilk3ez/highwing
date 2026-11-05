@@ -1017,10 +1017,12 @@ BUFF_ROTATION_ATTACKS = {
     ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical" },
     ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic" },
 }
-BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false }
+BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false, requestBusyAt = 0, recoveryCount = 0 }
 BUFF_ROTATION_CURSE_CACHE = {}
 BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
 BUFF_ROTATION_PENDING_TIMEOUT = 4.5
+BUFF_ROTATION_REQUEST_LOCK_TIMEOUT = 8.0
+BUFF_ROTATION_RECOVERY_BACKOFF = 1.25
 BUFF_ROTATION_SAFETY_MARGIN = 0.75
 
 function GetOwnedUnitRecordForPlacedUnit(unit)
@@ -1742,9 +1744,13 @@ function IsBuffUnitInfo(info)
     return type(data) == "table" and data._show_as_buff_unit == true
 end
 
-function GetBuffTypePlacementCFrame(info, placedUnits)
+function GetBuffTypePlacementCFrame(info, placedUnits, fallbackIndex)
     if not IsBuffUnitInfo(info) then return nil, nil end
 
+    -- Buff units are exempt from the Auto Play > Hybrid Units surface filters.
+    -- They may use either Ground or Hill so the same-type rotation cluster can
+    -- be formed even when Place on Ground / Place on Hill is disabled.
+    local kind = "hybrid"
     local targetId = NormalizeName(info.unitId)
     local anchor = nil
     local sameTypeCount = 0
@@ -1758,11 +1764,12 @@ function GetBuffTypePlacementCFrame(info, placedUnits)
         end
     end
 
-    -- The first copy keeps the existing placement behavior; later copies
-    -- search concentric rings around that type's first placed copy.
-    if not anchor then return nil, nil end
+    -- First copy: use the normal placement search, but allow both surfaces.
+    if not anchor then
+        return GetPlacementCFrame(fallbackIndex or 1, kind)
+    end
 
-    local kind = ResolvePlacementKind(info.unitId)
+    -- Later copies search concentric rings around that type's first placed copy.
     local anchorCF = anchor:GetPivot()
     local center = anchorCF.Position
     local spacing = 4.2
@@ -5025,16 +5032,29 @@ task.spawn(function()
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
                 BUFF_ROTATION_RUNTIME.groups = {}
                 BUFF_ROTATION_RUNTIME.requestBusy = false
+                BUFF_ROTATION_RUNTIME.requestBusyAt = 0
                 return
             end
             if IsInLobby() or not workspace:FindFirstChild("_UNITS") then
                 SetBuffRotationStatus("Auto Buff: Waiting for match...", Color3.fromRGB(160, 160, 180))
                 BUFF_ROTATION_RUNTIME.groups = {}
                 BUFF_ROTATION_RUNTIME.requestBusy = false
+                BUFF_ROTATION_RUNTIME.requestBusyAt = 0
                 return
             end
 
             local now = tick()
+            -- Watchdog: the game's active endpoint can yield. If one request
+            -- never returns, release the global client-side lock so other buff
+            -- units can continue to be evaluated and recovered.
+            if BUFF_ROTATION_RUNTIME.requestBusy
+                and BUFF_ROTATION_RUNTIME.requestBusyAt > 0
+                and now - BUFF_ROTATION_RUNTIME.requestBusyAt > BUFF_ROTATION_REQUEST_LOCK_TIMEOUT then
+                BUFF_ROTATION_RUNTIME.requestBusy = false
+                BUFF_ROTATION_RUNTIME.requestBusyAt = 0
+                BUFF_ROTATION_RUNTIME.recoveryCount = BUFF_ROTATION_RUNTIME.recoveryCount + 1
+                warn("[OctoputHub] Buff loop recovery: released stale active-request lock")
+            end
             local liveGroups, passiveElfyCount = GetBuffRotationGroups()
             local nextRuntimeGroups = {}
             local statusParts = {}
@@ -5048,7 +5068,7 @@ task.spawn(function()
                 if group and #group.units > 0 then
                     hasActionableUnits = true
                     local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
-                        or { seenCast = {}, pending = {}, lastRequest = {} }
+                        or { seenCast = {}, pending = {}, lastRequest = {}, retryAfter = {}, recovery = 0 }
                     local liveSet = {}
                     local ready = {}
 
@@ -5069,10 +5089,15 @@ task.spawn(function()
                                 runtime.pending[unit] = nil
                                 pending = nil
                             elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
-                                -- The request did not produce a cast. Clear it and
-                                -- retry on the next eligible scan, not after a full
-                                -- rotation interval.
+                                -- Placement timing/cooldown replication can lag the
+                                -- local rotation estimate. Drop only this unit's
+                                -- pending state, then briefly back off and rescan its
+                                -- live cooldown/last-cast values before retrying.
                                 runtime.pending[unit] = nil
+                                runtime.retryAfter[unit] = now + BUFF_ROTATION_RECOVERY_BACKOFF
+                                runtime.recovery = (runtime.recovery or 0) + 1
+                                BUFF_ROTATION_RUNTIME.recoveryCount = BUFF_ROTATION_RUNTIME.recoveryCount + 1
+                                warn("[OctoputHub] Buff loop recovery: resync " .. tostring(entry.uuid))
                                 pending = nil
                             end
                         end
@@ -5082,7 +5107,9 @@ task.spawn(function()
                         local busy = busyValue and busyValue.Value == true
                         local remaining = entry.cooldown - (now - entry.lastCast)
                         local lastRequest = runtime.lastRequest[unit] or -math.huge
+                        local retryAfter = runtime.retryAfter[unit] or 0
                         if not pending and not busy and remaining <= 0
+                            and now >= retryAfter
                             and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                             table.insert(ready, entry)
                         end
@@ -5093,6 +5120,7 @@ task.spawn(function()
                             runtime.seenCast[unit] = nil
                             runtime.pending[unit] = nil
                             runtime.lastRequest[unit] = nil
+                            runtime.retryAfter[unit] = nil
                         end
                     end
 
@@ -5116,6 +5144,7 @@ task.spawn(function()
                     if #ready > 0 and not BUFF_ROTATION_RUNTIME.requestBusy then
                         local chosen = ready[1]
                         BUFF_ROTATION_RUNTIME.requestBusy = true
+                        BUFF_ROTATION_RUNTIME.requestBusyAt = now
                         runtime.lastRequest[chosen.model] = now
                         runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
                         task.spawn(function()
@@ -5150,6 +5179,7 @@ task.spawn(function()
                                 runtime.pending[chosen.model] = nil
                             end
                             BUFF_ROTATION_RUNTIME.requestBusy = false
+                            BUFF_ROTATION_RUNTIME.requestBusyAt = 0
                         end)
                     end
 
@@ -5166,7 +5196,9 @@ task.spawn(function()
                 end
             else
                 local suffix = passiveElfyCount > 0 and " | Elfy waiting for live active_attack" or ""
-                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
+                local recoverySuffix = BUFF_ROTATION_RUNTIME.recoveryCount > 0
+                    and (" | Auto Recovery: " .. tostring(BUFF_ROTATION_RUNTIME.recoveryCount)) or ""
+                SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix .. recoverySuffix, Color3.fromRGB(100, 220, 160))
             end
         end)
         if not rotationOk then
@@ -5280,21 +5312,12 @@ task.spawn(function()
                         end
                         for _, chosen in ipairs(eligible) do
                             local placeIndex = #myUnits + math.random(1, 12)
-                            local cframe, kind = GetBuffTypePlacementCFrame(chosen, myUnits)
-                            if not cframe then
-                                -- First copy of a buff type, or no valid nearby
-                                -- cluster slot: retain the existing placement method
-                                -- for the first copy only. Existing groups do not
-                                -- scatter elsewhere when their local area is full.
-                                if not IsBuffUnitInfo(chosen) or not (function()
-                                    local wanted = NormalizeName(chosen.unitId)
-                                    for _, unit in ipairs(myUnits) do
-                                        if NormalizeName(GetRawUnitId(unit)) == wanted then return true end
-                                    end
-                                    return false
-                                end)() then
-                                    cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
-                                end
+                            local cframe, kind = GetBuffTypePlacementCFrame(chosen, myUnits, placeIndex)
+                            if not cframe and not IsBuffUnitInfo(chosen) then
+                                -- Non-buff units retain their original placement fallback.
+                                -- Buff units never fall back to the Hybrid Units surface
+                                -- filters; if their cluster has no valid slot, retry later.
+                                cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
                             end
                             if cframe then
                                 local countBefore = CountPlacedInfo(chosen)
