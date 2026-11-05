@@ -1087,6 +1087,34 @@ function GetUnitCurseCooldownInfo(unit)
     return hasCurse, reduction, true
 end
 
+BUFF_ROTATION_ATTACKS_REPLICATE = nil
+function GetActiveAttackCooldownState(unit, attackId, fallbackCooldown, lastCast, now)
+    -- Use the game's own helper so both per-unit cooldown and
+    -- AttacksReplicate.GLOBAL_ATTACK_COOLDOWNS are respected.
+    local service = BUFF_ROTATION_ATTACKS_REPLICATE
+    if not service then
+        local ok, loaded = pcall(function()
+            local Loader = require(ReplicatedStorage.src.Loader)
+            return Loader.load_client_service(game, "AttacksReplicate")
+        end)
+        if ok and type(loaded) == "table" then
+            service = loaded
+            BUFF_ROTATION_ATTACKS_REPLICATE = loaded
+        end
+    end
+    if service and type(service.get_current_active_attack_cooldown) == "function" then
+        local ok, busy, ready, cooldown, remaining = pcall(
+            service.get_current_active_attack_cooldown, unit, attackId
+        )
+        if ok then
+            return busy == true, ready == true, tonumber(cooldown), tonumber(remaining), true
+        end
+    end
+
+    local remaining = (tonumber(fallbackCooldown) or 60) - (now - (tonumber(lastCast) or 0))
+    return false, remaining <= 0, tonumber(fallbackCooldown), math.max(0, remaining), false
+end
+
 function GetBuffRotationGroups()
     local groups = {}
     local passiveElfyCount = 0
@@ -1703,8 +1731,150 @@ end
 -- Farm units can be ground or hill units depending on the game's unit data.
 -- If the unit database lookup misses an entry, try every valid placement surface
 -- instead of silently skipping the farm because the guessed surface was wrong.
+-- Buff units must stay together so their range-based buffs overlap.
+-- game.lua marks Commander, Windsong and Elfy (Sylph) with
+-- _show_as_buff_unit / _placement_highlight_buffed_units.
+function IsBuffUnitInfo(info)
+    if type(info) ~= "table" then return false end
+    local data = LookupUnitData(info.unitId or info.name)
+    return type(data) == "table"
+        and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true)
+end
+
+function IsPlacedBuffUnit(unit)
+    if not unit then return false end
+    local data = LookupUnitData(GetRawUnitId(unit))
+    return type(data) == "table"
+        and (data._show_as_buff_unit == true or data._placement_highlight_buffed_units == true)
+end
+
+function GetPlacedBuffUnitPosition(unit)
+    local stats = unit and unit:FindFirstChild("_stats")
+    local formation = stats and stats:FindFirstChild("formation_goal")
+    if formation and formation.Value then
+        local ok, pos = pcall(function() return formation.Value.Position end)
+        if ok and pos then return pos end
+    end
+    local root = stats and stats:FindFirstChild("_root")
+    if root and root.Value then
+        local ok, pos = pcall(function() return root.Value.Position end)
+        if ok and pos then return pos end
+    end
+    local ok, pivot = pcall(function() return unit:GetPivot().Position end)
+    return ok and pivot or nil
+end
+
+function GetBuffPlacementCFrame(index, info, kind)
+    kind = kind or ResolvePlacementKind(info and info.unitId)
+    local buffPositions = {}
+    for _, placed in ipairs(GetPlayerUnits()) do
+        if IsPlacedBuffUnit(placed) then
+            local pos = GetPlacedBuffUnitPosition(placed)
+            if pos then table.insert(buffPositions, pos) end
+        end
+    end
+
+    -- Use the densest existing buff cluster rather than averaging distant
+    -- legacy placements together. For the first buff unit, use the configured
+    -- path percentage as the formation anchor.
+    local center, look
+    if #buffPositions > 0 then
+        local seed, bestNeighbors = buffPositions[1], -1
+        for _, candidateSeed in ipairs(buffPositions) do
+            local neighbors = 0
+            for _, otherPos in ipairs(buffPositions) do
+                if (candidateSeed - otherPos).Magnitude <= 18 then
+                    neighbors = neighbors + 1
+                end
+            end
+            if neighbors > bestNeighbors then
+                seed, bestNeighbors = candidateSeed, neighbors
+            end
+        end
+        local clusterPositions = {}
+        center = Vector3.new(0, 0, 0)
+        for _, pos in ipairs(buffPositions) do
+            if (seed - pos).Magnitude <= 18 then
+                table.insert(clusterPositions, pos)
+                center = center + pos
+            end
+        end
+        if #clusterPositions == 0 then
+            clusterPositions = { seed }
+            center = seed
+        else
+            center = center / #clusterPositions
+        end
+        buffPositions = clusterPositions
+        local base = GetPlacementCFrame(1, kind)
+        look = base and base.LookVector or Vector3.new(0, 0, -1)
+    else
+        local base = GetPlacementCFrame(1, kind)
+        if not base then return nil end
+        center = base.Position
+        look = base.LookVector
+    end
+
+    local flatLook = Vector3.new(look.X, 0, look.Z)
+    if flatLook.Magnitude < 0.01 then
+        flatLook = Vector3.new(0, 0, -1)
+    else
+        flatLook = flatLook.Unit
+    end
+    local right = flatLook:Cross(Vector3.new(0, 1, 0))
+    if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+
+    -- 3.8 studs keeps the game's 3.4-stud minimum spacing. The center plus
+    -- two hex rings fit 19 buff units; a third ring is only a fallback when
+    -- the nearby slots are blocked by other placed units.
+    local spacing = 3.8
+    local offsets = { Vector2.new(0, 0) }
+    for ring = 1, 3 do
+        local ringOffsets = {}
+        for q = -ring, ring do
+            for r = -ring, ring do
+                local h = -q - r
+                if math.max(math.abs(q), math.abs(r), math.abs(h)) == ring then
+                    table.insert(ringOffsets, Vector2.new(
+                        spacing * (q + r * 0.5),
+                        spacing * (r * 0.8660254038)
+                    ))
+                end
+            end
+        end
+        table.sort(ringOffsets, function(a, b)
+            return math.atan2(a.Y, a.X) < math.atan2(b.Y, b.X)
+        end)
+        for _, offset in ipairs(ringOffsets) do table.insert(offsets, offset) end
+    end
+
+    local bestCFrame, bestScore = nil, math.huge
+    for _, offset in ipairs(offsets) do
+        local candidate = center + right * offset.X + flatLook * offset.Y
+        local finalPos = PlacementIsClear(candidate, kind)
+        if finalPos then
+            local maxBuffDistance = 0
+            for _, existingPos in ipairs(buffPositions) do
+                maxBuffDistance = math.max(maxBuffDistance, (finalPos - existingPos).Magnitude)
+            end
+            -- Prefer the closest free slot to the formation, and avoid allowing
+            -- the cluster to spread unnecessarily far apart.
+            local score = offset.Magnitude + maxBuffDistance * 0.35
+            if maxBuffDistance <= 18.5 and score < bestScore then
+                bestScore = score
+                bestCFrame = CFrame.new(finalPos, finalPos + flatLook)
+            end
+        end
+    end
+    return bestCFrame
+end
+
 function GetPlacementCFrameForInfo(index, info)
     local primary = ResolvePlacementKind(info and info.unitId)
+    if IsBuffUnitInfo(info) then
+        local clustered = GetBuffPlacementCFrame(index, info, primary)
+        if clustered then return clustered, primary end
+    end
     local kinds = { primary }
     if IsFarmInfo(info) then
         for _, candidate in ipairs({ "ground", "hill", "hybrid" }) do
@@ -3302,7 +3472,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Commander / Windsong: automatically casts Active when ready. Elfy (Sylph): passive range aura; placing it automatically marks units in range, so it has no Active button to press.", 6, 42)
+CreateHint(AutoPlayPage, "Commander / Windsong: Active rotation checks the game's per-unit + global cooldown. Commander, Windsong and Elfy (Sylph) are auto-placed in one nearby buff cluster. Elfy (Sylph) has no active_attack in game.lua; the game marks its buff range on placement.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -4949,13 +5119,11 @@ task.spawn(function()
 end)
 
 -- Adaptive Commander / Windsong Active rotation.
--- Elfy (Sylph) is intentionally excluded: game.lua defines it as a passive
--- placement/range aura (_placement_highlight_buffed_units), with no active_attack.
--- This mirrors Anime Adventures' native Auto Active loop from game.lua:
--- scan every deployed unit independently, and cast as soon as that unit's
--- active_attack_cooldown has elapsed. Do not gate casts behind cooldown/count
--- intervals; that artificial group timer was the reason non-Curse rotations
--- could stall even while another deployed unit was ready.
+-- Use AttacksReplicate.get_current_active_attack_cooldown so the game's own
+-- per-unit cooldown AND shared GLOBAL_ATTACK_COOLDOWNS are checked before
+-- requesting an Active. Elfy (Sylph) has no active_attack in game.lua; it is
+-- included in clustered buff placement and its buff-range highlighting is
+-- automatic when placed.
 task.spawn(function()
     while true do
         task.wait(0.1)
@@ -5015,10 +5183,11 @@ task.spawn(function()
 
                         local stats = unit and unit:FindFirstChild("_stats")
                         local busyValue = stats and stats:FindFirstChild("active_queued_or_using")
-                        local busy = busyValue and busyValue.Value == true
-                        local remaining = entry.cooldown - (now - entry.lastCast)
+                        local unitBusy = busyValue and busyValue.Value == true
+                        local globalBusy, cooldownReady, effectiveCooldown, remaining =
+                            GetActiveAttackCooldownState(unit, attackId, entry.cooldown, entry.lastCast, now)
                         local lastRequest = runtime.lastRequest[unit] or -math.huge
-                        if not pending and not busy and remaining <= 0
+                        if not pending and not unitBusy and not globalBusy and cooldownReady
                             and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                             table.insert(ready, entry)
                         end
@@ -5073,12 +5242,12 @@ task.spawn(function()
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
             if not hasActionableUnits then
                 if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) passive aura detected (no button; applies automatically in range). Commander / Windsong use Active rotation.", Color3.fromRGB(255, 190, 100))
+                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) has no Active skill in game.lua; the game marks its buff range on placement. Auto Place keeps buff units clustered.", Color3.fromRGB(255, 190, 100))
                 else
                     SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
             else
-                local suffix = passiveElfyCount > 0 and " | Elfy (Sylph): passive aura, auto in range" or ""
+                local suffix = passiveElfyCount > 0 and " | Elfy (Sylph): no Active skill; range marker on placement" or ""
                 SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
             end
         end)
