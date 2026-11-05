@@ -74,6 +74,50 @@ FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
 FloatingStroke.Transparency = 0.2
 FloatingStroke.Thickness = 1.5
 FloatingStroke.Parent = FloatingButton
+
+-- Mythic-style aura: layered soft borders with the same animated rainbow treatment
+-- used by the game's Mythic GUI gradient effects. The aura is only shown on hover.
+local FloatingAuraLayers = {}
+local MythicColorSequence = ColorSequence.new({
+    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(75, 235, 255)),
+    ColorSequenceKeypoint.new(0.20, Color3.fromRGB(90, 125, 255)),
+    ColorSequenceKeypoint.new(0.42, Color3.fromRGB(190, 90, 255)),
+    ColorSequenceKeypoint.new(0.62, Color3.fromRGB(255, 95, 190)),
+    ColorSequenceKeypoint.new(0.82, Color3.fromRGB(255, 190, 90)),
+    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(75, 235, 255)),
+})
+for index = 1, 3 do
+    local aura = Instance.new("Frame")
+    aura.Name = "MythicAura" .. index
+    aura.AnchorPoint = Vector2.new(0.5, 0.5)
+    aura.Position = UDim2.fromScale(0.5, 0.5)
+    aura.Size = UDim2.new(1, 8 + index * 7, 1, 8 + index * 7)
+    aura.BackgroundTransparency = 1
+    aura.BorderSizePixel = 0
+    aura.Visible = false
+    aura.ZIndex = FloatingButton.ZIndex - 1
+    aura.Parent = FloatingButton
+    local auraCorner = Instance.new("UICorner")
+    auraCorner.CornerRadius = UDim.new(0, 19 + index * 3)
+    auraCorner.Parent = aura
+    local auraStroke = Instance.new("UIStroke")
+    auraStroke.Name = "AuraStroke"
+    auraStroke.Thickness = index == 1 and 3 or (index == 2 and 5 or 7)
+    auraStroke.Transparency = index == 1 and 0.08 or (index == 2 and 0.32 or 0.58)
+    auraStroke.Parent = aura
+    local auraGradient = Instance.new("UIGradient")
+    auraGradient.Color = MythicColorSequence
+    auraGradient.Rotation = 0
+    auraGradient.Parent = auraStroke
+    table.insert(FloatingAuraLayers, { frame = aura, stroke = auraStroke, gradient = auraGradient })
+end
+local FloatingButtonScale = Instance.new("UIScale")
+FloatingButtonScale.Name = "PressScale"
+FloatingButtonScale.Scale = 1
+FloatingButtonScale.Parent = FloatingButton
+local FloatingStrokeGradient = Instance.new("UIGradient")
+FloatingStrokeGradient.Color = MythicColorSequence
+FloatingStrokeGradient.Parent = FloatingStroke
 local FloatingFallback = Instance.new("TextLabel")
 FloatingFallback.Name = "FallbackText"
 FloatingFallback.Size = UDim2.fromScale(1, 1)
@@ -250,11 +294,73 @@ UserInputService.InputEnded:Connect(function(input)
         floatingDragInput = nil
     end
 end)
+local floatingHover = false
+local floatingStrokeRotationTween
+local function SetFloatingAura(visible)
+    floatingHover = visible
+    for _, layer in ipairs(FloatingAuraLayers) do
+        if visible then layer.frame.Visible = true end
+        TweenService:Create(layer.stroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+            Transparency = visible and (layer == FloatingAuraLayers[1] and 0.08 or (layer == FloatingAuraLayers[2] and 0.32 or 0.58)) or 1
+        }):Play()
+    end
+    TweenService:Create(FloatingStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Transparency = visible and 0 or 0.2,
+        Thickness = visible and 2.2 or 1.5
+    }):Play()
+    if visible then
+        if floatingStrokeRotationTween then floatingStrokeRotationTween:Cancel() end
+        FloatingStrokeGradient.Rotation = 0
+        floatingStrokeRotationTween = TweenService:Create(FloatingStrokeGradient, TweenInfo.new(3.8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 })
+        floatingStrokeRotationTween:Play()
+        for _, layer in ipairs(FloatingAuraLayers) do
+            if layer.rotationTween then layer.rotationTween:Cancel() end
+            layer.gradient.Rotation = 0
+            local rotationTween = TweenService:Create(layer.gradient, TweenInfo.new(3.2 + (#FloatingAuraLayers * 0.25), Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 })
+            rotationTween:Play()
+            layer.rotationTween = rotationTween
+        end
+    else
+        if floatingStrokeRotationTween then floatingStrokeRotationTween:Cancel(); floatingStrokeRotationTween = nil end
+        for _, layer in ipairs(FloatingAuraLayers) do
+            if layer.rotationTween then layer.rotationTween:Cancel(); layer.rotationTween = nil end
+        end
+        task.delay(0.2, function()
+            if not floatingHover then
+                for _, layer in ipairs(FloatingAuraLayers) do layer.frame.Visible = false end
+            end
+        end)
+    end
+end
+
+FloatingButton.MouseEnter:Connect(function()
+    SetFloatingAura(true)
+end)
+FloatingButton.MouseLeave:Connect(function()
+    SetFloatingAura(false)
+end)
+FloatingButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        TweenService:Create(FloatingButtonScale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.9 }):Play()
+    end
+end)
+FloatingButton.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        TweenService:Create(FloatingButtonScale, TweenInfo.new(0.13, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+    end
+end)
 FloatingButton.Activated:Connect(function()
     if suppressFloatingClick then
         suppressFloatingClick = false
         return
     end
+    -- A short physical press/release animation, then toggle the hub.
+    TweenService:Create(FloatingButtonScale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.9 }):Play()
+    task.delay(0.08, function()
+        if FloatingButton and FloatingButton.Parent then
+            TweenService:Create(FloatingButtonScale, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
+        end
+    end)
     MainFrame.Visible = not MainFrame.Visible
 end)
 
@@ -1950,7 +2056,6 @@ local function SendEndWebhook(currencyBaseline)
     local matchTime = resultDetails.Timer or "Unknown"
     local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
     local stageText = tostring(level)
-    local rewardText = BuildRewardText(before, currentCurrencies)
     local matchResultText = (resultDetails.result and resultDetails.result ~= "" and resultDetails.result .. " — " or "")
         .. result .. " — " .. tostring(matchTime) .. " — Wave " .. tostring(waveText) .. " — " .. stageText
 
@@ -1959,9 +2064,9 @@ local function SendEndWebhook(currencyBaseline)
         embeds = {{
             title = "Anime Adventures",
             description = string.format(
-                "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**🎁 Rewards**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
+                "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
                 player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
-                playerStatsText, rewardText, unitLines, matchResultText),
+                playerStatsText, unitLines, matchResultText),
             color = secretRewardText:find("✨", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
             image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
             fields = {{
@@ -1969,7 +2074,7 @@ local function SendEndWebhook(currencyBaseline)
                 value = secretRewardText:sub(1, 1024),
                 inline = false,
             }, {
-                name = "📦 Resource Rewards",
+                name = "🎁 Rewards",
                 value = resourceText:sub(1, 1024),
                 inline = false,
             }, {
