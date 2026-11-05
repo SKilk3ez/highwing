@@ -46,6 +46,120 @@ HubScale.Name = "HubScale"
 HubScale.Scale = 1
 HubScale.Parent = MainFrame
 
+-- Mobile-friendly floating launcher. The image is cached locally through the executor
+-- because Roblox ImageLabel cannot display an arbitrary https URL directly.
+local FLOATING_LOGO_URL = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png"
+local FLOATING_LOGO_FILE = "OctoputHub/floating_logo.png"
+local FloatingButton = Instance.new("ImageButton")
+FloatingButton.Name = "FloatingOpenButton"
+FloatingButton.Size = UDim2.fromOffset(58, 58)
+FloatingButton.Position = UDim2.new(1, -78, 0.55, -29)
+FloatingButton.AnchorPoint = Vector2.new(0, 0)
+FloatingButton.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+FloatingButton.BackgroundTransparency = 0.08
+FloatingButton.BorderSizePixel = 0
+FloatingButton.AutoButtonColor = true
+FloatingButton.Active = true
+FloatingButton.Visible = true
+FloatingButton.ZIndex = 200
+FloatingButton.Image = ""
+FloatingButton.ScaleType = Enum.ScaleType.Fit
+FloatingButton.Parent = ScreenGui
+
+local FloatingCorner = Instance.new("UICorner")
+FloatingCorner.CornerRadius = UDim.new(0, 16)
+FloatingCorner.Parent = FloatingButton
+local FloatingStroke = Instance.new("UIStroke")
+FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
+FloatingStroke.Transparency = 0.2
+FloatingStroke.Thickness = 1.5
+FloatingStroke.Parent = FloatingButton
+local FloatingFallback = Instance.new("TextLabel")
+FloatingFallback.Name = "FallbackText"
+FloatingFallback.Size = UDim2.fromScale(1, 1)
+FloatingFallback.BackgroundTransparency = 1
+FloatingFallback.Text = "O"
+FloatingFallback.TextColor3 = Color3.fromRGB(255, 255, 255)
+FloatingFallback.Font = Enum.Font.GothamBlack
+FloatingFallback.TextSize = 30
+FloatingFallback.ZIndex = 201
+FloatingFallback.Parent = FloatingButton
+
+-- Download/cache the GitHub image when the executor exposes file + custom-asset APIs.
+task.spawn(function()
+    local ok, asset = pcall(function()
+        local assetLoader = getcustomasset or getsynasset
+        if type(assetLoader) ~= "function" or type(writefile) ~= "function" then
+            error("Executor does not expose getcustomasset/getsynasset and writefile")
+        end
+        if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("OctoputHub") then
+            pcall(makefolder, "OctoputHub")
+        end
+        local imageBytes = game:HttpGet(FLOATING_LOGO_URL)
+        assert(type(imageBytes) == "string" and #imageBytes > 0, "Logo download returned empty data")
+        writefile(FLOATING_LOGO_FILE, imageBytes)
+        return assetLoader(FLOATING_LOGO_FILE)
+    end)
+    if ok and type(asset) == "string" then
+        FloatingButton.Image = asset
+        FloatingFallback.Visible = false
+    else
+        warn("[OctoputHub] Floating logo could not load; using fallback icon. " .. tostring(asset))
+    end
+end)
+
+-- Drag with mouse or touch; tap/click toggles the hub window.
+local floatingDragging = false
+local floatingDragInput = nil
+local floatingDragStart = nil
+local floatingStartPosition = nil
+local floatingMoved = false
+local suppressFloatingClick = false
+FloatingButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        floatingDragging = true
+        floatingMoved = false
+        floatingDragStart = input.Position
+        floatingStartPosition = FloatingButton.Position
+        floatingDragInput = input.UserInputType == Enum.UserInputType.Touch and input or nil
+    end
+end)
+FloatingButton.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        floatingDragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if floatingDragging and floatingDragStart and (input.UserInputType == Enum.UserInputType.MouseMovement or input == floatingDragInput) then
+        local delta = input.Position - floatingDragStart
+        if math.abs(delta.X) > 5 or math.abs(delta.Y) > 5 then
+            floatingMoved = true
+        end
+        FloatingButton.Position = UDim2.new(
+            floatingStartPosition.X.Scale, floatingStartPosition.X.Offset + delta.X,
+            floatingStartPosition.Y.Scale, floatingStartPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if floatingDragging and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+        floatingDragging = false
+        if floatingMoved then
+            suppressFloatingClick = true
+            task.delay(0.2, function() suppressFloatingClick = false end)
+        end
+        floatingDragStart = nil
+        floatingDragInput = nil
+    end
+end)
+FloatingButton.Activated:Connect(function()
+    if suppressFloatingClick then
+        suppressFloatingClick = false
+        return
+    end
+    MainFrame.Visible = not MainFrame.Visible
+end)
+
 local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 10)
 MainCorner.Parent = MainFrame
@@ -101,14 +215,6 @@ local State = {
     AutoPlace = false,
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
-    AutoUseAbility = false,
-    AutoBuffChain = false,
-    AutoBuffGriffith = false,
-    BuffDelays = {
-        commander = { [2] = 3, [3] = 0.7, [4] = 0.7 },
-        windsong = { [2] = 3.5, [3] = 0.7, [4] = 0.7 },
-        elfy = { [2] = 3.5, [3] = 0.7, [4] = 0.7 },
-    },
     PlacePercent = 0,
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
@@ -118,9 +224,6 @@ local State = {
     AutoReplay = true,
     WebhookURL = "",
     WebhookOnEnd = false,
-    AutoOpenPortal = false,
-    PortalSelectedItems = {},
-    PortalSelectedTiers = {},
     BlackScreen = false,
     AutoHideGUIOnExecute = false,
     UIScale = 1,
@@ -134,6 +237,10 @@ local State = {
     MainAutoReplay = false,
     AutoNext = false,
     AutoLeave = false,
+    AntiAFK = true,
+    AutoOpenPortal = false,
+    SelectedPortalTypes = {},
+    SelectedPortalTiers = {},
 }
 
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
@@ -233,10 +340,6 @@ local function CopyStateForSave()
         AutoPlace = State.AutoPlace,
         AutoUpgrade = State.AutoUpgrade,
         AutoUpgradeFarmFirst = State.AutoUpgradeFarmFirst,
-        AutoUseAbility = State.AutoUseAbility,
-        AutoBuffChain = State.AutoBuffChain,
-        AutoBuffGriffith = State.AutoBuffGriffith,
-        BuffDelays = State.BuffDelays,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
         AutoEventQuests = State.AutoEventQuests,
@@ -244,9 +347,6 @@ local function CopyStateForSave()
         AutoReplay = State.AutoReplay,
         WebhookURL = State.WebhookURL,
         WebhookOnEnd = State.WebhookOnEnd,
-        AutoOpenPortal = State.AutoOpenPortal,
-        PortalSelectedItems = State.PortalSelectedItems,
-        PortalSelectedTiers = State.PortalSelectedTiers,
         BlackScreen = State.BlackScreen,
         AutoHideGUIOnExecute = State.AutoHideGUIOnExecute,
         UIScale = State.UIScale,
@@ -260,6 +360,10 @@ local function CopyStateForSave()
         MainAutoReplay = State.MainAutoReplay,
         AutoNext = State.AutoNext,
         AutoLeave = State.AutoLeave,
+        AntiAFK = State.AntiAFK,
+        AutoOpenPortal = State.AutoOpenPortal,
+        SelectedPortalTypes = State.SelectedPortalTypes,
+        SelectedPortalTiers = State.SelectedPortalTiers,
     }
 end
 
@@ -287,25 +391,13 @@ local function ApplySavedTable(saved)
         return
     end
     local boolKeys = {
-        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoUseAbility", "AutoBuffChain", "AutoBuffGriffith",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "AutoOpenPortal", "BlackScreen", "AutoHideGUIOnExecute",
-        "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave",
+        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst",
+        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
+        "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
         if type(saved[key]) == "boolean" then
             State[key] = saved[key]
-        end
-    end
-    if type(saved.BuffDelays) == "table" then
-        for _, group in ipairs({ "commander", "windsong", "elfy" }) do
-            if type(saved.BuffDelays[group]) == "table" then
-                for _, index in ipairs({ 2, 3, 4 }) do
-                    local value = tonumber(saved.BuffDelays[group][index] or saved.BuffDelays[group][tostring(index)])
-                    if value and value >= 0 and value <= 30 then
-                        State.BuffDelays[group][index] = value
-                    end
-                end
-            end
         end
     end
     if type(saved.PlacePercent) == "number" then
@@ -319,17 +411,33 @@ local function ApplySavedTable(saved)
     if type(saved.WebhookURL) == "string" then
         State.WebhookURL = saved.WebhookURL
     end
-    if type(saved.PortalSelectedItems) == "table" then
-        State.PortalSelectedItems = saved.PortalSelectedItems
-    end
-    if type(saved.PortalSelectedTiers) == "table" then
-        State.PortalSelectedTiers = saved.PortalSelectedTiers
-    end
     if type(saved.BuffPriority) == "table" then
         State.BuffPriority = SanitizeIdList(saved.BuffPriority, BUFF_IDS)
     end
     if type(saved.DebuffAvoid) == "table" then
         State.DebuffAvoid = SanitizeIdList(saved.DebuffAvoid, DEBUFF_IDS)
+    end
+    if type(saved.AutoOpenPortal) == "boolean" then
+        State.AutoOpenPortal = saved.AutoOpenPortal
+    end
+    if type(saved.SelectedPortalTypes) == "table" then
+        local selected = {}
+        for key, value in pairs(saved.SelectedPortalTypes) do
+            local id = type(key) == "string" and key or (type(value) == "string" and value or nil)
+            if id and (value == true or type(key) == "number") then selected[id] = true end
+        end
+        State.SelectedPortalTypes = selected
+    end
+    if type(saved.SelectedPortalTiers) == "table" then
+        local selected = {}
+        for key, value in pairs(saved.SelectedPortalTiers) do
+            local tier = type(key) == "string" and key or value
+            local n = tonumber(tier)
+            if n and n >= 0 and n <= 99 and (value == true or type(key) == "number") then
+                selected[tostring(math.floor(n))] = true
+            end
+        end
+        State.SelectedPortalTiers = selected
     end
     if type(saved.UnitNames) == "table" then
         local names = {}
@@ -393,18 +501,25 @@ HubScale.Scale = State.UIScale
 local EVENT_LEVEL_ID = "summer2_event"
 
 local function InvokeEndpoint(endpointName, ...)
+    -- Only fall back to the raw remote when the client service was not usable.
+    -- A nil return from a successful call must not trigger a second request.
+    local attempted = false
     local ok, res = pcall(function(...)
         local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
         if loaderModule then
             local Loader = require(loaderModule)
             local EndpointsClient = Loader.load_client_service(game, "EndpointsClient")
             if EndpointsClient and EndpointsClient.invoke_server then
+                attempted = true
                 return EndpointsClient.invoke_server(endpointName, ...)
             end
         end
     end, ...)
-    if ok and res ~= nil then
-        return res
+    if attempted then
+        if ok then
+            return res
+        end
+        return nil
     end
 
     local endpoints = ReplicatedStorage:FindFirstChild("endpoints")
@@ -440,7 +555,7 @@ local function IsMatchmaking()
 end
 
 local function NormalizeName(text)
-    return tostring(text or ""):lower():gsub("[%.%s_%-]", "")
+    return (tostring(text or ""):lower():gsub("[%.%s_%-]", ""))
 end
 
 local function IsFarmName(text)
@@ -448,7 +563,7 @@ local function IsFarmName(text)
     if id == "" then
         return false
     end
-    return id:find("speedwagon", 1, true)
+    return (id:find("speedwagon", 1, true)
         or id:find("ceo", 1, true)
         or id:find("bulma", 1, true)
         or id:find("bulby", 1, true)
@@ -456,33 +571,9 @@ local function IsFarmName(text)
         or id:find("nami", 1, true)
         or id:find("weathergirl", 1, true)
         or id:find("weathering", 1, true)
-        or id:find("weather", 1, true)
+        or id:find("weather", 1, true)) ~= nil
 end
 
-local function IsGriffithName(text)
-    local id = NormalizeName(text)
-    if id == "" then
-        return false
-    end
-    return id:find("griffith", 1, true)
-        or id:find("griffin", 1, true)
-        or id:find("femto", 1, true)
-end
-
-local function IsBuffName(text)
-    local id = NormalizeName(text)
-    if id == "" then
-        return false
-    end
-    return id:find("commander", 1, true)
-        or id:find("erwin", 1, true) -- legacy alias
-        or id:find("windsong", 1, true)
-        or id:find("wenda", 1, true) -- legacy alias
-        or id:find("elfy", 1, true)
-        or id:find("sylph", 1, true) -- evolution/name alias
-end
-
-local UnitsDataCache
 local function GetUnitsData()
     if UnitsDataCache then
         return UnitsDataCache
@@ -492,10 +583,10 @@ local function GetUnitsData()
     end)
     if ok and type(data) == "table" then
         UnitsDataCache = data
-    else
-        UnitsDataCache = {}
+        return UnitsDataCache
     end
-    return UnitsDataCache
+    -- Retry on later lobby refreshes if ReplicatedStorage has not loaded Units yet.
+    return {}
 end
 
 local function LookupUnitData(unitId)
@@ -556,136 +647,110 @@ local function GetPlayerUnits()
 end
 
 local function IsFarmUnit(unit)
-    if not unit then
-        return false
-    end
-    if unit:FindFirstChild("_stats") then
-        if unit._stats:FindFirstChild("farm_amount") then
-            return true
-        end
-        local showFarm = unit._stats:FindFirstChild("_show_as_farm_unit")
-        if showFarm and showFarm.Value == true then
-            return true
-        end
-    end
-    return IsFarmName(GetUnitId(unit)) or IsFarmName(unit.Name)
-end
-
-local function GetBuffChainGroup(unit)
-    local id = GetUnitId(unit)
-    if id:find("commander", 1, true) or id:find("erwin", 1, true) then
-        return "commander"
-    elseif id:find("windsong", 1, true) or id:find("wenda", 1, true)
-        or id:find("winddragon", 1, true) or id:find("wind_dragon", 1, true) then
-        return "windsong"
-    elseif id:find("elfy", 1, true) or id:find("sylph", 1, true) then
-        return "elfy"
-    end
-    return nil
-end
-
-local IsGriffithReincarnation
-local function IsGriffithUnit(unit)
-    -- Count the evolved form as the same Griffith placement, even if its ID changed.
-    return IsGriffithName(GetUnitId(unit))
-        or IsGriffithName(unit and unit.Name)
-        or (IsGriffithReincarnation and IsGriffithReincarnation(unit))
-end
-
--- Detect the evolved Griffith unit by its actual unit id/name.
--- This is the definitive signal that the sacrifice phase has completed.
-IsGriffithReincarnation = function(unit)
-    if not unit then
-        return false
-    end
-
-    local id = GetUnitId(unit)
-    local modelName = NormalizeName(unit.Name)
-    local reincarnated = function(value)
-        local name = NormalizeName(value)
-        return (name:find("griffith", 1, true)
-                or name:find("griffin", 1, true)
-                or name:find("femto", 1, true))
-            and name:find("reincarnation", 1, true) ~= nil
-    end
-
-    if reincarnated(id) or reincarnated(modelName) then
-        return true
-    end
-
-    -- Some game versions expose the display name in stats instead of the model name.
+    if not unit then return false end
     local stats = unit:FindFirstChild("_stats")
+    local ids = {}
+    local function add(value)
+        if value ~= nil and tostring(value) ~= "" then table.insert(ids, tostring(value)) end
+    end
+    add(GetRawUnitId(unit))
+    add(GetUnitId(unit))
+    add(unit.Name)
     if stats then
-        for _, key in ipairs({ "name", "display_name", "unit_name" }) do
-            local value = stats:FindFirstChild(key)
-            if value and reincarnated(value.Value) then
+        for _, fieldName in ipairs({ "unit_id", "unitId", "name", "display_name", "unit_name" }) do
+            local field = stats:FindFirstChild(fieldName)
+            if field then add(field.Value) end
+        end
+        if stats:FindFirstChild("farm_amount") then return true end
+        local showFarm = stats:FindFirstChild("_show_as_farm_unit")
+        if showFarm and showFarm.Value == true then return true end
+    end
+
+    -- Match every known identifier against the canonical unit database. Some
+    -- evolved/renamed models do not keep the same _stats.id as their loadout.
+    for _, id in ipairs(ids) do
+        local data = LookupUnitData(id)
+        if type(data) == "table" then
+            if type(data.tags) == "table" then
+                for _, tag in pairs(data.tags) do
+                    if tostring(tag):lower() == "farm" then return true end
+                end
+            end
+            if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
+                or data._show_as_farm_unit == true or data.show_as_farm_unit == true
+                or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
                 return true
+            end
+            if type(data.end_of_wave) == "table" then
+                for _, effect in pairs(data.end_of_wave) do
+                    if type(effect) == "table" and tostring(effect.type):lower() == "farm" then
+                        return true
+                    end
+                end
             end
         end
     end
-
+    for _, id in ipairs(ids) do
+        if IsFarmName(id) then return true end
+    end
     return false
-end
-
-local function CanUseActiveAttack(unit)
-    if not unit or not unit:FindFirstChild("_stats") then
-        return false
-    end
-    local stats = unit._stats
-
-    local isQueued = stats:FindFirstChild("active_queued_or_using")
-    if isQueued and isQueued.Value == true then
-        return false
-    end
-
-    local lastCast = stats:FindFirstChild("last_active_cast")
-    local cd = stats:FindFirstChild("active_attack_cooldown")
-    if lastCast and cd then
-        return (tick() - lastCast.Value) >= cd.Value
-    end
-    return true
 end
 
 local function GetEquippedUnitList()
     local unitsList = {}
 
-    local spawnGui = playerGui:FindFirstChild("spawn_units")
-    local frame = spawnGui and spawnGui:FindFirstChild("Lives") and spawnGui.Lives:FindFirstChild("Frame")
-    local unitsGrid = frame and frame:FindFirstChild("Units")
-    if unitsGrid then
-        for _, slotFrame in ipairs(unitsGrid:GetChildren()) do
-            local uuid = slotFrame:GetAttribute("_equipped_frame_unit_uuid")
-            if uuid then
-                local cost = 0
-                if slotFrame:FindFirstChild("Cost") and slotFrame.Cost:FindFirstChild("text") then
-                    cost = tonumber(slotFrame.Cost.text.Text) or 0
+    -- Unit Configuration must read ONLY the six actual equipped slots (1-6).
+    -- Do not merge GUI leftovers or previously saved UnitConfigs into this list.
+    local ok, err = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
+        if not ucs or type(ucs.get_equipped_units) ~= "function" then
+            return
+        end
+
+        local equipped = ucs.get_equipped_units()
+        if type(equipped) ~= "table" then
+            return
+        end
+
+        for slot = 1, 6 do
+            local slotKey = tostring(slot)
+            local uuid = equipped[slotKey]
+            if uuid == nil then
+                uuid = equipped[slot]
+            end
+
+            if uuid ~= nil then
+                local item = nil
+                if type(ucs.get_equipped_unit_by_uuid) == "function" then
+                    item = ucs.get_equipped_unit_by_uuid(uuid)
                 end
-                local unitName = slotFrame:FindFirstChild("name") and slotFrame.name.Text or "Unit"
+
+                local unitId = type(item) == "table"
+                    and (item.unit_id or item.unitId or item.id)
+                    or nil
+                local data = unitId and LookupUnitData(unitId) or nil
+                local displayName = type(item) == "table"
+                    and (item.name or item.display_name or item.displayName)
+                    or nil
+
+                if (not displayName or displayName == "") and type(data) == "table" then
+                    displayName = data.name
+                end
+
                 table.insert(unitsList, {
                     uuid = uuid,
-                    cost = cost,
-                    name = unitName,
-                    slot = slotFrame.Name
+                    cost = type(data) == "table" and tonumber(data.cost) or 0,
+                    name = displayName or unitId or "Unit",
+                    unitId = unitId,
+                    slot = slotKey,
                 })
             end
         end
-    end
+    end)
 
-    if #unitsList == 0 then
-        pcall(function()
-            local Loader = require(ReplicatedStorage.src.Loader)
-            local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
-            if ucs and ucs.get_equipped_units then
-                for slot, uuid in pairs(ucs.get_equipped_units()) do
-                    table.insert(unitsList, {
-                        uuid = uuid,
-                        cost = 0,
-                        name = "Unit",
-                        slot = tostring(slot)
-                    })
-                end
-            end
-        end)
+    if not ok then
+        warn("[OctoputHub] Could not read equipped slots 1-6: " .. tostring(err))
     end
 
     return unitsList
@@ -700,8 +765,8 @@ local function EnrichEquipped(list)
                 local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
                 if ucs and ucs.get_equipped_unit_by_uuid then
                     local owned = ucs.get_equipped_unit_by_uuid(info.uuid)
-                    if owned and owned.unit_id then
-                        unitId = owned.unit_id
+                    if owned then
+                        unitId = owned.unit_id or owned.unitId or owned.id or unitId
                     end
                 end
             end
@@ -732,20 +797,31 @@ end
 -- Detect farm units from both their displayed name and unit database metadata.
 -- Some equipped-unit records use an internal ID that does not contain the display name.
 local function IsFarmInfo(info)
-    if not info then
-        return false
-    end
-    local farmText = NormalizeName(info.name) .. NormalizeName(info.displayName) .. NormalizeName(info.unitId)
-    if IsFarmName(info.name) or IsFarmName(info.displayName) or IsFarmName(info.unitId)
-        or farmText:find("farm", 1, true) then
-        return true
-    end
-    local data = LookupUnitData(info.unitId)
-    if type(data) == "table" then
-        if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
-            or data._show_as_farm_unit == true or data.show_as_farm_unit == true
-            or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
-            return true
+    if not info then return false end
+    local ids = { info.unitId, info.name, info.displayName }
+    for _, id in ipairs(ids) do
+        if id and tostring(id) ~= "" then
+            local data = LookupUnitData(id)
+            if type(data) == "table" then
+                if type(data.tags) == "table" then
+                    for _, tag in pairs(data.tags) do
+                        if tostring(tag):lower() == "farm" then return true end
+                    end
+                end
+                if data.farm_amount ~= nil or data.farm_income ~= nil or data.farm_generation ~= nil
+                    or data._show_as_farm_unit == true or data.show_as_farm_unit == true
+                    or data.is_farm_unit == true or data.farm_unit == true or data.farm == true then
+                    return true
+                end
+                if type(data.end_of_wave) == "table" then
+                    for _, effect in pairs(data.end_of_wave) do
+                        if type(effect) == "table" and tostring(effect.type):lower() == "farm" then
+                            return true
+                        end
+                    end
+                end
+            end
+            if IsFarmName(id) then return true end
         end
     end
     return false
@@ -968,19 +1044,7 @@ local function CanPlaceConfigured(info, wave)
         localLimit = info.spawnCap
     end
     if localLimit then
-        -- Griffith (Reincarnation) is an evolved state of the original placement.
-        -- Count both forms together so Max Place = 1 cannot summon a second copy.
-        local placedCount
-        if IsGriffithName(info.name) or IsGriffithName(info.unitId) then
-            placedCount = 0
-            for _, placedUnit in ipairs(GetPlayerUnits()) do
-                if IsGriffithUnit(placedUnit) then
-                    placedCount = placedCount + 1
-                end
-            end
-        else
-            placedCount = CountPlacedUnit(info.unitId)
-        end
+        local placedCount = CountPlacedUnit(info.unitId)
         if placedCount >= localLimit then
             return false
         end
@@ -1185,7 +1249,7 @@ local function GetPlacementCFrame(index, kind)
         -- minimum-distance check and terrain / road restrictions.
         local spacing = 3.8
         local offsets = { Vector2.new(0, 0) }
-        local maxRing = 5
+        local maxRing = (kind == "hill") and 16 or 5
         for ring = 1, maxRing do
             local ringOffsets = {}
             for q = -ring, ring do
@@ -1230,9 +1294,19 @@ local function GetPlacementCFrame(index, kind)
     end
     local angle = (index * 45) * (math.pi / 180)
     local distance = 6 + math.floor(index / 8) * 5
-    local pos = hrp.Position + Vector3.new(math.cos(angle) * distance, 0, math.sin(angle) * distance)
-    local finalPos = PlacementIsClear(pos, kind) or pos
-    return Finish(finalPos, hrp.CFrame.LookVector)
+    local maxFallbackRing = (kind == "hill") and 16 or 5
+    for ring = 0, maxFallbackRing do
+        local radius = distance + ring * 4
+        for direction = 0, 7 do
+            local a = angle + direction * (math.pi / 4)
+            local pos = hrp.Position + Vector3.new(math.cos(a) * radius, 0, math.sin(a) * radius)
+            local finalPos = PlacementIsClear(pos, kind)
+            if finalPos then
+                return Finish(finalPos, hrp.CFrame.LookVector)
+            end
+        end
+    end
+    return nil
 end
 
 -- Farm units can be ground or hill units depending on the game's unit data.
@@ -1255,63 +1329,6 @@ local function GetPlacementCFrameForInfo(index, info)
         if cf then return cf, kind end
     end
     return nil, primary
-end
-
-local function ReadNumberValue(container, keywords)
-    if not container then
-        return nil
-    end
-    for _, child in ipairs(container:GetChildren()) do
-        local name = NormalizeName(child.Name)
-        for _, key in ipairs(keywords) do
-            if name:find(key, 1, true) then
-                if child:IsA("NumberValue") or child:IsA("IntValue") or child:IsA("StringValue") then
-                    local n = tonumber(child.Value)
-                    if n then
-                        return n
-                    end
-                end
-            end
-        end
-    end
-    return nil
-end
-
-local function GetGriffithSacrificePercent(unit)
-    if not unit then
-        return 0
-    end
-    local id = GetUnitId(unit)
-    if id == "femto" or id:find("femtoegg", 1, true) then
-        return 100
-    end
-
-    local keys = { "sacrifice", "eclipse", "unique", "charge", "meter", "percent", "stack" }
-    local fromStats = ReadNumberValue(unit:FindFirstChild("_stats"), keys)
-    if fromStats then
-        if fromStats <= 1 then
-            return fromStats * 100
-        end
-        return math.clamp(fromStats, 0, 100)
-    end
-    local fromBuffs = ReadNumberValue(unit:FindFirstChild("_buffs"), keys)
-    if fromBuffs then
-        if fromBuffs <= 1 then
-            return fromBuffs * 100
-        end
-        return math.clamp(fromBuffs, 0, 100)
-    end
-
-    for _, gui in ipairs(unit:GetDescendants()) do
-        if gui:IsA("TextLabel") or gui:IsA("TextButton") then
-            local text = tostring(gui.Text or "")
-            local pct = text:match("(%d+)%s*%%")
-            if pct then
-                return math.clamp(tonumber(pct) or 0, 0, 100)
-            end
-        end
-    end
-    return 0
 end
 
 local function CountCategory(myUnits, pred)
@@ -1343,7 +1360,7 @@ local function HttpPost(url, body)
 end
 
 local function NormalizeWebhookUrl(url)
-    return tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return (tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
 local function WebhookProblem(url)
@@ -1379,26 +1396,28 @@ local function DescribeWebhookResult(ok, result)
     return true, "Test message sent."
 end
 
+
 local function ReadPlayerCurrencies()
     local values = {}
     local stats = player:FindFirstChild("_stats")
-    if not stats then
-        return values
-    end
-
-    for _, child in ipairs(stats:GetChildren()) do
-        if child:IsA("ValueBase") and type(child.Value) == "number" then
-            local name = child.Name
-            if name == "gold_amount" then
-                values.Gold = child.Value
-            elseif name == "gem_amount" then
-                values.Gems = child.Value
-            elseif name == "trophies" then
-                values.Trophies = child.Value
-            elseif name == "player_xp" then
-                values.XP = child.Value
-            elseif name:sub(1, 9) == "_resource" then
-                values[name:sub(10)] = child.Value
+    if stats then
+        for _, child in ipairs(stats:GetChildren()) do
+            if child:IsA("ValueBase") and type(child.Value) == "number" then
+                local name = child.Name
+                if name == "gold_amount" then
+                    values.Gold = child.Value
+                elseif name == "gem_amount" then
+                    values.Gems = child.Value
+                elseif name == "trophies" then
+                    values.Trophies = child.Value
+                elseif name == "player_xp" then
+                    values.XP = child.Value
+                elseif name:sub(1, 9) == "_resource" then
+                    local resourceName = name:sub(10):gsub("^_+", "")
+                    values[resourceName] = child.Value
+                elseif name:lower():find("summerpearls", 1, true) then
+                    values.SummerPearls = child.Value
+                end
             end
         end
     end
@@ -1411,6 +1430,105 @@ local function FormatNumber(value)
     local digits = tostring(math.floor(math.abs(n)))
     local formatted = digits:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
     return sign .. formatted
+end
+
+local function FormatCompact(value)
+    local n = tonumber(value) or 0
+    local abs = math.abs(n)
+    local suffix = ""
+    local divisor = 1
+    if abs >= 1e12 then suffix, divisor = "T", 1e12
+    elseif abs >= 1e9 then suffix, divisor = "B", 1e9
+    elseif abs >= 1e6 then suffix, divisor = "M", 1e6
+    elseif abs >= 1e3 then suffix, divisor = "K", 1e3 end
+    if divisor == 1 then return FormatNumber(n) end
+    local valueText = string.format("%.2f", n / divisor):gsub("%.?0+$", "")
+    return valueText .. suffix
+end
+
+local function ReadTraitRerolls()
+    local ok, amount = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
+        local session = inventoryService and inventoryService.session
+        local profile = session and session.profile_data
+        if profile and profile.trait_reroll_tokens ~= nil then
+            return tonumber(profile.trait_reroll_tokens)
+        end
+        local inventory = session and session.inventory
+        if inventory and type(inventory.get_number_of_owned_item) == "function" then
+            return tonumber(inventory:get_number_of_owned_item("trait_reroll_tokens__MOCK"))
+        end
+        return nil
+    end)
+    return ok and tonumber(amount) or nil
+end
+
+local function BuildPlayerStatsText(currencies)
+    local traitCount = ReadTraitRerolls()
+    local lines = {}
+    local gemEmoji = "<:GemAA:1563613761544392794>"
+    local goldEmoji = "<:GoldAA:1566642394412220508>"
+    local summerEmoji = "<:SummerAA:1566642524636840128>"
+    local traitEmoji = "<:TraitAA:1566642609479360642>"
+    table.insert(lines, gemEmoji .. " **Gem:** " .. FormatNumber(currencies.Gems or 0))
+    table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold or 0))
+    local summer = currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls
+    if summer == nil then
+        for key, value in pairs(currencies) do
+            if tostring(key):lower():find("summerpearls", 1, true) then summer = value break end
+        end
+    end
+    table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer or 0))
+    if traitCount ~= nil then
+        table.insert(lines, traitEmoji .. " **Trait:** " .. FormatNumber(traitCount))
+    end
+    return table.concat(lines, "\n")
+end
+
+local function BuildRewardText(before, after)
+    local ordered = {"XP", "SummerPearls", "Gold", "Gems", "Trophies"}
+    local labels = {XP = "XP", SummerPearls = "Summer Pearls", Gold = "Gold", Gems = "Gems", Trophies = "Trophies"}
+    local parts, used = {}, {}
+    for _, key in ipairs(ordered) do
+        local delta = (tonumber(after[key]) or 0) - (tonumber(before[key]) or 0)
+        if delta > 0 then
+            table.insert(parts, "+" .. FormatNumber(delta) .. " " .. (labels[key] or key))
+            used[key] = true
+        end
+    end
+    for key, value in pairs(after) do
+        if not used[key] and key ~= "Trait" and key ~= "Trophies" then
+            local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
+            if delta > 0 then
+                table.insert(parts, "+" .. FormatNumber(delta) .. " " .. tostring(key))
+            end
+        end
+    end
+    if #parts == 0 then return "No currency or XP gained detected." end
+    return table.concat(parts, " · ")
+end
+
+local function GetResultDetails()
+    local details = {}
+    local results = playerGui:FindFirstChild("ResultsUI")
+    local holder = results and results:FindFirstChild("Holder")
+    if holder then
+        local levelName = holder:FindFirstChild("LevelName")
+        if levelName and levelName:IsA("TextLabel") then details.level = levelName.Text end
+        local title = holder:FindFirstChild("Title")
+        if title and title:IsA("TextLabel") then details.result = title.Text end
+        local difficulty = holder:FindFirstChild("Difficulty")
+        if difficulty and difficulty:IsA("TextLabel") then details.difficulty = difficulty.Text end
+        local middle = holder:FindFirstChild("Middle")
+        if middle then
+            for _, childName in ipairs({"Timer", "WavesCompleted"}) do
+                local child = middle:FindFirstChild(childName)
+                if child and child:IsA("TextLabel") then details[childName] = child.Text end
+            end
+        end
+    end
+    return details
 end
 
 local function BuildCurrencyLines(before, after)
@@ -1444,24 +1562,6 @@ local function BuildCurrencyLines(before, after)
     return table.concat(lines, "\n")
 end
 
-local function GetResultDetails()
-    local details = {}
-    local results = playerGui:FindFirstChild("ResultsUI")
-    if not results then return details end
-
-    local holder = results:FindFirstChild("Holder")
-    if holder then
-        local levelName = holder:FindFirstChild("LevelName")
-        if levelName and levelName:IsA("TextLabel") then
-            details.level = levelName.Text
-        end
-        local title = holder:FindFirstChild("Title")
-        if title and title:IsA("TextLabel") then
-            details.result = title.Text
-        end
-    end
-    return details
-end
 
 -- ResultsUI is populated directly from ResultsUI.show_results(settings).
 -- ResourceReward frames therefore provide the authoritative per-stage resource amounts.
@@ -1502,9 +1602,104 @@ local function BuildResourceRewardLines(rewards)
     return table.concat(lines, "\n")
 end
 
+-- Snapshot unique Secret rewards at match start so Webhook can report only
+-- Secret Units / Secret Portals newly granted by this match.
+local function LoadGameDataModule(moduleName)
+    local module = ReplicatedStorage:FindFirstChild(moduleName, true)
+    if module and module:IsA("ModuleScript") then
+        local ok, data = pcall(require, module)
+        if ok and type(data) == "table" then return data end
+    end
+    return nil
+end
+
+local function ReadSecretRewardSnapshot()
+    local snapshot = {}
+    if type(getgc) ~= "function" then return snapshot, false end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return snapshot, false end
+
+    local itemData = LoadGameDataModule("Items") or {}
+    local unitData = LoadGameDataModule("Units") or {}
+    local inventoryProfile, collectionProfile = nil, nil
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local session = object.session
+            local inventory = object.inventory or (type(session) == "table" and session.inventory)
+            local profile = type(inventory) == "table" and inventory.inventory_profile_data or object.inventory_profile_data
+            if type(profile) == "table" and type(profile.unique_items) == "table" then
+                inventoryProfile = profile
+            end
+            local directCollection = object.collection_profile_data
+            if type(directCollection) == "table" and type(directCollection.owned_units) == "table" then
+                collectionProfile = directCollection
+            end
+            local collection = object.collection or (type(session) == "table" and session.collection)
+            if type(collection) == "table" and type(collection.collection_profile_data) == "table"
+                and type(collection.collection_profile_data.owned_units) == "table" then
+                collectionProfile = collection.collection_profile_data
+            end
+        end
+    end
+
+    if inventoryProfile then
+        for _, owned in pairs(inventoryProfile.unique_items) do
+            if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
+                local def = itemData[owned.item_id]
+                if type(def) == "table" and def.rarity == "Secret" then
+                    local category = def.item_group == "Portals" and "Secret Portal" or "Secret Item"
+                    snapshot["item:" .. owned.uuid] = { category = category, name = tostring(def.name or owned.item_id) }
+                end
+            end
+        end
+    end
+
+    if collectionProfile then
+        for uuid, owned in pairs(collectionProfile.owned_units) do
+            if type(owned) == "table" and type(owned.unit_id) == "string" then
+                local def = unitData[owned.unit_id]
+                if type(def) == "table" and def.rarity == "Secret" then
+                    snapshot["unit:" .. tostring(uuid)] = { category = "Secret Unit", name = tostring(def.name or owned.unit_id) }
+                end
+            end
+        end
+    end
+    return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
+end
+
+local function BuildSecretRewardLines(before, after)
+    local totals = { ["Secret Unit"] = {}, ["Secret Portal"] = {}, ["Secret Item"] = {} }
+    for key, reward in pairs(after or {}) do
+        if not (before and before[key]) and totals[reward.category] then
+            local name = reward.name or "Unknown"
+            totals[reward.category][name] = (totals[reward.category][name] or 0) + 1
+        end
+    end
+
+    local sections = {}
+    for _, category in ipairs({"Secret Unit", "Secret Portal", "Secret Item"}) do
+        local entries = {}
+        for name, count in pairs(totals[category]) do
+            table.insert(entries, string.format("⭐ **%s** ×%d", name, count))
+        end
+        table.sort(entries)
+        if #entries > 0 then
+            table.insert(sections, "**💎 " .. string.upper(category) .. "**\n" .. table.concat(entries, "\n"))
+        end
+    end
+    if #sections == 0 then
+        return "No new Secret Unit / Secret Portal rewards detected"
+    end
+    return table.concat(sections, "\n\n")
+end
+
 local webhookCurrencyBefore = nil
+local webhookSecretRewardBefore = nil
+local webhookSecretRewardBaselineAvailable = false
 local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
+    webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
 end
 
 local function SendEndWebhook(currencyBaseline)
@@ -1536,6 +1731,13 @@ local function SendEndWebhook(currencyBaseline)
     local resultDetails = GetResultDetails()
     local resourceRewards = ReadResultResourceRewards()
     local resourceText = BuildResourceRewardLines(resourceRewards)
+    local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
+    local secretRewardText
+    if webhookSecretRewardBaselineAvailable and secretRewardsAvailable then
+        secretRewardText = BuildSecretRewardLines(webhookSecretRewardBefore, secretRewardsAfter)
+    else
+        secretRewardText = "Inventory snapshot unavailable; Secret rewards could not be verified"
+    end
     local level = resultDetails.level or "Unknown stage"
     if resultDetails.result and resultDetails.result ~= "" then
         result = resultDetails.result .. " | " .. result
@@ -1545,9 +1747,9 @@ local function SendEndWebhook(currencyBaseline)
         username = "Octoput Hub",
         embeds = {{
             title = "Stage Ended — " .. tostring(level),
-            description = string.format("**Player:** %s\n**Result:** %s\n\n**Currency (Before → After | Change)**\n%s\n\n**Resource Rewards (from ResultsUI)**\n%s",
-                player.Name, result, currencyText, resourceText),
-            color = result:find("Victory", 1, true) and 5763719 or 15548997,
+            description = string.format("**Player:** %s\n**Result:** %s\n\n**💎 SECRET REWARDS**\n%s\n\n**📦 Resource Rewards (from ResultsUI)**\n%s\n\n**💰 Currency (Before → After | Change)**\n%s",
+                player.Name, result, secretRewardText, resourceText, currencyText),
+            color = secretRewardText:find("⭐", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
@@ -1570,6 +1772,7 @@ local function SendEndWebhook(currencyBaseline)
     warn("[Octoput Hub Webhook] Giving up after 3 attempts: " .. tostring(lastError))
     return false
 end
+
 local function IsGoodEffectColor(color)
     return color and color.G > 0.55 and color.R < 0.45 and color.B < 0.55
 end
@@ -1724,13 +1927,28 @@ end
 
 local blackscreenConn
 local savedQuality
+local savedSavedQuality
+local hiddenOriginals = setmetatable({}, { __mode = "k" })
+
 local function SetInstanceHidden(inst, hidden)
     if inst:IsA("BasePart") then
         inst.LocalTransparencyModifier = hidden and 1 or 0
     elseif inst:IsA("Decal") or inst:IsA("Texture") then
-        inst.Transparency = hidden and 1 or 0
+        if hidden then
+            if hiddenOriginals[inst] == nil then hiddenOriginals[inst] = inst.Transparency end
+            inst.Transparency = 1
+        elseif hiddenOriginals[inst] ~= nil then
+            inst.Transparency = hiddenOriginals[inst]
+            hiddenOriginals[inst] = nil
+        end
     elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles") then
-        inst.Enabled = not hidden
+        if hidden then
+            if hiddenOriginals[inst] == nil then hiddenOriginals[inst] = inst.Enabled end
+            inst.Enabled = false
+        elseif hiddenOriginals[inst] ~= nil then
+            inst.Enabled = hiddenOriginals[inst]
+            hiddenOriginals[inst] = nil
+        end
     end
 end
 
@@ -1743,12 +1961,19 @@ local function ApplyBlackScreen(enabled)
 
     pcall(function()
         if enabled then
-            savedQuality = settings().Rendering.QualityLevel
-            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
             local gs = UserSettings():GetService("UserGameSettings")
+            if savedQuality == nil then
+                savedQuality = settings().Rendering.QualityLevel
+                savedSavedQuality = gs.SavedQualityLevel
+            end
+            settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
             gs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
         elseif savedQuality then
+            local gs = UserSettings():GetService("UserGameSettings")
             settings().Rendering.QualityLevel = savedQuality
+            if savedSavedQuality ~= nil then gs.SavedQualityLevel = savedSavedQuality end
+            savedQuality = nil
+            savedSavedQuality = nil
         end
     end)
 
@@ -1907,7 +2132,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local SwitchBtn = Instance.new("TextButton")
     SwitchBtn.Size = UDim2.new(0, 44, 0, 22)
     SwitchBtn.Position = UDim2.new(1, -54, 0.5, -11)
-    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
+    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
     SwitchBtn.Text = ""
     SwitchBtn.ZIndex = 13
     SwitchBtn.Parent = ToggleContainer
@@ -1934,7 +2159,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
 
         local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
         if isON then
-            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(210, 70, 170) }):Play()
+            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(0, 168, 255) }):Play()
             TweenService:Create(Indicator, tweenInfo, { Position = UDim2.new(1, -19, 0.5, -8) }):Play()
         else
             TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(45, 45, 58) }):Play()
@@ -2009,7 +2234,7 @@ end
 local function CreateButton(parent, title, layoutOrder, onClick)
     local Button = Instance.new("TextButton")
     Button.Size = UDim2.new(1, -10, 0, 36)
-    Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+    Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
     Button.Text = title
     Button.TextColor3 = Color3.fromRGB(255, 255, 255)
     Button.TextSize = 13
@@ -2069,7 +2294,7 @@ local function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, ma
 
     local Fill = Instance.new("Frame")
     Fill.Name = "Fill"
-    Fill.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+    Fill.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
     Fill.BorderSizePixel = 0
     Fill.ZIndex = 14
     Fill.Parent = Bar
@@ -2239,7 +2464,7 @@ local function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutO
             local Box = Instance.new("TextButton")
             Box.Size = UDim2.new(0, 18, 0, 18)
             Box.Position = UDim2.new(0, 8, 0.5, -9)
-            Box.BackgroundColor3 = rank and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
+            Box.BackgroundColor3 = rank and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
             Box.Text = rank and "✓" or ""
             Box.TextColor3 = Color3.fromRGB(255, 255, 255)
             Box.TextSize = 12
@@ -2319,12 +2544,13 @@ end
 
 local MainPage = CreateTab("Main", 1)
 local AutoPlayPage = CreateTab("Auto Play", 2)
-local EventPage = CreateTab("Event", 3)
-local WebhookPage = CreateTab("Webhook", 4)
-local MiscPage = CreateTab("Misc", 5)
+local PortalPage = CreateTab("Portal", 3)
+local EventPage = CreateTab("Event", 4)
+local WebhookPage = CreateTab("Webhook", 5)
+local MiscPage = CreateTab("Misc", 6)
 
 tabs["Auto Play"].Page.Visible = true
-tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 tabs["Auto Play"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 
 CreateHint(MainPage, "When a match ends: Next runs if it is enabled and a next stage is available. Otherwise Replay runs if it is enabled. Otherwise Leave runs if it is enabled.", 0, 44)
@@ -2373,397 +2599,6 @@ end, function(value)
 end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
-CreateToggle(AutoPlayPage, "Auto Use Ability", "AutoUseAbility", 5)
-CreateToggle(AutoPlayPage, "Auto Buff 100% (Commander / Windsong / Elfy)", "AutoBuffChain", 6)
-CreateToggle(AutoPlayPage, "Auto Buff 100% (Griffith)", "AutoBuffGriffith", 8)
-
-
--- Auto Open Portal: only consumes portal UUIDs found in the local player's inventory.
-local PortalSectionOrder = 9
-CreateSection(AutoPlayPage, "Auto Open Portal", PortalSectionOrder)
-CreateHint(AutoPlayPage, "Select the portal items and one or more tiers. Higher tiers are opened first. Only your own inventory portals are used.", 10, 38)
-
-local PortalInventoryList = Instance.new("ScrollingFrame")
-PortalInventoryList.Name = "PortalInventoryList"
-PortalInventoryList.Size = UDim2.new(1, -10, 0, 116)
-PortalInventoryList.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-PortalInventoryList.BorderSizePixel = 0
-PortalInventoryList.ScrollBarThickness = 4
-PortalInventoryList.CanvasSize = UDim2.new(0, 0, 0, 0)
-PortalInventoryList.LayoutOrder = 11
-PortalInventoryList.ZIndex = 12
-PortalInventoryList.Parent = AutoPlayPage
-local PortalInventoryLayout = Instance.new("UIListLayout")
-PortalInventoryLayout.Padding = UDim.new(0, 3)
-PortalInventoryLayout.SortOrder = Enum.SortOrder.LayoutOrder
-PortalInventoryLayout.Parent = PortalInventoryList
-PortalInventoryLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    PortalInventoryList.CanvasSize = UDim2.new(0, 0, 0, PortalInventoryLayout.AbsoluteContentSize.Y + 6)
-end)
-
-local PortalTierHolder = Instance.new("Frame")
-PortalTierHolder.Name = "PortalTierHolder"
-PortalTierHolder.Size = UDim2.new(1, -10, 0, 68)
-PortalTierHolder.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-PortalTierHolder.LayoutOrder = 12
-PortalTierHolder.ZIndex = 12
-PortalTierHolder.Parent = AutoPlayPage
-local PortalTierTitle = Instance.new("TextLabel")
-PortalTierTitle.Size = UDim2.new(1, -12, 0, 20)
-PortalTierTitle.Position = UDim2.new(0, 8, 0, 3)
-PortalTierTitle.BackgroundTransparency = 1
-PortalTierTitle.Text = "Select Tier (multi-select)"
-PortalTierTitle.TextColor3 = Color3.fromRGB(220, 220, 235)
-PortalTierTitle.TextSize = 12
-PortalTierTitle.Font = Enum.Font.GothamBold
-PortalTierTitle.TextXAlignment = Enum.TextXAlignment.Left
-PortalTierTitle.ZIndex = 13
-PortalTierTitle.Parent = PortalTierHolder
-local PortalTierButtons = Instance.new("Frame")
-PortalTierButtons.Size = UDim2.new(1, -12, 0, 36)
-PortalTierButtons.Position = UDim2.new(0, 6, 0, 27)
-PortalTierButtons.BackgroundTransparency = 1
-PortalTierButtons.ZIndex = 13
-PortalTierButtons.Parent = PortalTierHolder
-local PortalTierGrid = Instance.new("UIGridLayout")
-PortalTierGrid.CellSize = UDim2.new(0, 48, 0, 30)
-PortalTierGrid.CellPadding = UDim2.new(0, 5, 0, 4)
-PortalTierGrid.SortOrder = Enum.SortOrder.LayoutOrder
-PortalTierGrid.Parent = PortalTierButtons
-
-local PortalStatus = CreateHint(AutoPlayPage, "Portal inventory: waiting for refresh.", 13, 30)
-local PortalRefreshButton = CreateButton(AutoPlayPage, "Refresh Portal Inventory", 14, function() end)
-PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
-
-local function FindLocalInventoryProfile()
-    if type(getgc) ~= "function" then return nil end
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return nil end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" and type(object.inventory) == "table" then
-            local profile = object.inventory.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                return profile
-            end
-        end
-    end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local profile = object.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                return profile
-            end
-        end
-    end
-    return nil
-end
-
-local function GetOwnedPortals()
-    local profile = FindLocalInventoryProfile()
-    local portals, seen = {}, {}
-    if not profile then return portals, "Inventory session not found (executor getgc support required)." end
-    local itemData = nil
-    pcall(function()
-        local itemsModule = ReplicatedStorage:FindFirstChild("Items", true)
-        if itemsModule and itemsModule:IsA("ModuleScript") then
-            itemData = require(itemsModule)
-        end
-    end)
-    for _, owned in pairs(profile.unique_items) do
-        if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
-            local def = itemData and itemData[owned.item_id]
-            if def and def.item_group == "Portals" then
-                local portalData = owned._unique_item_data and owned._unique_item_data._unique_portal_data
-                local tier = tonumber(portalData and portalData.portal_depth) or 0
-                local key = owned.item_id
-                if not seen[key] then
-                    seen[key] = { id = key, name = tostring(def.name or key), count = 0, entries = {}, tier = tier }
-                    table.insert(portals, seen[key])
-                end
-                seen[key].count = seen[key].count + 1
-                table.insert(seen[key].entries, { uuid = owned.uuid, tier = tier })
-            end
-        end
-    end
-    table.sort(portals, function(a,b) return a.name < b.name end)
-    return portals, nil
-end
-
-local portalInventoryCache = {}
-local function RefreshPortalUI()
-    for _, child in ipairs(PortalInventoryList:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
-    end
-    local portals, err = GetOwnedPortals()
-    portalInventoryCache = portals
-    if err then PortalStatus.Text = err; return end
-    local availableTiers = {}
-    for _, portal in ipairs(portals) do
-        for _, entry in ipairs(portal.entries) do availableTiers[entry.tier] = true end
-    end
-    local tierList = {}
-    for tier in pairs(availableTiers) do table.insert(tierList, tier) end
-    table.sort(tierList)
-    for _, child in ipairs(PortalTierButtons:GetChildren()) do
-        if child:IsA("TextButton") then child:Destroy() end
-    end
-    for index, tier in ipairs(tierList) do
-        local button = Instance.new("TextButton")
-        button.Size = UDim2.new(0, 48, 0, 30)
-        button.BackgroundColor3 = State.PortalSelectedTiers[tostring(tier)] and Color3.fromRGB(0,168,255) or Color3.fromRGB(48,48,60)
-        button.Text = "T" .. tostring(tier)
-        button.TextColor3 = Color3.new(1,1,1)
-        button.TextSize = 11
-        button.Font = Enum.Font.GothamBold
-        button.LayoutOrder = index
-        button.ZIndex = 14
-        button.Parent = PortalTierButtons
-        button.MouseButton1Click:Connect(function()
-            local key = tostring(tier)
-            State.PortalSelectedTiers[key] = not State.PortalSelectedTiers[key] and true or nil
-            SaveConfig()
-            RefreshPortalUI()
-        end)
-    end
-    for index, portal in ipairs(portals) do
-        local button = Instance.new("TextButton")
-        button.Size = UDim2.new(1, -8, 0, 28)
-        button.BackgroundColor3 = State.PortalSelectedItems[portal.id] and Color3.fromRGB(0,120,190) or Color3.fromRGB(38,38,50)
-        button.Text = (State.PortalSelectedItems[portal.id] and "✓  " or "□  ") .. portal.name .. "  x" .. tostring(portal.count)
-        button.TextColor3 = Color3.new(1,1,1)
-        button.TextSize = 11
-        button.Font = Enum.Font.Gotham
-        button.LayoutOrder = index
-        button.ZIndex = 13
-        button.Parent = PortalInventoryList
-        button.MouseButton1Click:Connect(function()
-            State.PortalSelectedItems[portal.id] = not State.PortalSelectedItems[portal.id] and true or nil
-            SaveConfig()
-            RefreshPortalUI()
-        end)
-    end
-    PortalStatus.Text = string.format("Found %d portal type(s). Select portal items and tiers, then enable Auto Open Portal.", #portals)
-end
-PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
-CreateToggle(AutoPlayPage, "Auto Open Portal", "AutoOpenPortal", 15)
-
-local portalOpenBusy = false
-local portalLastRefresh = 0
-local portalOpenedUUIDs = {}
-task.spawn(function()
-    while task.wait(1) do
-        if State.AutoOpenPortal and not portalOpenBusy and IsInLobby() then
-            portalOpenBusy = true
-            local ok, err = pcall(function()
-                local now = os.clock()
-                if now - portalLastRefresh >= 8 then
-                    RefreshPortalUI()
-                    portalLastRefresh = now
-                end
-                local portals = GetOwnedPortals()
-                local candidates = {}
-                for _, portal in ipairs(portals) do
-                    if State.PortalSelectedItems[portal.id] then
-                        for _, entry in ipairs(portal.entries) do
-                            if State.PortalSelectedTiers[tostring(entry.tier)] and not portalOpenedUUIDs[entry.uuid] then
-                                table.insert(candidates, { uuid = entry.uuid, tier = entry.tier, name = portal.name })
-                            end
-                        end
-                    end
-                end
-                table.sort(candidates, function(a,b) return a.tier > b.tier end)
-                local opened = false
-                for _, entry in ipairs(candidates) do
-                    if not State.AutoOpenPortal then break end
-                    if IsInLobby() then
-                        portalOpenedUUIDs[entry.uuid] = true
-                        local result = InvokeEndpoint("use_portal", entry.uuid)
-                        if result == false then portalOpenedUUIDs[entry.uuid] = nil end
-                        PortalStatus.Text = string.format("Opening %s (Tier %d)...", entry.name, entry.tier)
-                        opened = true
-                        task.wait(3)
-                        break
-                    end
-                end
-                if not opened and #portals == 0 then PortalStatus.Text = "No owned portals found." end
-            end)
-            if not ok then warn("[Octoput Hub Auto Portal] " .. tostring(err)) end
-            portalOpenBusy = false
-        end
-    end
-end)
-
--- Compact inline Auto Buff Delay Settings (inside a small frame under Auto Buff 100%).
-local function SetBuffDelay(group, index, value)
-    local number = tonumber(value)
-    if not number or number < 0 or number > 30 then return end
-    State.BuffDelays[group][index] = number
-    SaveConfig()
-end
-
-local DelayContainer = Instance.new("Frame")
-DelayContainer.Name = "AutoBuffDelayContainer"
-DelayContainer.Size = UDim2.new(1, -10, 0, 30)
-DelayContainer.BackgroundTransparency = 1
-DelayContainer.BorderSizePixel = 0
-DelayContainer.LayoutOrder = 7
-DelayContainer.ZIndex = 12
-DelayContainer.Parent = AutoPlayPage
-
-local DelayOpenButton = Instance.new("TextButton")
-DelayOpenButton.Name = "AutoBuffDelaySettingsButton"
-DelayOpenButton.Size = UDim2.new(1, 0, 0, 28)
-DelayOpenButton.Position = UDim2.new(0, 0, 0, 0)
-DelayOpenButton.BackgroundColor3 = Color3.fromRGB(30, 38, 52)
-DelayOpenButton.Text = "⚙  Auto Buff Delay Settings  ▾"
-DelayOpenButton.TextColor3 = Color3.fromRGB(175, 205, 245)
-DelayOpenButton.TextSize = 11
-DelayOpenButton.Font = Enum.Font.GothamSemibold
-DelayOpenButton.ZIndex = 13
-DelayOpenButton.Parent = DelayContainer
-local DelayButtonCorner = Instance.new("UICorner")
-DelayButtonCorner.CornerRadius = UDim.new(0, 6)
-DelayButtonCorner.Parent = DelayOpenButton
-
--- This is an inline expandable frame, not a screen overlay or separate window.
-local DelayInlineFrame = Instance.new("Frame")
-DelayInlineFrame.Name = "AutoBuffDelayInlineFrame"
-DelayInlineFrame.Position = UDim2.new(0, 0, 0, 34)
-DelayInlineFrame.Size = UDim2.new(1, 0, 0, 154)
-DelayInlineFrame.BackgroundColor3 = Color3.fromRGB(22, 26, 37)
-DelayInlineFrame.BorderSizePixel = 0
-DelayInlineFrame.Visible = false
-DelayInlineFrame.ZIndex = 13
-DelayInlineFrame.Parent = DelayContainer
-local DelayInlineCorner = Instance.new("UICorner")
-DelayInlineCorner.CornerRadius = UDim.new(0, 6)
-DelayInlineCorner.Parent = DelayInlineFrame
-local DelayInlineStroke = Instance.new("UIStroke")
-DelayInlineStroke.Color = Color3.fromRGB(55, 70, 95)
-DelayInlineStroke.Thickness = 1
-DelayInlineStroke.Parent = DelayInlineFrame
-
-local DelayInlineHint = Instance.new("TextLabel")
-DelayInlineHint.Size = UDim2.new(1, -16, 0, 18)
-DelayInlineHint.Position = UDim2.new(0, 8, 0, 4)
-DelayInlineHint.BackgroundTransparency = 1
-DelayInlineHint.Text = "Delay ก่อนใช้บัฟยูนิตถัดไป (วินาที)"
-DelayInlineHint.TextColor3 = Color3.fromRGB(145, 155, 175)
-DelayInlineHint.TextSize = 10
-DelayInlineHint.Font = Enum.Font.Gotham
-DelayInlineHint.TextXAlignment = Enum.TextXAlignment.Left
-DelayInlineHint.ZIndex = 14
-DelayInlineHint.Parent = DelayInlineFrame
-
-local DelayRowsHolder = Instance.new("Frame")
-DelayRowsHolder.Size = UDim2.new(1, -12, 0, 126)
-DelayRowsHolder.Position = UDim2.new(0, 6, 0, 24)
-DelayRowsHolder.BackgroundTransparency = 1
-DelayRowsHolder.ZIndex = 14
-DelayRowsHolder.Parent = DelayInlineFrame
-local DelayRowsLayout = Instance.new("UIListLayout")
-DelayRowsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-DelayRowsLayout.Padding = UDim.new(0, 3)
-DelayRowsLayout.Parent = DelayRowsHolder
-
-local function CreateDelayGroupRow(groupKey, groupTitle, order)
-    local Row = Instance.new("Frame")
-    Row.Name = groupKey .. "DelayRow"
-    Row.Size = UDim2.new(1, 0, 0, 40)
-    Row.BackgroundColor3 = Color3.fromRGB(29, 33, 46)
-    Row.BorderSizePixel = 0
-    Row.LayoutOrder = order
-    Row.ZIndex = 14
-    Row.Parent = DelayRowsHolder
-    local RowCorner = Instance.new("UICorner")
-    RowCorner.CornerRadius = UDim.new(0, 5)
-    RowCorner.Parent = Row
-
-    local GroupLabel = Instance.new("TextLabel")
-    GroupLabel.Size = UDim2.new(0, 94, 1, 0)
-    GroupLabel.Position = UDim2.new(0, 8, 0, 0)
-    GroupLabel.BackgroundTransparency = 1
-    GroupLabel.Text = groupTitle
-    GroupLabel.TextColor3 = Color3.fromRGB(160, 195, 245)
-    GroupLabel.TextSize = 10
-    GroupLabel.Font = Enum.Font.GothamBold
-    GroupLabel.TextXAlignment = Enum.TextXAlignment.Left
-    GroupLabel.ZIndex = 15
-    GroupLabel.Parent = Row
-
-    for unitIndex = 2, 4 do
-        local column = unitIndex - 2
-        local Cell = Instance.new("Frame")
-        Cell.Size = UDim2.new(0, 66, 0, 36)
-        Cell.Position = UDim2.new(0, 104 + column * 72, 0, 2)
-        Cell.BackgroundTransparency = 1
-        Cell.ZIndex = 15
-        Cell.Parent = Row
-
-        local CellLabel = Instance.new("TextLabel")
-        CellLabel.Size = UDim2.new(1, 0, 0, 13)
-        CellLabel.BackgroundTransparency = 1
-        CellLabel.Text = "Unit " .. unitIndex
-        CellLabel.TextColor3 = Color3.fromRGB(165, 165, 185)
-        CellLabel.TextSize = 9
-        CellLabel.Font = Enum.Font.Gotham
-        CellLabel.ZIndex = 16
-        CellLabel.Parent = Cell
-
-        local Input = Instance.new("TextBox")
-        Input.Size = UDim2.new(1, 0, 0, 21)
-        Input.Position = UDim2.new(0, 0, 0, 14)
-        Input.BackgroundColor3 = Color3.fromRGB(39, 43, 57)
-        Input.Text = tostring(State.BuffDelays[groupKey][unitIndex])
-        Input.PlaceholderText = "sec"
-        Input.TextColor3 = Color3.fromRGB(240, 240, 250)
-        Input.TextSize = 10
-        Input.Font = Enum.Font.Gotham
-        Input.ClearTextOnFocus = false
-        Input.ZIndex = 16
-        Input.Parent = Cell
-        local InputCorner = Instance.new("UICorner")
-        InputCorner.CornerRadius = UDim.new(0, 4)
-        InputCorner.Parent = Input
-        Input.FocusLost:Connect(function()
-            local value = tonumber(Input.Text)
-            if value and value >= 0 and value <= 30 then
-                SetBuffDelay(groupKey, unitIndex, value)
-                Input.Text = tostring(value)
-            else
-                Input.Text = tostring(State.BuffDelays[groupKey][unitIndex])
-            end
-        end)
-    end
-end
-
-CreateDelayGroupRow("commander", "Commander", 1)
-CreateDelayGroupRow("windsong", "Windsong", 2)
-CreateDelayGroupRow("elfy", "Elfy (Sylph)", 3)
-
-local DelayInlineFooter = Instance.new("TextLabel")
-DelayInlineFooter.Size = UDim2.new(1, -16, 0, 14)
-DelayInlineFooter.Position = UDim2.new(0, 8, 1, -16)
-DelayInlineFooter.BackgroundTransparency = 1
-DelayInlineFooter.Text = "บันทึกอัตโนมัติเมื่อกด Enter หรือคลิกออกจากช่อง"
-DelayInlineFooter.TextColor3 = Color3.fromRGB(115, 125, 145)
-DelayInlineFooter.TextSize = 9
-DelayInlineFooter.Font = Enum.Font.Gotham
-DelayInlineFooter.TextXAlignment = Enum.TextXAlignment.Left
-DelayInlineFooter.ZIndex = 14
-DelayInlineFooter.Parent = DelayInlineFrame
-
-local DelaySettingsExpanded = false
-local function SetDelaySettingsExpanded(expanded)
-    DelaySettingsExpanded = expanded
-    DelayInlineFrame.Visible = expanded
-    DelayContainer.Size = UDim2.new(1, -10, 0, expanded and 192 or 30)
-    DelayOpenButton.Text = expanded and "⚙  Auto Buff Delay Settings  ▴" or "⚙  Auto Buff Delay Settings  ▾"
-end
-DelayOpenButton.MouseButton1Click:Connect(function()
-    SetDelaySettingsExpanded(not DelaySettingsExpanded)
-end)
-
 CreateSection(AutoPlayPage, "Hybrid Units", 22)
 CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
 CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
@@ -2873,24 +2708,8 @@ local function RefreshUnitConfigUI()
             end
         end
     end
-    for id, cfg in pairs(State.UnitConfigs or {}) do
-        if not byId[id] then
-            local data = LookupUnitData(id)
-            local info = {
-                unitId = id,
-                name = (cfg and cfg.displayName) or State.UnitNames[id] or (data and data.name) or id,
-                spawnCap = data and tonumber(data.spawn_cap) or nil,
-                maxUpgrade = data and type(data.upgrade) == "table" and #data.upgrade or nil,
-                hybrid = data and data.hybrid_placement == true or false,
-                hill = data and data.hill_unit == true or false,
-            }
-            byId[id] = info
-            table.insert(ordered, info)
-        end
-    end
-    table.sort(ordered, function(a, b)
-        return tostring(a.name) < tostring(b.name)
-    end)
+    -- Do not append saved configs here. Only equipped slots 1-6 are shown.
+    -- Keep the game's slot order rather than sorting by display name.
 
     if #hybridNames > 0 then
         HybridInfo.Text = "Equipped hybrid: " .. table.concat(hybridNames, ", ")
@@ -2900,7 +2719,10 @@ local function RefreshUnitConfigUI()
 
     local keyParts = {}
     for _, info in ipairs(ordered) do
-        table.insert(keyParts, info.unitId .. ":" .. tostring(info.spawnCap) .. ":" .. tostring(info.maxUpgrade))
+        table.insert(keyParts, table.concat({
+            tostring(info.unitId), tostring(info.uuid), tostring(info.name),
+            tostring(info.spawnCap), tostring(info.maxUpgrade), tostring(info.hybrid), tostring(info.hill)
+        }, ":"))
     end
     local key = table.concat(keyParts, "|")
     if key == lastUnitKey then
@@ -3032,6 +2854,228 @@ local function RefreshUnitConfigUI()
         end)
     end
 end
+
+-- Portal page: inventory selection and tier priority are kept separate from Auto Play.
+CreateSection(PortalPage, "Select Portal", 1)
+CreateHint(PortalPage, "เลือกประเภทประตูที่ต้องการเปิดจากประตูที่มีอยู่ใน Inventory", 2, 28)
+
+local PortalInventoryList = Instance.new("ScrollingFrame")
+PortalInventoryList.Name = "PortalInventoryList"
+PortalInventoryList.Size = UDim2.new(1, -10, 0, 116)
+PortalInventoryList.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+PortalInventoryList.BorderSizePixel = 0
+PortalInventoryList.ScrollBarThickness = 4
+PortalInventoryList.CanvasSize = UDim2.new(0, 0, 0, 0)
+PortalInventoryList.LayoutOrder = 3
+PortalInventoryList.ZIndex = 12
+PortalInventoryList.Parent = PortalPage
+local PortalInventoryCorner = Instance.new("UICorner")
+PortalInventoryCorner.CornerRadius = UDim.new(0, 6)
+PortalInventoryCorner.Parent = PortalInventoryList
+local PortalInventoryLayout = Instance.new("UIListLayout")
+PortalInventoryLayout.Padding = UDim.new(0, 3)
+PortalInventoryLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PortalInventoryLayout.Parent = PortalInventoryList
+PortalInventoryLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    PortalInventoryList.CanvasSize = UDim2.new(0, 0, 0, PortalInventoryLayout.AbsoluteContentSize.Y + 6)
+end)
+
+CreateSection(PortalPage, "Select Tier", 4)
+CreateHint(PortalPage, "เลือกได้หลาย Tier ระบบจะเปิด Tier สูงสุดก่อน แล้วจึงไล่ลงมาต่ำสุด", 5, 28)
+local PortalTierList = Instance.new("ScrollingFrame")
+PortalTierList.Name = "PortalTierList"
+PortalTierList.Size = UDim2.new(1, -10, 0, 104)
+PortalTierList.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+PortalTierList.BorderSizePixel = 0
+PortalTierList.ScrollBarThickness = 4
+PortalTierList.CanvasSize = UDim2.new(0, 0, 0, 0)
+PortalTierList.LayoutOrder = 6
+PortalTierList.ZIndex = 12
+PortalTierList.Parent = PortalPage
+local PortalTierCorner = Instance.new("UICorner")
+PortalTierCorner.CornerRadius = UDim.new(0, 6)
+PortalTierCorner.Parent = PortalTierList
+local PortalTierLayout = Instance.new("UIListLayout")
+PortalTierLayout.Padding = UDim.new(0, 3)
+PortalTierLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PortalTierLayout.Parent = PortalTierList
+PortalTierLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    PortalTierList.CanvasSize = UDim2.new(0, 0, 0, PortalTierLayout.AbsoluteContentSize.Y + 6)
+end)
+
+local PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 7, 30)
+local PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 8, function() end)
+PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
+
+local function FindLocalInventoryProfile()
+    if type(getgc) ~= "function" then return nil end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" and type(object.inventory) == "table" then
+            local profile = object.inventory.inventory_profile_data
+            if type(profile) == "table" and type(profile.unique_items) == "table" then
+                return profile
+            end
+        end
+    end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local profile = object.inventory_profile_data
+            if type(profile) == "table" and type(profile.unique_items) == "table" then
+                return profile
+            end
+        end
+    end
+    return nil
+end
+
+local function GetOwnedPortals()
+    local profile = FindLocalInventoryProfile()
+    local portals, seen = {}, {}
+    if not profile then return portals, "Inventory session not found (executor getgc support required)." end
+    local itemData = nil
+    pcall(function()
+        local itemsModule = ReplicatedStorage:FindFirstChild("Items", true)
+        if itemsModule and itemsModule:IsA("ModuleScript") then
+            itemData = require(itemsModule)
+        end
+    end)
+    for _, owned in pairs(profile.unique_items) do
+        if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
+            local def = itemData and itemData[owned.item_id]
+            if def and def.item_group == "Portals" then
+                local portalData = owned._unique_item_data and owned._unique_item_data._unique_portal_data
+                local tier = tonumber(portalData and portalData.portal_depth) or 0
+                local key = owned.item_id
+                if not seen[key] then
+                    seen[key] = { id = key, name = tostring(def.name or key), count = 0, entries = {} }
+                    table.insert(portals, seen[key])
+                end
+                seen[key].count = seen[key].count + 1
+                table.insert(seen[key].entries, { uuid = owned.uuid, tier = tier })
+            end
+        end
+    end
+    table.sort(portals, function(a,b) return a.name:lower() < b.name:lower() end)
+    return portals, nil
+end
+
+local portalInventoryCache = {}
+local function RefreshPortalUI()
+    for _, child in ipairs(PortalInventoryList:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    for _, child in ipairs(PortalTierList:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+
+    local portals, err = GetOwnedPortals()
+    portalInventoryCache = portals
+    if err then PortalStatus.Text = err; return end
+
+    local availableTiers, tierCounts = {}, {}
+    for _, portal in ipairs(portals) do
+        for _, entry in ipairs(portal.entries) do
+            availableTiers[entry.tier] = true
+            tierCounts[entry.tier] = (tierCounts[entry.tier] or 0) + 1
+        end
+    end
+    local tierList = {}
+    for tier in pairs(availableTiers) do table.insert(tierList, tier) end
+    table.sort(tierList, function(a, b) return a > b end)
+
+    for index, tier in ipairs(tierList) do
+        local selected = State.SelectedPortalTiers[tostring(tier)] == true
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -8, 0, 27)
+        button.BackgroundColor3 = selected and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(38, 38, 50)
+        button.Text = (selected and "✓  " or "□  ") .. "Tier " .. tostring(tier) .. "   (" .. tostring(tierCounts[tier] or 0) .. " portal(s))"
+        button.TextColor3 = Color3.new(1,1,1)
+        button.TextSize = 11
+        button.Font = Enum.Font.Gotham
+        button.TextXAlignment = Enum.TextXAlignment.Left
+        button.LayoutOrder = index
+        button.ZIndex = 13
+        button.Parent = PortalTierList
+        button.MouseButton1Click:Connect(function()
+            local key = tostring(tier)
+            State.SelectedPortalTiers[key] = not State.SelectedPortalTiers[key] and true or nil
+            SaveConfig()
+            RefreshPortalUI()
+        end)
+    end
+
+    for index, portal in ipairs(portals) do
+        local selected = State.SelectedPortalTypes[portal.id] == true
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(1, -8, 0, 28)
+        button.BackgroundColor3 = selected and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(38, 38, 50)
+        button.Text = (selected and "✓  " or "□  ") .. portal.name .. "  x" .. tostring(portal.count)
+        button.TextColor3 = Color3.new(1,1,1)
+        button.TextSize = 11
+        button.Font = Enum.Font.Gotham
+        button.TextXAlignment = Enum.TextXAlignment.Left
+        button.LayoutOrder = index
+        button.ZIndex = 13
+        button.Parent = PortalInventoryList
+        button.MouseButton1Click:Connect(function()
+            State.SelectedPortalTypes[portal.id] = not State.SelectedPortalTypes[portal.id] and true or nil
+            SaveConfig()
+            RefreshPortalUI()
+        end)
+    end
+    PortalStatus.Text = string.format("Found %d portal type(s). Select portals and tiers, then enable Auto Open Portal.", #portals)
+end
+PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
+CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 9)
+
+local portalOpenBusy = false
+local portalLastRefresh = 0
+local portalOpenedUUIDs = {}
+task.spawn(function()
+    while task.wait(1) do
+        if State.AutoOpenPortal and not portalOpenBusy and IsInLobby() then
+            portalOpenBusy = true
+            local ok, err = pcall(function()
+                local now = os.clock()
+                if now - portalLastRefresh >= 8 then
+                    RefreshPortalUI()
+                    portalLastRefresh = now
+                end
+                local portals = GetOwnedPortals()
+                local candidates = {}
+                for _, portal in ipairs(portals) do
+                    if State.SelectedPortalTypes[portal.id] then
+                        for _, entry in ipairs(portal.entries) do
+                            if State.SelectedPortalTiers[tostring(entry.tier)] and not portalOpenedUUIDs[entry.uuid] then
+                                table.insert(candidates, { uuid = entry.uuid, tier = entry.tier, name = portal.name })
+                            end
+                        end
+                    end
+                end
+                table.sort(candidates, function(a,b) return a.tier > b.tier end)
+                local opened = false
+                for _, entry in ipairs(candidates) do
+                    if not State.AutoOpenPortal then break end
+                    if IsInLobby() then
+                        portalOpenedUUIDs[entry.uuid] = true
+                        local result = InvokeEndpoint("use_portal", entry.uuid)
+                        if result == false then portalOpenedUUIDs[entry.uuid] = nil end
+                        PortalStatus.Text = string.format("Opening %s (Tier %d)...", entry.name, entry.tier)
+                        opened = true
+                        task.wait(3)
+                        break
+                    end
+                end
+                if not opened and #portals == 0 then PortalStatus.Text = "No owned portals found." end
+            end)
+            if not ok then warn("[Octoput Hub Auto Portal] " .. tostring(err)) end
+            portalOpenBusy = false
+        end
+    end
+end)
+
 
 local EventStatusCard = Instance.new("Frame")
 EventStatusCard.Size = UDim2.new(1, -10, 0, 38)
@@ -3183,73 +3227,21 @@ end)
 CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 3, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 4, 50, 150, function()
+CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 4, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 5, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 6, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
     HubScale.Scale = State.UIScale
 end)
 
-local BuffChains = {
-    commander = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
-    windsong = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
-    elfy = { phase = 1, cycleStart = 0, nextCastAt = 0, unitOrder = {} },
-}
-
-local function GetBuffChainCooldown(units, index)
-    local unit = units and units[index or 1]
-    if unit and unit:FindFirstChild("_stats") then
-        local value = unit._stats:FindFirstChild("active_attack_cooldown")
-        if value and tonumber(value.Value) then
-            return math.max(1, tonumber(value.Value))
-        end
-    end
-    return 60
-end
-
-local function GetBuffChainCurseOffset(units)
-    -- Legacy SPA-derived offset retained as a fallback/reference for diagnostics.
-    local unit = units and units[1]
-    local stats = unit and unit:FindFirstChild("_stats")
-    if stats then
-        local candidates = {
-            "attack_cooldown", "base_attack_cooldown",
-            "cooldown", "spa", "base_spa"
-        }
-        for _, name in ipairs(candidates) do
-            local value = stats:FindFirstChild(name)
-            local number = value and tonumber(value.Value)
-            if number and number > 0 then
-                return math.clamp(math.floor(number) % 10, 3, 7)
-            end
-        end
-        -- Some versions expose only the active cooldown. Do not derive SPA
-        -- from that value; use a conservative 5s offset if SPA is unavailable.
-    end
-    return 5
-end
-
-local function GetConfiguredBuffDelay(groupName, nextUnitIndex)
-    local group = State.BuffDelays and State.BuffDelays[groupName]
-    local value = group and tonumber(group[nextUnitIndex])
-    if value == nil then return 0.7 end
-    return math.clamp(value, 0, 30)
-end
-
-local function ResetBuffChain(chain, units)
-    chain.unitOrder = table.clone(units)
-    chain.phase = 1
-    chain.cycleStart = 0
-    chain.nextCastAt = 0
-end
-
 local farmStall = { count = 0, lastChange = 0 }
 local matchEndHandled = false
 
--- Farm-first means all placed farm units must reach their configured upgrade
--- target before Auto Place spends resources on Griffith, buffers, or attackers.
--- The upgrade worker above remains responsible for performing the upgrades.
+-- Farm-first keeps the next Farm upgrade affordable before Auto Place spends
+-- remaining cash on other equipped units.
 local function HasPendingFarmUpgrade(myUnits)
     for _, unit in ipairs(myUnits or {}) do
         if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
@@ -3271,6 +3263,7 @@ local function HasPendingFarmUpgrade(myUnits)
     return false
 end
 local votedStart = false
+local lastVoteAttempt = 0
 local lobbyStartSent = false
 local lastLobbyStartAttempt = 0
 local unitRefreshClock = 0
@@ -3387,6 +3380,7 @@ end
 local function TryAutoStart()
     if not State.AutoStart then
         votedStart = false
+        lastVoteAttempt = 0
         lobbyStartSent = false
         lastLobbyStartAttempt = 0
         return
@@ -3436,21 +3430,28 @@ local function TryAutoStart()
     local data = workspace:FindFirstChild("_DATA")
     local voteFolder = data and data:FindFirstChild("VoteStart")
     local finished = voteFolder and voteFolder:FindFirstChild("VotingFinished")
-    local open = voteGui and voteGui.Enabled and (not finished or finished.Value == false)
+
+    -- The vote is open while the server says VotingFinished == false. The Yes button
+    -- GUI can be hidden or its signal not hookable by the executor, so do not depend on it.
+    local open
+    if finished then
+        open = finished.Value == false
+    else
+        open = voteGui ~= nil and voteGui.Enabled == true
+    end
+
     if open then
-        if not votedStart then
+        -- The game's own Yes button only calls EndpointsClient.invoke_server("vote_start"),
+        -- so send that directly and retry every 2s until the vote closes.
+        if os.clock() - lastVoteAttempt >= 2 then
+            lastVoteAttempt = os.clock()
+            InvokeEndpoint("vote_start")
             votedStart = true
-            local yes = voteGui:FindFirstChild("Holder")
-                and voteGui.Holder:FindFirstChild("ButtonHolder")
-                and voteGui.Holder.ButtonHolder:FindFirstChild("Yes")
-            if yes then
-                FireGuiButton(yes)
-            else
-                InvokeEndpoint("vote_start")
-            end
+            UpdateAutoPlayStatus("Auto Start: Vote Sent", Color3.fromRGB(70, 200, 255))
         end
     else
         votedStart = false
+        lastVoteAttempt = 0
     end
 end
 
@@ -3530,59 +3531,203 @@ local function HandleMatchEnd(gameFinished)
     end)
 end
 
+-- Roblox's standard idle timeout is around 20 minutes. The game source
+-- does not implement a separate AFK timer; handle the Player.Idled event here.
+local antiAfkConnection
+pcall(function()
+    antiAfkConnection = player.Idled:Connect(function()
+        if not State.AntiAFK then
+            return
+        end
+
+        pcall(function()
+            local VirtualUser = game:GetService("VirtualUser")
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new(0, 0))
+        end)
+    end)
+end)
+
 AllowSave = true
 if State.BlackScreen then
     ApplyBlackScreen(true)
 end
 RefreshUnitConfigUI()
 
+-- Estimate the next upgrade price from live unit stats first, then unit data.
+-- Unknown prices sort last instead of being mistaken for free upgrades.
+local function GetNextUpgradeCost(unit)
+    if not unit or not unit:FindFirstChild("_stats") then return math.huge end
+    local stats = unit._stats
+    local keys = { "next_upgrade_cost", "upgrade_cost", "next_cost", "upgrade_price" }
+    local best = nil
+    for _, child in ipairs(stats:GetDescendants()) do
+        local name = NormalizeName(child.Name)
+        local isCost = false
+        for _, key in ipairs(keys) do
+            if name == NormalizeName(key) or name:find("upgradecost", 1, true) then
+                isCost = true break
+            end
+        end
+        if isCost and (child:IsA("NumberValue") or child:IsA("IntValue") or child:IsA("StringValue")) then
+            local value = tonumber(child.Value)
+            if value and value >= 0 then best = value break end
+        end
+    end
+    if best ~= nil then return best end
+
+    local current = stats:FindFirstChild("upgrade")
+    local data = LookupUnitData(GetRawUnitId(unit))
+    local upgrades = type(data) == "table" and data.upgrade or nil
+    if current and type(upgrades) == "table" then
+        local nextInfo = upgrades[(tonumber(current.Value) or 0) + 1]
+        if type(nextInfo) == "table" then
+            local value = tonumber(nextInfo.cost or nextInfo.upgrade_cost or nextInfo.price)
+            if value then return value end
+        end
+    end
+    return math.huge
+end
+
+local pendingUpgradeRequests = {}
+local pendingSpawnRequests = {}
+
+-- In-game cash (same value the game HUD uses for upgrade/placement affordability).
+local function GetInGameCash()
+    local stats = player:FindFirstChild("_stats")
+    local resource = stats and stats:FindFirstChild("resource")
+    return resource and tonumber(resource.Value) or nil
+end
+
+-- Cheapest next upgrade among farm units that still have farm upgrades pending.
+local function GetNextFarmUpgradeCost(myUnits)
+    local best = nil
+    for _, unit in ipairs(myUnits or {}) do
+        if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
+            local stats = unit._stats
+            local current = stats:FindFirstChild("upgrade")
+            local maximum = stats:FindFirstChild("max_upgrade")
+            if current and maximum then
+                local target = tonumber(maximum.Value) or 0
+                local cfg = GetUnitConfig(GetRawUnitId(unit))
+                if cfg and tonumber(cfg.upgradeTarget) then
+                    target = math.min(target, math.max(0, math.floor(cfg.upgradeTarget)))
+                end
+                if current.Value < target then
+                    local cost = GetNextUpgradeCost(unit)
+                    if cost ~= math.huge and (best == nil or cost < best) then best = cost end
+                end
+            end
+        end
+    end
+    return best
+end
+
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
         task.wait(0.5)
-
+        local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             local units = GetPlayerUnits()
-            if #units > 0 then
-                local wave = GetCurrentWave()
-                local upgradable = {}
+            local now = tick()
+            local candidates = {}
 
-                for _, u in ipairs(units) do
-                    if u._stats:FindFirstChild("upgrade") and u._stats:FindFirstChild("max_upgrade")
-                        and u._stats.upgrade.Value < u._stats.max_upgrade.Value then
-                        local cfg = GetUnitConfig(GetRawUnitId(u))
-                        local allowed = true
-
-                        if cfg then
-                            if cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave then
-                                allowed = false
-                            end
-                            if cfg.upgradeTarget ~= nil and u._stats.upgrade.Value >= cfg.upgradeTarget then
-                                allowed = false
-                            end
-                        end
-
-                        if allowed then
-                            table.insert(upgradable, u)
-                        end
-                    end
-                end
-
-                if #upgradable > 0 then
-                    if State.AutoUpgradeFarmFirst then
-                        table.sort(upgradable, function(a, b)
-                            local aFarm = IsFarmUnit(a)
-                            local bFarm = IsFarmUnit(b)
-                            if aFarm ~= bFarm then
-                                return aFarm
-                            end
-                            return a._stats.upgrade.Value < b._stats.upgrade.Value
-                        end)
-                    end
-
-                    InvokeEndpoint("upgrade_unit_ingame", upgradable[1])
+            for unit, pending in pairs(pendingUpgradeRequests) do
+                local stats = unit and unit.Parent and unit:FindFirstChild("_stats")
+                local level = stats and stats:FindFirstChild("upgrade")
+                if not level or level.Value > pending.level or now - pending.time > 5 then
+                    pendingUpgradeRequests[unit] = nil
                 end
             end
+
+            local pendingFarmUpgradeRequest = false
+            local wave = GetCurrentWave()
+            for _, unit in ipairs(units) do
+                local stats = unit:FindFirstChild("_stats")
+                local level = stats and stats:FindFirstChild("upgrade")
+                local maximum = stats and stats:FindFirstChild("max_upgrade")
+                local isFarm = IsFarmUnit(unit)
+                if level then
+                    local rawId = GetRawUnitId(unit)
+                    local data = LookupUnitData(rawId)
+                    local dataMax = type(data) == "table" and type(data.upgrade) == "table" and #data.upgrade or 0
+                    local targetLevel = tonumber(maximum and maximum.Value) or dataMax
+                    local cfg = GetUnitConfig(rawId) or GetUnitConfig(GetUnitId(unit))
+                    if cfg and tonumber(cfg.upgradeTarget) then
+                        targetLevel = math.min(targetLevel, math.max(0, math.floor(tonumber(cfg.upgradeTarget))))
+                    end
+                    local pendingRequest = pendingUpgradeRequests[unit]
+                    if isFarm and pendingRequest then
+                        pendingFarmUpgradeRequest = true
+                    end
+                    if level.Value < targetLevel and not pendingRequest then
+                        local allowed = not (cfg and cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave)
+                        if allowed then
+                            local cost = GetNextUpgradeCost(unit)
+                            local cash = GetInGameCash()
+                            -- Only affordable upgrades enter the queue. An unaffordable
+                            -- Farm upgrade must not block other units from using spare cash.
+                            if cash == nil or (cost ~= math.huge and cost <= cash) then
+                                table.insert(candidates, { unit = unit, cost = cost, farm = isFarm, level = level.Value })
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- Dynamic Farm First:
+            -- 1) If a Farm upgrade is affordable, it always wins over non-Farm units.
+            -- 2) If no Farm upgrade is affordable, other affordable units may upgrade.
+            -- 3) Wait for an issued Farm request to resolve before spending the same
+            --    budget on another unit; then re-read cash and priorities next cycle.
+            if State.AutoUpgradeFarmFirst then
+                if pendingFarmUpgradeRequest then
+                    local farmOnly = {}
+                    for _, candidate in ipairs(candidates) do
+                        if candidate.farm then table.insert(farmOnly, candidate) end
+                    end
+                    candidates = farmOnly
+                    if #candidates == 0 then
+                        UpdateAutoPlayStatus("Waiting for Farm Upgrade", Color3.fromRGB(255, 190, 80))
+                    end
+                else
+                    local affordableFarm = {}
+                    for _, candidate in ipairs(candidates) do
+                        if candidate.farm then table.insert(affordableFarm, candidate) end
+                    end
+                    if #affordableFarm > 0 then
+                        candidates = affordableFarm
+                    end
+                end
+            end
+
+            if #candidates > 0 then
+                table.sort(candidates, function(a, b)
+                    if State.AutoUpgradeFarmFirst and a.farm ~= b.farm then
+                        return a.farm
+                    end
+                    if a.cost ~= b.cost then return a.cost < b.cost end
+                    local aLevel = a.level
+                    local bLevel = b.level
+                    if aLevel ~= bLevel then return aLevel < bLevel end
+                    return tostring(a.unit) < tostring(b.unit)
+                end)
+                local target = candidates[1].unit
+                local targetStats = target:FindFirstChild("_stats")
+                local targetLevel = targetStats and targetStats:FindFirstChild("upgrade")
+                local levelBefore = targetLevel and targetLevel.Value or 0
+                -- Record before yielding so the unit can disappear mid-request safely.
+                pendingUpgradeRequests[target] = { level = levelBefore, time = now }
+                InvokeEndpoint("upgrade_unit_ingame", target)
+            end
+        else
+            table.clear(pendingUpgradeRequests)
+        end
+        end)
+        if not upgradeOk then
+            warn("[OctoputHub] Upgrade worker error: " .. tostring(upgradeErr))
+            task.wait(1)
         end
     end
 end)
@@ -3593,7 +3738,7 @@ task.spawn(function()
         local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
         unitRefreshClock = unitRefreshClock + 0.5
-        if unitRefreshClock >= 2 then
+        if unitRefreshClock >= 1 then
             unitRefreshClock = 0
             pcall(RefreshUnitConfigUI)
         end
@@ -3605,334 +3750,84 @@ task.spawn(function()
             if State.AutoPlace then
                 local equipped = EnrichEquipped(GetEquippedUnitList())
                 if #equipped > 0 then
-                    local partyHasGriffith = false
-                    local partyHasFarm = false
-                    for _, info in ipairs(equipped) do
-                        if IsGriffithName(info.name) or IsGriffithName(info.unitId) then
-                            partyHasGriffith = true
-                        end
-                        if IsFarmInfo(info) then
-                            partyHasFarm = true
-                        end
+                    -- Auto Upgrade Farm First: other units may only be placed with money
+                    -- left over after the next farm upgrade is covered.
+                    local farmReserve = 0
+                    local currentCash = nil
+                    if State.AutoUpgrade and State.AutoUpgradeFarmFirst then
+                        farmReserve = GetNextFarmUpgradeCost(myUnits) or 0
+                        if farmReserve > 0 then currentCash = GetInGameCash() end
                     end
 
-                    -- Placement order is automatic whenever Griffith is equipped; the toggle controls only skill activation.
-                    local useGriffithOrder = partyHasGriffith
-                    local griffithCount = CountCategory(myUnits, IsGriffithUnit)
-                    local griffithReincarnated = false
-                    for _, u in ipairs(myUnits) do
-                        if IsGriffithReincarnation(u) then
-                            griffithReincarnated = true
-                            break
-                        end
-                    end
+                    -- Only consider units we can currently afford, so an expensive unit
+                    -- never blocks cheaper ones from being placed.
+                    local cashNow = GetInGameCash()
 
-                    -- Require every equipped farm type to be placed once. The previous
-                    -- farmCount > 0 check advanced after only Bulby/C.E.O and skipped
-                    -- Weathering Girl for the rest of the match.
-                    local farmRequirements = {}
-                    for _, info in ipairs(equipped) do
-                        if IsFarmInfo(info) then
-                            local key = NormalizeName(info.unitId or info.name)
-                            if key ~= "" then farmRequirements[key] = info end
+                    local eligible = {}
+                    local now = tick()
+                    for uuid, pending in pairs(pendingSpawnRequests) do
+                        local info = nil
+                        for _, equippedInfo in ipairs(equipped) do
+                            if tostring(equippedInfo.uuid or "") == uuid then info = equippedInfo break end
+                        end
+                        local observed = info and CountPlacedInfo(info) or 0
+                        if (pending.countBefore and observed > pending.countBefore) or now - pending.time > 4 then
+                            pendingSpawnRequests[uuid] = nil
                         end
                     end
-                    local farmsReady = true
-                    for key, info in pairs(farmRequirements) do
-                        if CountPlacedInfo(info) < 1 then
-                            farmsReady = false
-                            break
-                        end
-                    end
-
-                    -- During farm setup, skip farm types that are already placed.
-                    -- Without this check the first farm in the equipped list (e.g. Bulby)
-                    -- can be selected repeatedly and block the next farm (Weathering Girl).
-                    local function FarmNeedsPlacement(info)
-                        if not IsFarmInfo(info) then return false end
-                        return CountPlacedInfo(info) < 1
-                    end
-
-                    local farmCount = CountCategory(myUnits, IsFarmUnit)
-                    if farmCount ~= farmStall.count then
-                        farmStall.count = farmCount
-                        farmStall.lastChange = tick()
-                    elseif farmStall.lastChange == 0 then
-                        farmStall.lastChange = tick()
-                    end
-
-                    -- Buffs remain eligible after Griffith evolves. Count equipped copies
-                    -- (up to the four required by the cursed rotation) per buff group.
-                    local buffRequired = { commander = 0, windsong = 0, elfy = 0 }
-                    local buffPlaced = { commander = 0, windsong = 0, elfy = 0 }
-                    for _, info in ipairs(equipped) do
-                        local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
-                        local group = nil
-                        if unitText:find("commander", 1, true) or unitText:find("erwin", 1, true) then
-                            group = "commander"
-                        elseif unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true)
-                            or unitText:find("winddragon", 1, true) then
-                            group = "windsong"
-                        elseif unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true) then
-                            group = "elfy"
-                        end
-                        if group then buffRequired[group] = 1 end
-                    end
-                    -- A present buff group must reach four placed copies for the curse loop.
-                    -- Respect a lower configured/spawn cap if the game data defines one.
-                    for group, present in pairs(buffRequired) do
-                        if present > 0 then
-                            local target = 4
-                            for _, info in ipairs(equipped) do
-                                local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
-                                local matches = (group == "commander" and (unitText:find("commander", 1, true) or unitText:find("erwin", 1, true)))
-                                    or (group == "windsong" and (unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true) or unitText:find("winddragon", 1, true)))
-                                    or (group == "elfy" and (unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true)))
-                                if matches then
-                                    local cap = tonumber(info.spawnCap)
-                                    local cfg = GetUnitConfig(info.unitId)
-                                    if cfg and tonumber(cfg.maxPlace) then cap = cap and math.min(cap, cfg.maxPlace) or cfg.maxPlace end
-                                    if cap then target = math.min(target, cap) end
-
-                                    -- If teammates already consumed the shared cap, count
-                                    -- this buff group as complete for placement sequencing.
-                                    local globalCap = tonumber(info.globalSpawnCap)
-                                    if not globalCap then
-                                        local data = LookupUnitData(info.unitId)
-                                        globalCap = type(data) == "table" and tonumber(data.global_spawn_cap) or nil
-                                    end
-                                    if globalCap then
-                                        local globalCount = CountGlobalPlacedInfo(info)
-                                        local remainingGlobal = math.max(0, globalCap - globalCount)
-                                        target = math.min(target, buffPlaced[group] + remainingGlobal)
-                                    end
-                                    break
-                                end
-                            end
-                            buffRequired[group] = target
-                        end
-                    end
-                    for _, unit in ipairs(myUnits) do
-                        local group = GetBuffChainGroup(unit)
-                        if group then buffPlaced[group] = buffPlaced[group] + 1 end
-                    end
-                    local buffsReady = true
-                    for group, required in pairs(buffRequired) do
-                        if required > 0 and buffPlaced[group] < required then
-                            buffsReady = false
-                            break
-                        end
-                    end
-
-                    local function CanPlaceInfo(info)
-                        if not useGriffithOrder then return true end
-                        local isFarm = IsFarmInfo(info)
-                        local isGriff = IsGriffithName(info.name) or IsGriffithName(info.unitId)
-                        local isBuff = IsBuffName(info.name) or IsBuffName(info.unitId)
-
-                        -- Once Griffith has evolved, stop the sacrifice/farm phase,
-                        -- but continue placing the required support/buff units first.
-                        -- Only release regular attackers after the buff setup is complete.
-                        if griffithReincarnated then
-                            if not buffsReady then
-                                return isBuff
-                            end
-                            return not isGriff and not isFarm and not isBuff
-                        end
-
-                        -- Phase 1: every equipped farm type at least once.
-                        -- Only the farm types still missing a placement are eligible.
-                        if partyHasFarm and not farmsReady then return isFarm and FarmNeedsPlacement(info) end
-                        -- Phase 2: Griffith only after the farm setup is complete.
-                        if griffithCount < 1 then return isGriff end
-                        -- Phase 3: finish the required cursed support copies before attackers.
-                        if not buffsReady then return isBuff end
-                        -- Phase 4: release regular attack units.
-                        return not isGriff and not isFarm and not isBuff
-                    end
-
-                    -- In Griffith mode, explicitly prioritize farms regardless of the
-                    -- equipped-list order (which may put Griffith at index 1).
-                    if useGriffithOrder and partyHasFarm then
-                        table.sort(equipped, function(a, b)
-                            local aFarm = FarmNeedsPlacement(a)
-                            local bFarm = FarmNeedsPlacement(b)
-                            if aFarm ~= bFarm then
-                                return aFarm
-                            end
-                            return false
-                        end)
-                    end
-
-                    -- When Auto Upgrade Farm First is enabled, do not spend money
-                    -- on non-farm placements while any placed farm is still below
-                    -- its configured upgrade target. This also holds Griffith until
-                    -- farm upgrades are complete, preserving the farm-first economy.
-                    local farmUpgradePending = State.AutoUpgrade and State.AutoUpgradeFarmFirst
-                        and HasPendingFarmUpgrade(myUnits)
-                    if farmUpgradePending then
-                        UpdateAutoPlayStatus("Farm upgrades first - saving for farm upgrades", Color3.fromRGB(255, 200, 80))
-                    end
-
-                    local placeIndex = #myUnits
+                    local missingFirst = {}
                     for _, unitInfo in ipairs(equipped) do
-                        local farmUpgradeAllowsPlacement = not farmUpgradePending or IsFarmInfo(unitInfo)
-                        if farmUpgradeAllowsPlacement and CanPlaceInfo(unitInfo) and CanPlaceConfigured(unitInfo, wave) then
-                            if not (useGriffithOrder and IsGriffithName(unitInfo.name) and griffithCount >= 1) then
-                                placeIndex = placeIndex + 1
-                                local cframe, kind = GetPlacementCFrameForInfo(placeIndex, unitInfo)
-                                if cframe then
-                                    InvokeEndpoint("spawn_unit", unitInfo.uuid, cframe)
-                                    -- Place only one unit per scan. This guarantees the
-                                    -- farm-first order is respected before Griffith is considered.
-                                    break
+                        local uuidKey = tostring(unitInfo.uuid or "")
+                        local farmUpgradeAllowsPlacement = true
+                        if farmUpgradeAllowsPlacement and farmReserve > 0 and not IsFarmInfo(unitInfo) then
+                            local unitCost = tonumber(unitInfo.cost) or 0
+                            if currentCash ~= nil and currentCash - unitCost < farmReserve then
+                                farmUpgradeAllowsPlacement = false
+                            end
+                        end
+                        if uuidKey ~= "" and not pendingSpawnRequests[uuidKey]
+                            and farmUpgradeAllowsPlacement
+                            and (cashNow == nil or (tonumber(unitInfo.cost) or 0) <= cashNow)
+                            and CanPlaceConfigured(unitInfo, wave) then
+                            table.insert(eligible, unitInfo)
+                            if CountPlacedInfo(unitInfo) < 1 then
+                                table.insert(missingFirst, unitInfo)
+                            end
+                        end
+                    end
+
+                    -- First guarantee one placement for every equipped unit type; after
+                    -- that, randomly fill remaining allowed copies until each cap is met.
+                    if #missingFirst > 0 then eligible = missingFirst end
+                    if #eligible > 0 then
+                        -- Shuffle candidates, then try each until a valid surface/slot
+                        -- is found. This prevents a hill-only unit (e.g. aqua / Water
+                        -- Goddess) from blocking every other unit when no hill is nearby.
+                        for i = #eligible, 2, -1 do
+                            local j = math.random(1, i)
+                            eligible[i], eligible[j] = eligible[j], eligible[i]
+                        end
+                        for _, chosen in ipairs(eligible) do
+                            local placeIndex = #myUnits + math.random(1, 12)
+                            local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
+                            if cframe then
+                                local countBefore = CountPlacedInfo(chosen)
+                                local ok = InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
+                                if ok ~= false then
+                                    pendingSpawnRequests[tostring(chosen.uuid)] = {
+                                        time = now,
+                                        unitId = chosen.unitId,
+                                        countBefore = countBefore,
+                                    }
                                 end
+                                break
                             end
                         end
                     end
                 end
             else
                 farmStall = { count = 0, lastChange = 0 }
-            end
-
-            if State.AutoBuffChain and #myUnits > 0 then
-                local groups = {
-                    commander = {},
-                    windsong = {},
-                    elfy = {},
-                }
-
-                for _, u in ipairs(myUnits) do
-                    local g = GetBuffChainGroup(u)
-                    if g and groups[g] then
-                        table.insert(groups[g], u)
-                    end
-                end
-
-                -- Do not activate ANY cursed buff until every equipped buff group
-                -- has all four copies placed. This prevents an early group from
-                -- starting its rotation while the remaining support units are absent.
-                local requiredBuffGroups = {}
-                local equippedBuffs = EnrichEquipped(GetEquippedUnitList())
-                for _, info in ipairs(equippedBuffs) do
-                    local unitText = NormalizeName(info.unitId) .. NormalizeName(info.name)
-                    if unitText:find("commander", 1, true) or unitText:find("erwin", 1, true) then
-                        requiredBuffGroups.commander = true
-                    elseif unitText:find("windsong", 1, true) or unitText:find("wenda", 1, true)
-                        or unitText:find("winddragon", 1, true) or unitText:find("wind_dragon", 1, true) then
-                        requiredBuffGroups.windsong = true
-                    elseif unitText:find("elfy", 1, true) or unitText:find("sylph", 1, true) then
-                        requiredBuffGroups.elfy = true
-                    end
-                end
-
-                local allRequiredBuffGroupsReady = true
-                for groupName in pairs(requiredBuffGroups) do
-                    if #groups[groupName] < 4 then
-                        allRequiredBuffGroupsReady = false
-                        break
-                    end
-                end
-
-                local now = tick()
-                if allRequiredBuffGroupsReady and next(requiredBuffGroups) ~= nil then
-                    for groupName, allUnits in pairs(groups) do
-                        -- Cursed 100% method uses four copies of the SAME buffer.
-                        -- Extra copies are left untouched by this rotation.
-                        local units = {}
-                        for i = 1, math.min(4, #allUnits) do
-                            table.insert(units, allUnits[i])
-                        end
-
-                        local chain = BuffChains[groupName]
-                        if #units == 4 then
-                            local changed = #chain.unitOrder ~= 4
-                            if not changed then
-                                for i, unit in ipairs(units) do
-                                    if chain.unitOrder[i] ~= unit then
-                                        changed = true
-                                        break
-                                    end
-                                end
-                            end
-
-                            if changed then
-                                ResetBuffChain(chain, units)
-                            end
-
-                            if now >= chain.nextCastAt then
-                                local phase = chain.phase
-                                local unit = units[phase]
-                                if unit and CanUseActiveAttack(unit) then
-                                    InvokeEndpoint("use_active_attack", unit)
-
-                                    if phase == 1 then
-                                        chain.cycleStart = now
-                                        chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 2)
-                                        chain.phase = 2
-                                    elseif phase == 2 then
-                                        chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 3)
-                                        chain.phase = 3
-                                    elseif phase == 3 then
-                                        chain.nextCastAt = now + GetConfiguredBuffDelay(groupName, 4)
-                                        chain.phase = 4
-                                    else
-                                        -- Start the next cycle when unit 1 is genuinely ready again.
-                                        chain.nextCastAt = chain.cycleStart
-                                            + GetBuffChainCooldown(units, 1)
-                                        chain.phase = 1
-                                    end
-
-                                    UpdateAutoPlayStatus(
-                                        "Cursed Buff Rotation: " .. groupName
-                                            .. " " .. tostring(phase) .. "/4",
-                                        Color3.fromRGB(100, 255, 100)
-                                    )
-                                end
-                            end
-                        else
-                            chain.unitOrder = {}
-                            chain.phase = 1
-                            chain.cycleStart = 0
-                            chain.nextCastAt = 0
-                        end
-                    end
-                else
-                    -- Keep every rotation idle until all required groups reach 4 units.
-                    for _, chain in pairs(BuffChains) do
-                        chain.unitOrder = {}
-                        chain.phase = 1
-                        chain.cycleStart = 0
-                        chain.nextCastAt = 0
-                    end
-                    if next(requiredBuffGroups) ~= nil then
-                        UpdateAutoPlayStatus(
-                            "Waiting for all buff units (4 per equipped buff)",
-                            Color3.fromRGB(255, 190, 80)
-                        )
-                    end
-                end
-            end
-
-            if State.AutoBuffGriffith and #myUnits > 0 then
-                for _, u in ipairs(myUnits) do
-                    if IsGriffithUnit(u) and not IsGriffithReincarnation(u) and CanUseActiveAttack(u) then
-                        InvokeEndpoint("use_active_attack", u)
-                        UpdateAutoPlayStatus("Griffith Buff 100% Activated!", Color3.fromRGB(255, 215, 0))
-                    end
-                end
-            end
-
-            if State.AutoUseAbility and #myUnits > 0 then
-                for _, u in ipairs(myUnits) do
-                    local isChain = State.AutoBuffChain and (GetBuffChainGroup(u) ~= nil)
-                    local isGriffith = State.AutoBuffGriffith and IsGriffithUnit(u)
-                    if not isChain and not isGriffith then
-                        if CanUseActiveAttack(u) then
-                            InvokeEndpoint("use_active_attack", u)
-                        end
-                    end
-                end
+                table.clear(pendingSpawnRequests)
             end
 
             UpdateAutoPlayStatus("Active in Match", Color3.fromRGB(70, 200, 255))
@@ -3951,9 +3846,12 @@ task.spawn(function()
     end
 end)
 
+local lastMatchmakingRequest = 0
+local lastQuestClaim = 0
 task.spawn(function()
     while true do
         task.wait(1.5)
+        local mmOk, mmErr = pcall(function()
 
         TryAutoStart()
 
@@ -3969,7 +3867,10 @@ task.spawn(function()
                     UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
                 else
                     UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
-                    InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                    if os.clock() - lastMatchmakingRequest >= 5 then
+                        lastMatchmakingRequest = os.clock()
+                        InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                    end
                 end
             elseif not matchEndHandled then
                 UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
@@ -3995,8 +3896,14 @@ task.spawn(function()
             end
         end
 
-        if State.AutoEventQuests then
+        if State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
+            lastQuestClaim = os.clock()
             InvokeEndpoint("claim_summer2_map_board_lines")
+        end
+        end)
+        if not mmOk then
+            warn("[OctoputHub] Match/Start worker error: " .. tostring(mmErr))
+            task.wait(1)
         end
     end
 end)
@@ -4014,6 +3921,8 @@ task.spawn(function()
                 webhookGameWasActive = false
                 webhookSent = false
                 webhookCurrencyBefore = nil
+                webhookSecretRewardBefore = nil
+                webhookSecretRewardBaselineAvailable = false
             end
 
             local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
