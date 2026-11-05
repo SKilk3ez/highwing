@@ -1017,10 +1017,11 @@ BUFF_ROTATION_ATTACKS = {
     ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical" },
     ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic" },
 }
-BUFF_ROTATION_RUNTIME = { groups = {}, lastRequestAt = 0 }
+BUFF_ROTATION_RUNTIME = { groups = {}, requestBusy = false }
 BUFF_ROTATION_CURSE_CACHE = {}
 BUFF_ROTATION_MIN_REQUEST_GAP = 0.5
 BUFF_ROTATION_PENDING_TIMEOUT = 4.5
+BUFF_ROTATION_SAFETY_MARGIN = 0.75
 
 function GetOwnedUnitRecordForPlacedUnit(unit)
     if not unit or not unit:FindFirstChild("_stats") then return nil end
@@ -1097,10 +1098,16 @@ function GetBuffRotationGroups()
             local activeValue = stats:FindFirstChild("active_attack")
             local activeId = activeValue and tostring(activeValue.Value) or "nil"
 
-            -- Current game.lua defines Elfy (Sylph) as a buff-highlight unit but
-            -- does not give leafa_evolved an active_attack. It is therefore not
-            -- safe to send use_active_attack for it; count it for the status UI.
-            if NormalizeName(rawId) == "leafaevolved" and activeId == "nil" then
+            -- Elfy (Sylph) is a passive range aura, not an Active ability.
+            -- Identify it from both the deployed ID and the loaded game.lua data
+            -- so naming/ID formatting differences do not hide it from the UI.
+            local normalizedRawId = NormalizeName(rawId)
+            local normalizedDataId = NormalizeName(unitData and unitData.id)
+            local normalizedDataName = NormalizeName(unitData and unitData.name)
+            local isElfySylph = normalizedRawId == "leafaevolved"
+                or normalizedDataId == "leafaevolved"
+                or normalizedDataName == "elfysylph"
+            if isElfySylph then
                 passiveElfyCount = passiveElfyCount + 1
             end
 
@@ -1147,11 +1154,22 @@ function GetBuffRotationGroups()
         table.sort(group.units, function(a, b)
             return tostring(a.uuid) < tostring(b.uuid)
         end)
-        -- A unit must be ready again by its next turn. The interval is derived
-        -- from the slowest live active cooldown divided by the available copies.
-        -- It is capped by the 30s buff duration; live readiness checks below
-        -- prevent early casts when a single unit cannot sustain a continuous loop.
-        group.interval = math.max(0.75, math.min(group.duration, group.maxCooldown / math.max(1, #group.units)))
+
+        -- The game's native Auto Active worker does NOT schedule one cast at
+        -- cooldown/count intervals. It independently checks every unit's own
+        -- active cooldown and requests each ready unit (with a 0.5s per-unit
+        -- request guard). Mirror that behavior below. For the UI, estimate the
+        -- group's sustainable cadence from the sum of each unit's cast rate.
+        local totalRate = 0
+        for _, entry in ipairs(group.units) do
+            totalRate = totalRate + (1 / math.max(0.1, entry.cooldown))
+        end
+        group.totalRate = totalRate
+        group.interval = totalRate > 0 and (1 / totalRate) or math.huge
+        group.averageCooldown = #group.units > 0 and (#group.units / math.max(totalRate, 0.000001)) or math.huge
+        local safeDuration = math.max(1, group.duration - BUFF_ROTATION_SAFETY_MARGIN)
+        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / safeDuration))
+        group.sustainable = totalRate >= (1 / safeDuration)
     end
     return groups, passiveElfyCount
 end
@@ -3284,7 +3302,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Automatically detects Curse cooldown reductions and adapts the buff timing from each placed unit's live Active Cooldown.", 6, 32)
+CreateHint(AutoPlayPage, "Commander / Windsong: automatically casts Active when ready. Elfy (Sylph): passive range aura; placing it automatically marks units in range, so it has no Active button to press.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -4930,21 +4948,28 @@ task.spawn(function()
     end
 end)
 
--- Adaptive Commander / Windsong buff rotation.
--- Cast confirmation is based on last_active_cast changing, not on the remote's
--- return value. This lets the next interval self-correct after missed/late casts.
+-- Adaptive Commander / Windsong Active rotation.
+-- Elfy (Sylph) is intentionally excluded: game.lua defines it as a passive
+-- placement/range aura (_placement_highlight_buffed_units), with no active_attack.
+-- This mirrors Anime Adventures' native Auto Active loop from game.lua:
+-- scan every deployed unit independently, and cast as soon as that unit's
+-- active_attack_cooldown has elapsed. Do not gate casts behind cooldown/count
+-- intervals; that artificial group timer was the reason non-Curse rotations
+-- could stall even while another deployed unit was ready.
 task.spawn(function()
     while true do
-        task.wait(0.25)
+        task.wait(0.1)
         local rotationOk, rotationErr = pcall(function()
             if not State.AutoBuffRotation then
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
                 BUFF_ROTATION_RUNTIME.groups = {}
+                BUFF_ROTATION_RUNTIME.requestBusy = false
                 return
             end
             if IsInLobby() or not workspace:FindFirstChild("_UNITS") then
                 SetBuffRotationStatus("Auto Buff: Waiting for match...", Color3.fromRGB(160, 160, 180))
                 BUFF_ROTATION_RUNTIME.groups = {}
+                BUFF_ROTATION_RUNTIME.requestBusy = false
                 return
             end
 
@@ -4959,25 +4984,10 @@ task.spawn(function()
                 if group and #group.units > 0 then
                     hasActionableUnits = true
                     local runtime = BUFF_ROTATION_RUNTIME.groups[attackId]
-                        or { seenCast = {}, pending = {}, nextAt = now, initialized = false, latestCast = 0, cursor = 1 }
-                    local interval = group.interval
-
-                    if not runtime.initialized then
-                        runtime.initialized = true
-                        local latest = 0
-                        for _, entry in ipairs(group.units) do
-                            runtime.seenCast[entry.model] = entry.lastCast
-                            latest = math.max(latest, entry.lastCast)
-                        end
-                        runtime.latestCast = latest
-                        runtime.nextAt = latest > 0 and math.max(now, latest + interval) or now
-                        runtime.interval = interval
-                    elseif not runtime.interval or math.abs(runtime.interval - interval) > 0.25 then
-                        runtime.interval = interval
-                        runtime.nextAt = runtime.latestCast > 0 and math.max(now, runtime.latestCast + interval) or now
-                    end
-
+                        or { seenCast = {}, pending = {}, lastRequest = {} }
                     local liveSet = {}
+                    local ready = {}
+
                     for _, entry in ipairs(group.units) do
                         local unit = entry.model
                         liveSet[unit] = true
@@ -4987,73 +4997,75 @@ task.spawn(function()
                         elseif entry.lastCast > seen + 0.05 then
                             runtime.seenCast[unit] = entry.lastCast
                             runtime.pending[unit] = nil
-                            if entry.lastCast > (runtime.latestCast or 0) then
-                                runtime.latestCast = entry.lastCast
-                                runtime.nextAt = entry.lastCast + interval
-                            end
                         end
 
                         local pending = runtime.pending[unit]
                         if pending then
                             if entry.lastCast > (pending.before or 0) + 0.05 then
                                 runtime.pending[unit] = nil
+                                pending = nil
                             elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
+                                -- The request did not produce a cast. Clear it and
+                                -- retry on the next eligible scan, not after a full
+                                -- rotation interval.
                                 runtime.pending[unit] = nil
-                                runtime.nextAt = math.min(runtime.nextAt or now, now + 1)
+                                pending = nil
                             end
                         end
+
+                        local stats = unit and unit:FindFirstChild("_stats")
+                        local busyValue = stats and stats:FindFirstChild("active_queued_or_using")
+                        local busy = busyValue and busyValue.Value == true
+                        local remaining = entry.cooldown - (now - entry.lastCast)
+                        local lastRequest = runtime.lastRequest[unit] or -math.huge
+                        if not pending and not busy and remaining <= 0
+                            and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                            table.insert(ready, entry)
+                        end
                     end
+
                     for unit in pairs(runtime.seenCast) do
                         if not liveSet[unit] then
                             runtime.seenCast[unit] = nil
                             runtime.pending[unit] = nil
+                            runtime.lastRequest[unit] = nil
                         end
                     end
+
+                    table.sort(ready, function(a, b)
+                        if math.abs(a.lastCast - b.lastCast) < 0.05 then
+                            return tostring(a.uuid) < tostring(b.uuid)
+                        end
+                        return a.lastCast < b.lastCast
+                    end)
 
                     local curseMode = GetBuffRotationCurseMode(group)
-                    table.insert(statusParts, string.format("%s: %s | %d units | %.1fs", group.name, curseMode, #group.units, interval))
+                    local capacityText = group.sustainable and "Loop capacity OK"
+                        or ("Need about " .. tostring(group.requiredUnitsEstimate) .. " units total")
+                    local intervalText = group.interval < math.huge and string.format("%.1fs avg", group.interval) or "N/A"
+                    table.insert(statusParts, string.format("%s: %s | %d units | %s | %s",
+                        group.name, curseMode, #group.units, intervalText, capacityText))
 
-                    if now >= (runtime.nextAt or now)
-                        and now - (BUFF_ROTATION_RUNTIME.lastRequestAt or 0) >= BUFF_ROTATION_MIN_REQUEST_GAP then
-                        local ready = {}
-                        local nextReadyAt = math.huge
-                        for _, entry in ipairs(group.units) do
-                            local unit = entry.model
-                            local stats = unit and unit:FindFirstChild("_stats")
-                            local busyValue = stats and stats:FindFirstChild("active_queued_or_using")
-                            local busy = busyValue and busyValue.Value == true
-                            local pending = runtime.pending[unit]
-                            local remaining = entry.cooldown - (now - entry.lastCast)
-                            if not pending then
-                                if not busy and remaining <= 0 then
-                                    table.insert(ready, entry)
-                                elseif not busy then
-                                    nextReadyAt = math.min(nextReadyAt, now + math.max(0.1, remaining))
-                                end
+                    -- The game client serializes active requests globally, while
+                    -- keeping the 0.5s guard per unit. Reproduce that behavior;
+                    -- each unit is still checked independently every 0.1s.
+                    if #ready > 0 and not BUFF_ROTATION_RUNTIME.requestBusy then
+                        local chosen = ready[1]
+                        BUFF_ROTATION_RUNTIME.requestBusy = true
+                        runtime.lastRequest[chosen.model] = now
+                        runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
+                        task.spawn(function()
+                            local ok, err = pcall(function()
+                                InvokeEndpoint("use_active_attack", chosen.model)
+                            end)
+                            if not ok then
+                                warn("[OctoputHub] Buff request failed: " .. tostring(err))
+                                runtime.pending[chosen.model] = nil
                             end
-                        end
-
-                        table.sort(ready, function(a, b)
-                            if math.abs(a.lastCast - b.lastCast) < 0.05 then
-                                return tostring(a.uuid) < tostring(b.uuid)
-                            end
-                            return a.lastCast < b.lastCast
+                            BUFF_ROTATION_RUNTIME.requestBusy = false
                         end)
-
-                        if #ready > 0 then
-                            local chosen = ready[1]
-                            local before = chosen.lastCast
-                            runtime.pending[chosen.model] = { time = now, before = before }
-                            runtime.nextAt = now + interval
-                            BUFF_ROTATION_RUNTIME.lastRequestAt = now
-                            -- This is the same endpoint used by the game's own Active button.
-                            InvokeEndpoint("use_active_attack", chosen.model)
-                        elseif nextReadyAt < math.huge then
-                            runtime.nextAt = math.max(now + 0.2, nextReadyAt)
-                        else
-                            runtime.nextAt = now + 0.5
-                        end
                     end
+
                     nextRuntimeGroups[attackId] = runtime
                 end
             end
@@ -5061,12 +5073,12 @@ task.spawn(function()
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
             if not hasActionableUnits then
                 if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) has no active_attack in current game.lua; Commander / Windsong are required for active rotation.", Color3.fromRGB(255, 190, 100))
+                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) passive aura detected (no button; applies automatically in range). Commander / Windsong use Active rotation.", Color3.fromRGB(255, 190, 100))
                 else
                     SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
             else
-                local suffix = passiveElfyCount > 0 and " | Elfy has no active_attack" or ""
+                local suffix = passiveElfyCount > 0 and " | Elfy (Sylph): passive aura, auto in range" or ""
                 SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
             end
         end)
