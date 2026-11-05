@@ -1,41 +1,26 @@
--- Keep script-level state in a private environment so large feature sets do not
--- exceed Lua/Luau's 200 active-local limit. Executor globals remain readable.
-local _octoputBaseEnv = (type(getfenv) == "function" and getfenv(1)) or _G
-local _octoputPrivateEnv = setmetatable({}, { __index = _octoputBaseEnv })
-if type(setfenv) == "function" then
-    -- setfenv is invoked by pcall: level 1 is pcall and level 2 is this chunk.
-    local _octoputEnvSetOk = pcall(setfenv, 2, _octoputPrivateEnv)
-    if not _octoputEnvSetOk then
-        _octoputPrivateEnv = _octoputBaseEnv
-    end
-else
-    -- Compatibility fallback for runtimes without setfenv; names remain global.
-    _octoputPrivateEnv = _octoputBaseEnv
-end
-
 -- [[ XT Hub Style GUI Script for Executor ]] --
-Players = game:GetService("Players")
-TweenService = game:GetService("TweenService")
-UserInputService = game:GetService("UserInputService")
-ReplicatedStorage = game:GetService("ReplicatedStorage")
-RunService = game:GetService("RunService")
-HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
 
-player = Players.LocalPlayer
-playerGui = player:WaitForChild("PlayerGui")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
 
 if playerGui:FindFirstChild("XT_Hub_UI") then
     playerGui:FindFirstChild("XT_Hub_UI"):Destroy()
 end
 
-ScreenGui = Instance.new("ScreenGui")
+local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "XT_Hub_UI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.DisplayOrder = 120
 ScreenGui.Parent = playerGui
 
-BlackOverlay = Instance.new("Frame")
+local BlackOverlay = Instance.new("Frame")
 BlackOverlay.Name = "BlackScreenOverlay"
 BlackOverlay.Size = UDim2.new(1, 0, 1, 0)
 BlackOverlay.BackgroundColor3 = Color3.new(0, 0, 0)
@@ -44,7 +29,7 @@ BlackOverlay.Visible = false
 BlackOverlay.ZIndex = 1
 BlackOverlay.Parent = ScreenGui
 
-MainFrame = Instance.new("Frame")
+local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
 MainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
 MainFrame.Size = UDim2.new(0, 780, 0, 480)
@@ -56,16 +41,16 @@ MainFrame.Draggable = true
 MainFrame.ZIndex = 10
 MainFrame.Parent = ScreenGui
 
-HubScale = Instance.new("UIScale")
+local HubScale = Instance.new("UIScale")
 HubScale.Name = "HubScale"
 HubScale.Scale = 1
 HubScale.Parent = MainFrame
 
 -- Mobile-friendly floating launcher. The image is cached locally through the executor
 -- because Roblox ImageLabel cannot display an arbitrary https URL directly.
-FLOATING_LOGO_URL = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png"
-FLOATING_LOGO_FILE = "OctoputHub/floating_logo.png"
-FloatingButton = Instance.new("ImageButton")
+local FLOATING_LOGO_URL = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png"
+local FLOATING_LOGO_FILE = "OctoputHub/floating_logo.png"
+local FloatingButton = Instance.new("ImageButton")
 FloatingButton.Name = "FloatingOpenButton"
 FloatingButton.Size = UDim2.fromOffset(58, 58)
 FloatingButton.Position = UDim2.new(1, -78, 0.55, -29)
@@ -81,59 +66,15 @@ FloatingButton.Image = ""
 FloatingButton.ScaleType = Enum.ScaleType.Fit
 FloatingButton.Parent = ScreenGui
 
-FloatingCorner = Instance.new("UICorner")
+local FloatingCorner = Instance.new("UICorner")
 FloatingCorner.CornerRadius = UDim.new(0, 16)
 FloatingCorner.Parent = FloatingButton
-FloatingStroke = Instance.new("UIStroke")
+local FloatingStroke = Instance.new("UIStroke")
 FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
 FloatingStroke.Transparency = 0.2
 FloatingStroke.Thickness = 1.5
 FloatingStroke.Parent = FloatingButton
-
--- Mythic-style aura: layered soft borders with the same animated rainbow treatment
--- used by the game's Mythic GUI gradient effects. The aura is only shown on hover.
-FloatingAuraLayers = {}
-MythicColorSequence = ColorSequence.new({
-    ColorSequenceKeypoint.new(0.00, Color3.fromRGB(75, 235, 255)),
-    ColorSequenceKeypoint.new(0.20, Color3.fromRGB(90, 125, 255)),
-    ColorSequenceKeypoint.new(0.42, Color3.fromRGB(190, 90, 255)),
-    ColorSequenceKeypoint.new(0.62, Color3.fromRGB(255, 95, 190)),
-    ColorSequenceKeypoint.new(0.82, Color3.fromRGB(255, 190, 90)),
-    ColorSequenceKeypoint.new(1.00, Color3.fromRGB(75, 235, 255)),
-})
-for index = 1, 3 do
-    local aura = Instance.new("Frame")
-    aura.Name = "MythicAura" .. index
-    aura.AnchorPoint = Vector2.new(0.5, 0.5)
-    aura.Position = UDim2.fromScale(0.5, 0.5)
-    aura.Size = UDim2.new(1, 8 + index * 7, 1, 8 + index * 7)
-    aura.BackgroundTransparency = 1
-    aura.BorderSizePixel = 0
-    aura.Visible = false
-    aura.ZIndex = FloatingButton.ZIndex - 1
-    aura.Parent = FloatingButton
-    local auraCorner = Instance.new("UICorner")
-    auraCorner.CornerRadius = UDim.new(0, 19 + index * 3)
-    auraCorner.Parent = aura
-    local auraStroke = Instance.new("UIStroke")
-    auraStroke.Name = "AuraStroke"
-    auraStroke.Thickness = index == 1 and 3 or (index == 2 and 5 or 7)
-    auraStroke.Transparency = index == 1 and 0.08 or (index == 2 and 0.32 or 0.58)
-    auraStroke.Parent = aura
-    local auraGradient = Instance.new("UIGradient")
-    auraGradient.Color = MythicColorSequence
-    auraGradient.Rotation = 0
-    auraGradient.Parent = auraStroke
-    table.insert(FloatingAuraLayers, { frame = aura, stroke = auraStroke, gradient = auraGradient })
-end
-FloatingButtonScale = Instance.new("UIScale")
-FloatingButtonScale.Name = "PressScale"
-FloatingButtonScale.Scale = 1
-FloatingButtonScale.Parent = FloatingButton
-FloatingStrokeGradient = Instance.new("UIGradient")
-FloatingStrokeGradient.Color = MythicColorSequence
-FloatingStrokeGradient.Parent = FloatingStroke
-FloatingFallback = Instance.new("TextLabel")
+local FloatingFallback = Instance.new("TextLabel")
 FloatingFallback.Name = "FallbackText"
 FloatingFallback.Size = UDim2.fromScale(1, 1)
 FloatingFallback.BackgroundTransparency = 1
@@ -145,12 +86,12 @@ FloatingFallback.ZIndex = 201
 FloatingFallback.Parent = FloatingButton
 
 -- Promotional match overlay: remains visible above the black render-reduction layer.
-MatchInfoPanel = Instance.new("Frame")
+local MatchInfoPanel = Instance.new("Frame")
 MatchInfoPanel.Name = "BlackScreenMatchInfo"
 MatchInfoPanel.AnchorPoint = Vector2.new(0.5, 0.5)
 MatchInfoPanel.Position = UDim2.fromScale(0.5, 0.5)
 MatchInfoPanel.Size = UDim2.new(0.84, 0, 0, 286)
-MatchPanelConstraint = Instance.new("UISizeConstraint")
+local MatchPanelConstraint = Instance.new("UISizeConstraint")
 MatchPanelConstraint.MinSize = Vector2.new(280, 250)
 MatchPanelConstraint.MaxSize = Vector2.new(520, 286)
 MatchPanelConstraint.Parent = MatchInfoPanel
@@ -160,16 +101,16 @@ MatchInfoPanel.BorderSizePixel = 0
 MatchInfoPanel.Visible = false
 MatchInfoPanel.ZIndex = 180
 MatchInfoPanel.Parent = ScreenGui
-MatchPanelCorner = Instance.new("UICorner")
+local MatchPanelCorner = Instance.new("UICorner")
 MatchPanelCorner.CornerRadius = UDim.new(0, 18)
 MatchPanelCorner.Parent = MatchInfoPanel
-MatchPanelStroke = Instance.new("UIStroke")
+local MatchPanelStroke = Instance.new("UIStroke")
 MatchPanelStroke.Color = Color3.fromRGB(105, 125, 190)
 MatchPanelStroke.Thickness = 2
 MatchPanelStroke.Transparency = 0.12
 MatchPanelStroke.Parent = MatchInfoPanel
 
-PromoLogo = Instance.new("ImageLabel")
+local PromoLogo = Instance.new("ImageLabel")
 PromoLogo.Name = "PromoLogo"
 PromoLogo.Position = UDim2.fromOffset(18, 18)
 PromoLogo.Size = UDim2.fromOffset(82, 82)
@@ -179,10 +120,10 @@ PromoLogo.BorderSizePixel = 0
 PromoLogo.ScaleType = Enum.ScaleType.Fit
 PromoLogo.ZIndex = 181
 PromoLogo.Parent = MatchInfoPanel
-PromoLogoCorner = Instance.new("UICorner")
+local PromoLogoCorner = Instance.new("UICorner")
 PromoLogoCorner.CornerRadius = UDim.new(0, 14)
 PromoLogoCorner.Parent = PromoLogo
-PromoLogoFallback = Instance.new("TextLabel")
+local PromoLogoFallback = Instance.new("TextLabel")
 PromoLogoFallback.Size = UDim2.fromScale(1, 1)
 PromoLogoFallback.BackgroundTransparency = 1
 PromoLogoFallback.Text = "OCTOPUT HUB"
@@ -192,7 +133,7 @@ PromoLogoFallback.TextSize = 12
 PromoLogoFallback.ZIndex = 182
 PromoLogoFallback.Parent = PromoLogo
 
-function MakeMatchLabel(name, position, size, text, textSize, color, font)
+local function MakeMatchLabel(name, position, size, text, textSize, color, font)
     local label = Instance.new("TextLabel")
     label.Name = name
     label.Position = position
@@ -211,10 +152,10 @@ function MakeMatchLabel(name, position, size, text, textSize, color, font)
 end
 
 MakeMatchLabel("PromoTitle", UDim2.fromOffset(116, 18), UDim2.new(1, -134, 0, 30), "OCTOPUT HUB  |  LIVE MATCH", 19, Color3.fromRGB(255, 255, 255), Enum.Font.GothamBlack)
-MatchStageLabel = MakeMatchLabel("Stage", UDim2.fromOffset(116, 53), UDim2.new(1, -134, 0, 25), "STAGE: Loading...", 15, Color3.fromRGB(190, 205, 255), Enum.Font.GothamBold)
-MatchTimerLabel = MakeMatchLabel("ElapsedTime", UDim2.fromOffset(18, 119), UDim2.new(0.5, -25, 0, 32), "TIME  00:00:00", 21, Color3.fromRGB(120, 235, 180), Enum.Font.GothamBlack)
-MatchWaveLabel = MakeMatchLabel("Wave", UDim2.new(0.5, 7, 0, 119), UDim2.new(0.5, -25, 0, 32), "WAVE  0", 21, Color3.fromRGB(255, 210, 120), Enum.Font.GothamBlack)
-MatchStatsLabel = MakeMatchLabel("PlayerStats", UDim2.fromOffset(18, 166), UDim2.new(1, -36, 0, 98), "PLAYER STATS  |  Loading...", 15, Color3.fromRGB(225, 230, 245), Enum.Font.GothamMedium)
+local MatchStageLabel = MakeMatchLabel("Stage", UDim2.fromOffset(116, 53), UDim2.new(1, -134, 0, 25), "STAGE: Loading...", 15, Color3.fromRGB(190, 205, 255), Enum.Font.GothamBold)
+local MatchTimerLabel = MakeMatchLabel("ElapsedTime", UDim2.fromOffset(18, 119), UDim2.new(0.5, -25, 0, 32), "TIME  00:00:00", 21, Color3.fromRGB(120, 235, 180), Enum.Font.GothamBlack)
+local MatchWaveLabel = MakeMatchLabel("Wave", UDim2.new(0.5, 7, 0, 119), UDim2.new(0.5, -25, 0, 32), "WAVE  0", 21, Color3.fromRGB(255, 210, 120), Enum.Font.GothamBlack)
+local MatchStatsLabel = MakeMatchLabel("PlayerStats", UDim2.fromOffset(18, 166), UDim2.new(1, -36, 0, 98), "PLAYER STATS  |  Loading...", 15, Color3.fromRGB(225, 230, 245), Enum.Font.GothamMedium)
 MatchStatsLabel.TextYAlignment = Enum.TextYAlignment.Top
 MatchStatsLabel.TextWrapped = true
 
@@ -266,12 +207,12 @@ task.spawn(function()
 end)
 
 -- Drag with mouse or touch; tap/click toggles the hub window.
-floatingDragging = false
-floatingDragInput = nil
-floatingDragStart = nil
-floatingStartPosition = nil
-floatingMoved = false
-suppressFloatingClick = false
+local floatingDragging = false
+local floatingDragInput = nil
+local floatingDragStart = nil
+local floatingStartPosition = nil
+local floatingMoved = false
+local suppressFloatingClick = false
 FloatingButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         floatingDragging = true
@@ -309,81 +250,19 @@ UserInputService.InputEnded:Connect(function(input)
         floatingDragInput = nil
     end
 end)
-floatingHover = false
-floatingStrokeRotationTween = nil
-function SetFloatingAura(visible)
-    floatingHover = visible
-    for _, layer in ipairs(FloatingAuraLayers) do
-        if visible then layer.frame.Visible = true end
-        TweenService:Create(layer.stroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-            Transparency = visible and (layer == FloatingAuraLayers[1] and 0.08 or (layer == FloatingAuraLayers[2] and 0.32 or 0.58)) or 1
-        }):Play()
-    end
-    TweenService:Create(FloatingStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-        Transparency = visible and 0 or 0.2,
-        Thickness = visible and 2.2 or 1.5
-    }):Play()
-    if visible then
-        if floatingStrokeRotationTween then floatingStrokeRotationTween:Cancel() end
-        FloatingStrokeGradient.Rotation = 0
-        floatingStrokeRotationTween = TweenService:Create(FloatingStrokeGradient, TweenInfo.new(3.8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 })
-        floatingStrokeRotationTween:Play()
-        for _, layer in ipairs(FloatingAuraLayers) do
-            if layer.rotationTween then layer.rotationTween:Cancel() end
-            layer.gradient.Rotation = 0
-            local rotationTween = TweenService:Create(layer.gradient, TweenInfo.new(3.2 + (#FloatingAuraLayers * 0.25), Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1), { Rotation = 360 })
-            rotationTween:Play()
-            layer.rotationTween = rotationTween
-        end
-    else
-        if floatingStrokeRotationTween then floatingStrokeRotationTween:Cancel(); floatingStrokeRotationTween = nil end
-        for _, layer in ipairs(FloatingAuraLayers) do
-            if layer.rotationTween then layer.rotationTween:Cancel(); layer.rotationTween = nil end
-        end
-        task.delay(0.2, function()
-            if not floatingHover then
-                for _, layer in ipairs(FloatingAuraLayers) do layer.frame.Visible = false end
-            end
-        end)
-    end
-end
-
-FloatingButton.MouseEnter:Connect(function()
-    SetFloatingAura(true)
-end)
-FloatingButton.MouseLeave:Connect(function()
-    SetFloatingAura(false)
-end)
-FloatingButton.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        TweenService:Create(FloatingButtonScale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.9 }):Play()
-    end
-end)
-FloatingButton.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        TweenService:Create(FloatingButtonScale, TweenInfo.new(0.13, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
-    end
-end)
 FloatingButton.Activated:Connect(function()
     if suppressFloatingClick then
         suppressFloatingClick = false
         return
     end
-    -- A short physical press/release animation, then toggle the hub.
-    TweenService:Create(FloatingButtonScale, TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { Scale = 0.9 }):Play()
-    task.delay(0.08, function()
-        if FloatingButton and FloatingButton.Parent then
-            TweenService:Create(FloatingButtonScale, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1 }):Play()
-        end
-    end)
     MainFrame.Visible = not MainFrame.Visible
 end)
 
-MainCorner = Instance.new("UICorner")
+local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 10)
 MainCorner.Parent = MainFrame
 
-TitleLabel = Instance.new("TextLabel")
+local TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -20, 0, 35)
 TitleLabel.Position = UDim2.new(0, 15, 0, 8)
 TitleLabel.BackgroundTransparency = 1
@@ -395,7 +274,7 @@ TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
 TitleLabel.ZIndex = 11
 TitleLabel.Parent = MainFrame
 
-Sidebar = Instance.new("Frame")
+local Sidebar = Instance.new("Frame")
 Sidebar.Name = "Sidebar"
 Sidebar.Size = UDim2.new(0, 160, 1, -45)
 Sidebar.Position = UDim2.new(0, 10, 0, 40)
@@ -404,22 +283,22 @@ Sidebar.BorderSizePixel = 0
 Sidebar.ZIndex = 11
 Sidebar.Parent = MainFrame
 
-SidebarCorner = Instance.new("UICorner")
+local SidebarCorner = Instance.new("UICorner")
 SidebarCorner.CornerRadius = UDim.new(0, 8)
 SidebarCorner.Parent = Sidebar
 
-SidebarList = Instance.new("UIListLayout")
+local SidebarList = Instance.new("UIListLayout")
 SidebarList.SortOrder = Enum.SortOrder.LayoutOrder
 SidebarList.Padding = UDim.new(0, 4)
 SidebarList.Parent = Sidebar
 
-SidebarPadding = Instance.new("UIPadding")
+local SidebarPadding = Instance.new("UIPadding")
 SidebarPadding.PaddingTop = UDim.new(0, 8)
 SidebarPadding.PaddingLeft = UDim.new(0, 8)
 SidebarPadding.PaddingRight = UDim.new(0, 8)
 SidebarPadding.Parent = Sidebar
 
-ContentArea = Instance.new("Frame")
+local ContentArea = Instance.new("Frame")
 ContentArea.Name = "ContentArea"
 ContentArea.Size = UDim2.new(1, -185, 1, -45)
 ContentArea.Position = UDim2.new(0, 175, 0, 40)
@@ -427,10 +306,10 @@ ContentArea.BackgroundTransparency = 1
 ContentArea.ZIndex = 11
 ContentArea.Parent = MainFrame
 
-CONFIG_FILE = "OctoputHub/config.json"
-AllowSave = false
+local CONFIG_FILE = "OctoputHub/config.json"
+local AllowSave = false
 
-State = {
+local State = {
     AutoPlace = false,
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
@@ -463,7 +342,7 @@ State = {
 }
 
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
-BUFF_DEFS = {
+local BUFF_DEFS = {
     { id = "attack", label = "Attack" },
     { id = "range", label = "Range" },
     { id = "cooldown", label = "Cooldown" },
@@ -484,7 +363,7 @@ BUFF_DEFS = {
     { id = "blessing", label = "Blessings" },
 }
 
-DEBUFF_DEFS = {
+local DEBUFF_DEFS = {
     { id = "enemy_health", label = "Enemy Health" },
     { id = "enemy_speed", label = "Enemy Speed" },
     { id = "enemy_regen", label = "Enemy Regen" },
@@ -503,7 +382,7 @@ DEBUFF_DEFS = {
     { id = "curse", label = "Curses" },
 }
 
-function DefIdSet(defs)
+local function DefIdSet(defs)
     local set = {}
     for _, def in ipairs(defs) do
         set[def.id] = true
@@ -511,10 +390,10 @@ function DefIdSet(defs)
     return set
 end
 
-BUFF_IDS = DefIdSet(BUFF_DEFS)
-DEBUFF_IDS = DefIdSet(DEBUFF_DEFS)
+local BUFF_IDS = DefIdSet(BUFF_DEFS)
+local DEBUFF_IDS = DefIdSet(DEBUFF_DEFS)
 
-function SanitizeIdList(list, allowed)
+local function SanitizeIdList(list, allowed)
     local out = {}
     local seen = {}
     if type(list) ~= "table" then
@@ -529,7 +408,7 @@ function SanitizeIdList(list, allowed)
     return out
 end
 
-function CopyStateForSave()
+local function CopyStateForSave()
     local unitConfigs = {}
     for id, cfg in pairs(State.UnitConfigs or {}) do
         if type(id) == "string" and type(cfg) == "table" then
@@ -586,7 +465,7 @@ function CopyStateForSave()
     }
 end
 
-function SaveConfig()
+local function SaveConfig()
     if not AllowSave then
         return
     end
@@ -605,7 +484,7 @@ function SaveConfig()
     pcall(writefile, CONFIG_FILE, payload)
 end
 
-function ApplySavedTable(saved)
+local function ApplySavedTable(saved)
     if type(saved) ~= "table" then
         return
     end
@@ -695,7 +574,7 @@ function ApplySavedTable(saved)
     end
 end
 
-function LoadConfig()
+local function LoadConfig()
     if type(readfile) ~= "function" or type(isfile) ~= "function" then
         return
     end
@@ -717,9 +596,9 @@ end
 LoadConfig()
 HubScale.Scale = State.UIScale
 
-EVENT_LEVEL_ID = "summer2_event"
+local EVENT_LEVEL_ID = "summer2_event"
 
-function InvokeEndpoint(endpointName, ...)
+local function InvokeEndpoint(endpointName, ...)
     -- Only fall back to the raw remote when the client service was not usable.
     -- A nil return from a successful call must not trigger a second request.
     local attempted = false
@@ -755,13 +634,13 @@ function InvokeEndpoint(endpointName, ...)
     end
 end
 
-function IsInLobby()
+local function IsInLobby()
     return workspace:FindFirstChild("_LOBBIES") ~= nil
         or workspace:FindFirstChild("enel_ship") ~= nil
         or game.PlaceId == 8304191830
 end
 
-function IsMatchmaking()
+local function IsMatchmaking()
     local mmUI = playerGui:FindFirstChild("MatchmakingUI")
     if mmUI and mmUI.Enabled then
         return true
@@ -773,11 +652,11 @@ function IsMatchmaking()
     return false
 end
 
-function NormalizeName(text)
+local function NormalizeName(text)
     return (tostring(text or ""):lower():gsub("[%.%s_%-]", ""))
 end
 
-function IsFarmName(text)
+local function IsFarmName(text)
     local id = NormalizeName(text)
     if id == "" then
         return false
@@ -793,7 +672,7 @@ function IsFarmName(text)
         or id:find("weather", 1, true)) ~= nil
 end
 
-function GetUnitsData()
+local function GetUnitsData()
     if UnitsDataCache then
         return UnitsDataCache
     end
@@ -808,7 +687,7 @@ function GetUnitsData()
     return {}
 end
 
-function LookupUnitData(unitId)
+local function LookupUnitData(unitId)
     if not unitId or unitId == "" then
         return nil
     end
@@ -825,7 +704,7 @@ function LookupUnitData(unitId)
     return nil
 end
 
-function GetUnitId(unit)
+local function GetUnitId(unit)
     if not unit or not unit:FindFirstChild("_stats") then
         return ""
     end
@@ -836,7 +715,7 @@ function GetUnitId(unit)
     return NormalizeName(idVal.Value)
 end
 
-function GetRawUnitId(unit)
+local function GetRawUnitId(unit)
     if not unit or not unit:FindFirstChild("_stats") then
         return ""
     end
@@ -847,7 +726,7 @@ function GetRawUnitId(unit)
     return unit.Name
 end
 
-function GetPlayerUnits()
+local function GetPlayerUnits()
     local myUnits = {}
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     if not unitsFolder then
@@ -865,7 +744,7 @@ function GetPlayerUnits()
     return myUnits
 end
 
-function IsFarmUnit(unit)
+local function IsFarmUnit(unit)
     if not unit then return false end
 
     -- Match the game's unit_static_is_farm() implementation:
@@ -891,7 +770,7 @@ function IsFarmUnit(unit)
 
     return false
 end
-function GetEquippedUnitList()
+local function GetEquippedUnitList()
     local unitsList = {}
 
     -- Unit Configuration must read ONLY the six actual equipped slots (1-6).
@@ -951,7 +830,7 @@ function GetEquippedUnitList()
     return unitsList
 end
 
-function EnrichEquipped(list)
+local function EnrichEquipped(list)
     for _, info in ipairs(list) do
         local unitId = info.unitId
         pcall(function()
@@ -991,7 +870,7 @@ end
 
 -- Detect farm units from both their displayed name and unit database metadata.
 -- Some equipped-unit records use an internal ID that does not contain the display name.
-function IsFarmInfo(info)
+local function IsFarmInfo(info)
     if not info then return false end
     local ids = { info.unitId, info.name, info.displayName }
     for _, id in ipairs(ids) do
@@ -1022,7 +901,7 @@ function IsFarmInfo(info)
     return false
 end
 
-function GetCurrentWave()
+local function GetCurrentWave()
     local waveNum = workspace:FindFirstChild("_wave_num")
     if waveNum and tonumber(waveNum.Value) then
         return tonumber(waveNum.Value)
@@ -1037,7 +916,7 @@ function GetCurrentWave()
     return 0
 end
 
-function GetUnitConfig(unitId)
+local function GetUnitConfig(unitId)
     if not unitId then
         return nil
     end
@@ -1054,7 +933,7 @@ function GetUnitConfig(unitId)
     return nil
 end
 
-function CountPlacedUnit(unitId)
+local function CountPlacedUnit(unitId)
     local want = NormalizeName(unitId)
     local n = 0
     for _, unit in ipairs(GetPlayerUnits()) do
@@ -1068,7 +947,7 @@ end
 -- Match equipped units against the actual placed model using both internal IDs
 -- and display names. Some units (notably farm units with renamed/evolved IDs)
 -- do not expose the same identifier in the loadout and in workspace._UNITS.
-function CountPlacedInfo(info)
+local function CountPlacedInfo(info)
     if not info then return 0 end
 
     -- Use exact normalized identities only. Partial substring matching can make
@@ -1133,7 +1012,7 @@ end
 
 -- Count a unit across the entire match, not just the local player.
 -- Some units (e.g. Windsong) use global_spawn_cap shared by the whole party.
-function CountGlobalPlacedInfo(info)
+local function CountGlobalPlacedInfo(info)
     if not info then return 0 end
 
     local wanted = {}
@@ -1197,7 +1076,7 @@ function CountGlobalPlacedInfo(info)
     return count
 end
 
-function ResolvePlacementKind(unitId)
+local function ResolvePlacementKind(unitId)
     local data = LookupUnitData(unitId)
     if data and data.hybrid_placement then
         local ground = State.PlaceHybridGround ~= false
@@ -1217,7 +1096,7 @@ function ResolvePlacementKind(unitId)
     return "ground"
 end
 
-function CanPlaceConfigured(info, wave)
+local function CanPlaceConfigured(info, wave)
     local cfg = GetUnitConfig(info.unitId)
     if cfg and cfg.placeStartWave ~= nil and wave < cfg.placeStartWave then
         return false
@@ -1247,7 +1126,7 @@ function CanPlaceConfigured(info, wave)
     return true
 end
 
-function GetPath1Lane()
+local function GetPath1Lane()
     local bases = workspace:FindFirstChild("_BASES")
     if not bases then
         return nil
@@ -1260,7 +1139,7 @@ function GetPath1Lane()
     return lanes:FindFirstChild("1") or lanes:FindFirstChild("01")
 end
 
-function GetPathPoints(lane)
+local function GetPathPoints(lane)
     local points = {}
     local spawn = lane:FindFirstChild("spawn")
     if spawn and spawn:IsA("BasePart") then
@@ -1288,7 +1167,7 @@ function GetPathPoints(lane)
     return points
 end
 
-function GetPointOnPolyline(points, alpha)
+local function GetPointOnPolyline(points, alpha)
     if #points == 0 then
         return nil, Vector3.new(0, 0, -1)
     end
@@ -1329,7 +1208,7 @@ function GetPointOnPolyline(points, alpha)
     return points[#points], Vector3.new(0, 0, -1)
 end
 
-function HitAllowsPlacement(inst, kind)
+local function HitAllowsPlacement(inst, kind)
     if not inst then
         return false
     end
@@ -1368,7 +1247,7 @@ function HitAllowsPlacement(inst, kind)
     return not onHill
 end
 
-function PlacementIsClear(pos, kind)
+local function PlacementIsClear(pos, kind)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     local ignore = {}
@@ -1404,7 +1283,7 @@ function PlacementIsClear(pos, kind)
     return hit.Position
 end
 
-function GetPlacementCFrame(index, kind)
+local function GetPlacementCFrame(index, kind)
     kind = kind or "ground"
 
     local lane = GetPath1Lane()
@@ -1507,7 +1386,7 @@ end
 -- Farm units can be ground or hill units depending on the game's unit data.
 -- If the unit database lookup misses an entry, try every valid placement surface
 -- instead of silently skipping the farm because the guessed surface was wrong.
-function GetPlacementCFrameForInfo(index, info)
+local function GetPlacementCFrameForInfo(index, info)
     local primary = ResolvePlacementKind(info and info.unitId)
     local kinds = { primary }
     if IsFarmInfo(info) then
@@ -1526,7 +1405,7 @@ function GetPlacementCFrameForInfo(index, info)
     return nil, primary
 end
 
-function CountCategory(myUnits, pred)
+local function CountCategory(myUnits, pred)
     local n = 0
     for _, u in ipairs(myUnits) do
         if pred(u) then
@@ -1536,7 +1415,7 @@ function CountCategory(myUnits, pred)
     return n
 end
 
-function HttpPost(url, body)
+local function HttpPost(url, body)
     local payload = {
         Url = url,
         Method = "POST",
@@ -1554,11 +1433,11 @@ function HttpPost(url, body)
     return HttpService:PostAsync(url, body, Enum.HttpContentType.ApplicationJson)
 end
 
-function NormalizeWebhookUrl(url)
+local function NormalizeWebhookUrl(url)
     return (tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-function WebhookProblem(url)
+local function WebhookProblem(url)
     if url == "" then
         return "Webhook URL is empty."
     end
@@ -1571,7 +1450,7 @@ function WebhookProblem(url)
     return nil
 end
 
-function DescribeWebhookResult(ok, result)
+local function DescribeWebhookResult(ok, result)
     if not ok then
         return false, tostring(result)
     end
@@ -1592,7 +1471,7 @@ function DescribeWebhookResult(ok, result)
 end
 
 
-function ReadPlayerCurrencies()
+local function ReadPlayerCurrencies()
     local values = {}
     local stats = player:FindFirstChild("_stats")
     if stats then
@@ -1610,9 +1489,6 @@ function ReadPlayerCurrencies()
                 elseif name:sub(1, 9) == "_resource" then
                     local resourceName = name:sub(10):gsub("^_+", "")
                     values[resourceName] = child.Value
-                    if resourceName:lower():find("summer", 1, true) and resourceName:lower():find("pearl", 1, true) then
-                        values.SummerPearls = child.Value
-                    end
                 elseif name:lower():find("summerpearls", 1, true) then
                     values.SummerPearls = child.Value
                 end
@@ -1622,7 +1498,7 @@ function ReadPlayerCurrencies()
     return values
 end
 
-function FormatNumber(value)
+local function FormatNumber(value)
     local n = tonumber(value) or 0
     local sign = n < 0 and "-" or ""
     local digits = tostring(math.floor(math.abs(n)))
@@ -1630,7 +1506,7 @@ function FormatNumber(value)
     return sign .. formatted
 end
 
-function FormatCompact(value)
+local function FormatCompact(value)
     local n = tonumber(value) or 0
     local abs = math.abs(n)
     local suffix = ""
@@ -1644,7 +1520,7 @@ function FormatCompact(value)
     return valueText .. suffix
 end
 
-function ReadTraitRerolls()
+local function ReadTraitRerolls()
     local ok, amount = pcall(function()
         local Loader = require(ReplicatedStorage.src.Loader)
         local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
@@ -1662,7 +1538,7 @@ function ReadTraitRerolls()
     return ok and tonumber(amount) or nil
 end
 
-function BuildPlayerStatsText(currencies)
+local function BuildPlayerStatsText(currencies)
     local traitCount = ReadTraitRerolls()
     local lines = {}
     local gemEmoji = "<:GemAA:1563613761544392794>"
@@ -1685,10 +1561,10 @@ function BuildPlayerStatsText(currencies)
 end
 
 -- Live match information shown while Reduce 3D Render is active.
-GetInGameCash = nil -- forward declaration; implementation is below the upgrade helpers.
-matchStartedAt = nil
-lastMatchInfoRefresh = 0
-function FormatElapsed(seconds)
+local GetInGameCash -- forward declaration; implementation is below the upgrade helpers.
+local matchStartedAt = nil
+local lastMatchInfoRefresh = 0
+local function FormatElapsed(seconds)
     seconds = math.max(0, math.floor(tonumber(seconds) or 0))
     local hours = math.floor(seconds / 3600)
     local minutes = math.floor((seconds % 3600) / 60)
@@ -1696,20 +1572,7 @@ function FormatElapsed(seconds)
     return string.format("%02d:%02d:%02d", hours, minutes, secs)
 end
 
-function ReadCurrentStageName()
-    local liveName
-    pcall(function()
-        local loaderModule = ReplicatedStorage:FindFirstChild("src") and ReplicatedStorage.src:FindFirstChild("Loader")
-        if loaderModule then
-            local Loader = require(loaderModule)
-            local levelData = Loader and Loader.LevelData
-            if type(levelData) == "table" and type(levelData.name) == "string" and levelData.name ~= "" then
-                liveName = levelData.name
-            end
-        end
-    end)
-    if liveName then return liveName end
-
+local function ReadCurrentStageName()
     local results = playerGui:FindFirstChild("ResultsUI")
     local holder = results and results:FindFirstChild("Holder")
     local resultName = holder and holder:FindFirstChild("LevelName")
@@ -1738,14 +1601,7 @@ end
 task.spawn(function()
     while ScreenGui.Parent do
         task.wait(0.25)
-        local dataFolder = workspace:FindFirstChild("_DATA")
-        local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
-        local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
-        local matchStateKnown = gameStarted ~= nil
-        local matchStateActive = gameStarted and gameStarted.Value == true
-            and not (gameFinished and gameFinished.Value == true)
-        local hasUnitsFolder = workspace:FindFirstChild("_UNITS") ~= nil
-        local inMatch = hasUnitsFolder and (matchStateActive or (not matchStateKnown and not IsInLobby()))
+        local inMatch = workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
         if inMatch then
             if not matchStartedAt then matchStartedAt = os.clock() end
         else
@@ -1766,7 +1622,6 @@ task.spawn(function()
                 "PLAYER: " .. tostring(player.DisplayName or player.Name),
                 "CASH: " .. (cash ~= nil and FormatCompact(cash) or "N/A"),
                 "GEMS: " .. FormatCompact(currencies.Gems or 0) .. "     GOLD: " .. FormatCompact(currencies.Gold or 0),
-                "SUMMER PEARLS: " .. FormatCompact(currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls or 0),
                 "XP: " .. FormatCompact(currencies.XP or 0) .. "     TROPHIES: " .. FormatCompact(currencies.Trophies or 0),
             }
             MatchStatsLabel.Text = table.concat(statLines, "\n")
@@ -1774,7 +1629,7 @@ task.spawn(function()
     end
 end)
 
-function BuildRewardText(before, after)
+local function BuildRewardText(before, after)
     local ordered = {"XP", "SummerPearls", "Gold", "Gems", "Trophies"}
     local labels = {XP = "XP", SummerPearls = "Summer Pearls", Gold = "Gold", Gems = "Gems", Trophies = "Trophies"}
     local parts, used = {}, {}
@@ -1797,7 +1652,7 @@ function BuildRewardText(before, after)
     return table.concat(parts, " · ")
 end
 
-function GetResultDetails()
+local function GetResultDetails()
     local details = {}
     local results = playerGui:FindFirstChild("ResultsUI")
     local holder = results and results:FindFirstChild("Holder")
@@ -1819,13 +1674,13 @@ function GetResultDetails()
     return details
 end
 
-function BuildCurrencyLines(before, after)
+local function BuildCurrencyLines(before, after)
     local lines = {}
     local names = {}
     for name in pairs(before or {}) do names[name] = true end
     for name in pairs(after or {}) do names[name] = true end
 
-    local ordered = {"Gold", "Gems", "SummerPearls", "Trophies", "XP"}
+    local ordered = {"Gold", "Gems", "Trophies", "XP"}
     local used = {}
     for _, name in ipairs(ordered) do
         if names[name] then
@@ -1853,7 +1708,7 @@ end
 
 -- ResultsUI is populated directly from ResultsUI.show_results(settings).
 -- ResourceReward frames therefore provide the authoritative per-stage resource amounts.
-function ReadResultResourceRewards()
+local function ReadResultResourceRewards()
     local rewards = {}
     local results = playerGui:FindFirstChild("ResultsUI")
     local holder = results and results:FindFirstChild("Holder")
@@ -1878,7 +1733,7 @@ function ReadResultResourceRewards()
     return rewards
 end
 
-function BuildResourceRewardLines(rewards)
+local function BuildResourceRewardLines(rewards)
     if not rewards or #rewards == 0 then
         return "No resource reward frames found in ResultsUI"
     end
@@ -1892,7 +1747,7 @@ end
 
 -- Snapshot unique Secret rewards at match start so Webhook can report only
 -- Secret Units / Secret Portals newly granted by this match.
-function LoadGameDataModule(moduleName)
+local function LoadGameDataModule(moduleName)
     local module = ReplicatedStorage:FindFirstChild(moduleName, true)
     if module and module:IsA("ModuleScript") then
         local ok, data = pcall(require, module)
@@ -1901,7 +1756,7 @@ function LoadGameDataModule(moduleName)
     return nil
 end
 
-function ReadSecretRewardSnapshot()
+local function ReadSecretRewardSnapshot()
     local snapshot = {}
     if type(getgc) ~= "function" then return snapshot, false end
     local ok, objects = pcall(getgc, true)
@@ -1956,7 +1811,7 @@ function ReadSecretRewardSnapshot()
     return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
 end
 
-function BuildSecretRewardLines(before, after)
+local function BuildSecretRewardLines(before, after)
     local totals = { ["Secret Unit"] = {}, ["Secret Portal"] = {}, ["Secret Item"] = {} }
     for key, reward in pairs(after or {}) do
         if not (before and before[key]) and totals[reward.category] then
@@ -1969,11 +1824,11 @@ function BuildSecretRewardLines(before, after)
     for _, category in ipairs({"Secret Unit", "Secret Portal", "Secret Item"}) do
         local entries = {}
         for name, count in pairs(totals[category]) do
-            table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
+            table.insert(entries, string.format("⭐ **%s** ×%d", name, count))
         end
         table.sort(entries)
         if #entries > 0 then
-            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n" .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
+            table.insert(sections, "**💎 " .. string.upper(category) .. "**\n" .. table.concat(entries, "\n"))
         end
     end
     if #sections == 0 then
@@ -1982,72 +1837,15 @@ function BuildSecretRewardLines(before, after)
     return table.concat(sections, "\n\n")
 end
 
-webhookCurrencyBefore = nil
-webhookSecretRewardBefore = nil
-webhookSecretRewardBaselineAvailable = false
-function CaptureWebhookCurrencyBaseline()
+local webhookCurrencyBefore = nil
+local webhookSecretRewardBefore = nil
+local webhookSecretRewardBaselineAvailable = false
+local function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
 end
 
-function ReadPlayerLevel()
-    local stats = player:FindFirstChild("_stats")
-    if stats then
-        for _, name in ipairs({"player_level", "level"}) do
-            local value = stats:FindFirstChild(name)
-            if value and value:IsA("ValueBase") then
-                local number = tonumber(value.Value)
-                if number then return number end
-            end
-        end
-    end
-    -- Anime Adventures calculates player level from _stats.player_xp through LevelServiceCore.
-    local ok, level = pcall(function()
-        local statsFolder = player:FindFirstChild("_stats")
-        local xpValue = statsFolder and statsFolder:FindFirstChild("player_xp")
-        local xp = xpValue and tonumber(xpValue.Value)
-        if xp == nil then return nil end
-        local Loader = require(ReplicatedStorage.src.Loader)
-        local service = Loader.load_core_service(game, "LevelServiceCore")
-        if service and type(service.calculate_level) == "function" then
-            return service.calculate_level(player, xp)
-        end
-        return nil
-    end)
-    return ok and tonumber(level) or nil
-end
-
-function ReadMatchUnitLines()
-    local units = GetPlayerUnits()
-    local lines = {}
-    for _, unit in ipairs(units) do
-        local stats = unit:FindFirstChild("_stats")
-        if stats then
-            local idValue = stats:FindFirstChild("id")
-            local unitId = idValue and tostring(idValue.Value) or unit.Name
-            local def = LookupUnitData(unitId)
-            local displayName = (def and def.name) or unitId
-            local takedownValue = stats:FindFirstChild("takedown_count")
-            local damageValue = stats:FindFirstChild("total_damage")
-            local upgradeValue = stats:FindFirstChild("upgrade")
-            local maxUpgrade = stats:FindFirstChild("max_upgrade")
-            local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
-            local damage = damageValue and tonumber(damageValue.Value) or 0
-            local upgradeText = ""
-            if upgradeValue then
-                upgradeText = " · Upg " .. tostring(upgradeValue.Value)
-                if maxUpgrade then upgradeText = upgradeText .. "/" .. tostring(maxUpgrade.Value) end
-            end
-            table.insert(lines, string.format("• **%s** — Takedowns: **%s** · DMG: **%s**%s",
-                tostring(displayName), FormatNumber(takedowns), FormatCompact(damage), upgradeText))
-        end
-    end
-    table.sort(lines)
-    if #lines == 0 then return "No placed unit stats found" end
-    return table.concat(lines, "\n")
-end
-
-function SendEndWebhook(currencyBaseline)
+local function SendEndWebhook(currencyBaseline)
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
@@ -2088,47 +1886,13 @@ function SendEndWebhook(currencyBaseline)
         result = resultDetails.result .. " | " .. result
     end
 
-    local unitLines = ReadMatchUnitLines()
-    local playerStatsText = BuildPlayerStatsText(currentCurrencies)
-    local playerLevel = ReadPlayerLevel()
-    local xp = currentCurrencies.XP or 0
-    local matchTime = resultDetails.Timer or "Unknown"
-    local waveText = resultDetails.WavesCompleted or tostring(GetCurrentWave())
-    local stageText = tostring(level)
-    local matchResultText = result .. " — " .. tostring(matchTime)
-        .. " — Wave " .. tostring(waveText) .. " — " .. stageText
-
-    local function LimitEmbedText(value, limit)
-        value = tostring(value or "")
-        if #value <= limit then return value end
-        return value:sub(1, math.max(1, limit - 18)) .. "\n… (truncated)"
-    end
-
-    local description = string.format(
-        "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
-        player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
-        playerStatsText, unitLines, matchResultText)
-
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
         embeds = {{
-            title = "Anime Adventures",
-            description = LimitEmbedText(description, 2400),
-            color = secretRewardText:find("✨", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
-            image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
-            fields = {{
-                name = "🚨 SECRET REWARDS 🚨",
-                value = LimitEmbedText(secretRewardText, 900),
-                inline = false,
-            }, {
-                name = "🎁 Rewards",
-                value = LimitEmbedText(resourceText, 900),
-                inline = false,
-            }, {
-                name = "💰 Currency (Before → After | Change)",
-                value = LimitEmbedText(currencyText, 900),
-                inline = false,
-            }},
+            title = "Stage Ended — " .. tostring(level),
+            description = string.format("**Player:** %s\n**Result:** %s\n\n**💎 SECRET REWARDS**\n%s\n\n**📦 Resource Rewards (from ResultsUI)**\n%s\n\n**💰 Currency (Before → After | Change)**\n%s",
+                player.Name, result, secretRewardText, resourceText, currencyText),
+            color = secretRewardText:find("⭐", 1, true) and 16766720 or (result:find("Victory", 1, true) and 5763719 or 15548997),
             timestamp = DateTime.now():ToIsoDate(),
         }},
     })
@@ -2152,15 +1916,15 @@ function SendEndWebhook(currencyBaseline)
     return false
 end
 
-function IsGoodEffectColor(color)
+local function IsGoodEffectColor(color)
     return color and color.G > 0.55 and color.R < 0.45 and color.B < 0.55
 end
 
-function IsBadEffectColor(color)
+local function IsBadEffectColor(color)
     return color and color.R > 0.55 and color.G < 0.45 and color.B < 0.55
 end
 
-function LineIsBuff(id, lower, good)
+local function LineIsBuff(id, lower, good)
     if not good then
         return false
     end
@@ -2204,7 +1968,7 @@ function LineIsBuff(id, lower, good)
     return false
 end
 
-function LineIsDebuff(id, lower, bad)
+local function LineIsDebuff(id, lower, bad)
     if id == "new_path" then
         return lower:find("new path", 1, true) ~= nil
     end
@@ -2246,7 +2010,7 @@ function LineIsDebuff(id, lower, bad)
     return false
 end
 
-function ScoreRoguelikeCard(card)
+local function ScoreRoguelikeCard(card)
     local buffs = State.BuffPriority or {}
     local debuffs = State.DebuffAvoid or {}
     if #buffs == 0 and #debuffs == 0 then
@@ -2276,7 +2040,7 @@ function ScoreRoguelikeCard(card)
     return score
 end
 
-function PickRoguelikeCard(pageUI)
+local function PickRoguelikeCard(pageUI)
     local cards = {}
     for _, card in ipairs(pageUI:GetChildren()) do
         if card:IsA("GuiObject") and card.Visible and card.Name ~= "" and card.Name ~= "Configuration" then
@@ -2304,12 +2068,12 @@ function PickRoguelikeCard(pageUI)
     return best
 end
 
-blackscreenConn = nil
-savedQuality = nil
-savedSavedQuality = nil
-hiddenOriginals = setmetatable({}, { __mode = "k" })
+local blackscreenConn
+local savedQuality
+local savedSavedQuality
+local hiddenOriginals = setmetatable({}, { __mode = "k" })
 
-function SetInstanceHidden(inst, hidden)
+local function SetInstanceHidden(inst, hidden)
     if inst:IsA("BasePart") then
         inst.LocalTransparencyModifier = hidden and 1 or 0
     elseif inst:IsA("Decal") or inst:IsA("Texture") then
@@ -2331,7 +2095,7 @@ function SetInstanceHidden(inst, hidden)
     end
 end
 
-function ApplyBlackScreen(enabled)
+local function ApplyBlackScreen(enabled)
     BlackOverlay.Visible = enabled
     if blackscreenConn then
         blackscreenConn:Disconnect()
@@ -2369,7 +2133,7 @@ function ApplyBlackScreen(enabled)
     end
 end
 
-function SuppressErrorNotifications()
+local function SuppressErrorNotifications()
     local msg = playerGui:FindFirstChild("MessageGui")
     if msg then
         for _, folderName in ipairs({ "messages", "messages_quick", "top_messages" }) do
@@ -2397,8 +2161,8 @@ function SuppressErrorNotifications()
     end
 end
 
-tabs = {}
-function CreateTab(name, layoutOrder)
+local tabs = {}
+local function CreateTab(name, layoutOrder)
     local TabButton = Instance.new("TextButton")
     TabButton.Size = UDim2.new(1, 0, 0, 36)
     TabButton.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
@@ -2452,7 +2216,7 @@ function CreateTab(name, layoutOrder)
     return PageFrame
 end
 
-function CreateSection(parent, title, layoutOrder)
+local function CreateSection(parent, title, layoutOrder)
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -10, 0, 22)
     Label.BackgroundTransparency = 1
@@ -2467,7 +2231,7 @@ function CreateSection(parent, title, layoutOrder)
     return Label
 end
 
-function CreateHint(parent, text, layoutOrder, height)
+local function CreateHint(parent, text, layoutOrder, height)
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -10, 0, height or 32)
     Label.BackgroundTransparency = 1
@@ -2484,7 +2248,7 @@ function CreateHint(parent, text, layoutOrder, height)
     return Label
 end
 
-function CreateToggle(parent, title, stateKey, layoutOrder, callback)
+local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
     ToggleContainer.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
@@ -2554,7 +2318,7 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     return ToggleContainer
 end
 
-function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initialText)
+local function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initialText)
     local Box = Instance.new("Frame")
     Box.Size = UDim2.new(1, -10, 0, 64)
     Box.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
@@ -2610,7 +2374,7 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
     return Input
 end
 
-function CreateButton(parent, title, layoutOrder, onClick)
+local function CreateButton(parent, title, layoutOrder, onClick)
     local Button = Instance.new("TextButton")
     Button.Size = UDim2.new(1, -10, 0, 36)
     Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -2634,7 +2398,7 @@ function CreateButton(parent, title, layoutOrder, onClick)
     return Button
 end
 
-function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue, getValue, setValue)
+local function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue, getValue, setValue)
     local Card = Instance.new("Frame")
     Card.Size = UDim2.new(1, -10, 0, 78)
     Card.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
@@ -2785,7 +2549,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     return Card
 end
 
-function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
+local function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
     CreateSection(parent, title, layoutOrder)
     CreateHint(parent, hint, layoutOrder + 1, 28)
 
@@ -2921,12 +2685,12 @@ function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
     return Scroller
 end
 
-MainPage = CreateTab("Main", 1)
-AutoPlayPage = CreateTab("Auto Play", 2)
-PortalPage = CreateTab("Portal", 3)
-EventPage = CreateTab("Event", 4)
-WebhookPage = CreateTab("Webhook", 5)
-MiscPage = CreateTab("Misc", 6)
+local MainPage = CreateTab("Main", 1)
+local AutoPlayPage = CreateTab("Auto Play", 2)
+local PortalPage = CreateTab("Portal", 3)
+local EventPage = CreateTab("Event", 4)
+local WebhookPage = CreateTab("Webhook", 5)
+local MiscPage = CreateTab("Misc", 6)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -2938,18 +2702,18 @@ CreateToggle(MainPage, "Auto Replay", "MainAutoReplay", 2)
 CreateToggle(MainPage, "Auto Next", "AutoNext", 3)
 CreateToggle(MainPage, "Auto Leave", "AutoLeave", 4)
 
-AutoPlayStatusCard = Instance.new("Frame")
+local AutoPlayStatusCard = Instance.new("Frame")
 AutoPlayStatusCard.Size = UDim2.new(1, -10, 0, 38)
 AutoPlayStatusCard.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
 AutoPlayStatusCard.LayoutOrder = 0
 AutoPlayStatusCard.ZIndex = 12
 AutoPlayStatusCard.Parent = AutoPlayPage
 
-AutoPlayStatusCorner = Instance.new("UICorner")
+local AutoPlayStatusCorner = Instance.new("UICorner")
 AutoPlayStatusCorner.CornerRadius = UDim.new(0, 6)
 AutoPlayStatusCorner.Parent = AutoPlayStatusCard
 
-AutoPlayStatusLabel = Instance.new("TextLabel")
+local AutoPlayStatusLabel = Instance.new("TextLabel")
 AutoPlayStatusLabel.Size = UDim2.new(1, -20, 1, 0)
 AutoPlayStatusLabel.Position = UDim2.new(0, 10, 0, 0)
 AutoPlayStatusLabel.BackgroundTransparency = 1
@@ -2961,7 +2725,7 @@ AutoPlayStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 AutoPlayStatusLabel.ZIndex = 13
 AutoPlayStatusLabel.Parent = AutoPlayStatusCard
 
-function UpdateAutoPlayStatus(text, color)
+local function UpdateAutoPlayStatus(text, color)
     if AutoPlayStatusLabel then
         AutoPlayStatusLabel.Text = "Auto Play: " .. text
         if color then
@@ -2982,12 +2746,12 @@ CreateSection(AutoPlayPage, "Hybrid Units", 22)
 CreateHint(AutoPlayPage, "Hybrid units can stand on Ground or Hill. Both options keep the current placement behavior.", 23, 28)
 CreateToggle(AutoPlayPage, "Place on Ground", "PlaceHybridGround", 24)
 CreateToggle(AutoPlayPage, "Place on Hill", "PlaceHybridHill", 25)
-HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 26, 32)
+local HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 26, 32)
 
 CreateSection(AutoPlayPage, "Unit Configuration", 27)
 CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 28, 28)
 
-UnitConfigHolder = Instance.new("Frame")
+local UnitConfigHolder = Instance.new("Frame")
 UnitConfigHolder.Name = "UnitConfigHolder"
 UnitConfigHolder.Size = UDim2.new(1, -10, 0, 0)
 UnitConfigHolder.AutomaticSize = Enum.AutomaticSize.Y
@@ -2995,15 +2759,15 @@ UnitConfigHolder.BackgroundTransparency = 1
 UnitConfigHolder.LayoutOrder = 29
 UnitConfigHolder.ZIndex = 12
 UnitConfigHolder.Parent = AutoPlayPage
-UnitConfigList = Instance.new("UIListLayout")
+local UnitConfigList = Instance.new("UIListLayout")
 UnitConfigList.SortOrder = Enum.SortOrder.LayoutOrder
 UnitConfigList.Padding = UDim.new(0, 6)
 UnitConfigList.Parent = UnitConfigHolder
 
-unitExpanded = {}
-lastUnitKey = nil
+local unitExpanded = {}
+local lastUnitKey = nil
 
-function SetUnitField(unitId, displayName, field, value)
+local function SetUnitField(unitId, displayName, field, value)
     local cfg = State.UnitConfigs[unitId]
     if type(cfg) ~= "table" then
         cfg = {}
@@ -3020,7 +2784,7 @@ function SetUnitField(unitId, displayName, field, value)
     SaveConfig()
 end
 
-function AddConfigBox(parent, label, placeholder, order, getter, setter)
+local function AddConfigBox(parent, label, placeholder, order, getter, setter)
     local Row = Instance.new("Frame")
     Row.Size = UDim2.new(1, -16, 0, 32)
     Row.BackgroundTransparency = 1
@@ -3073,7 +2837,7 @@ function AddConfigBox(parent, label, placeholder, order, getter, setter)
     end)
 end
 
-function RefreshUnitConfigUI()
+local function RefreshUnitConfigUI()
     local equipped = EnrichEquipped(GetEquippedUnitList())
     local hybridNames = {}
     local byId = {}
@@ -3235,7 +2999,7 @@ function RefreshUnitConfigUI()
 end
 
 -- Portal page: inventory-based portal types + game-defined tier selection.
-PortalSelectionContainer = Instance.new("Frame")
+local PortalSelectionContainer = Instance.new("Frame")
 PortalSelectionContainer.Name = "PortalSelectionContainer"
 PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 174)
 PortalSelectionContainer.BackgroundTransparency = 1
@@ -3243,7 +3007,7 @@ PortalSelectionContainer.LayoutOrder = 1
 PortalSelectionContainer.ZIndex = 12
 PortalSelectionContainer.Parent = PortalPage
 
-PortalColumnsLayout = Instance.new("UIListLayout")
+local PortalColumnsLayout = Instance.new("UIListLayout")
 PortalColumnsLayout.FillDirection = Enum.FillDirection.Horizontal
 PortalColumnsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
 PortalColumnsLayout.VerticalAlignment = Enum.VerticalAlignment.Top
@@ -3251,7 +3015,7 @@ PortalColumnsLayout.SortOrder = Enum.SortOrder.LayoutOrder
 PortalColumnsLayout.Padding = UDim.new(0, 8)
 PortalColumnsLayout.Parent = PortalSelectionContainer
 
-function CreatePortalSelectionColumn(name, title, hint, order)
+local function CreatePortalSelectionColumn(name, title, hint, order)
     local column = Instance.new("Frame")
     column.Name = name
     column.Size = UDim2.new(0.5, -4, 1, 0)
@@ -3297,24 +3061,24 @@ function CreatePortalSelectionColumn(name, title, hint, order)
     return list
 end
 
-PortalInventoryList = CreatePortalSelectionColumn(
+local PortalInventoryList = CreatePortalSelectionColumn(
     "PortalInventoryColumn",
     "Select Portal",
     "เลือกประเภท Portal จาก Inventory",
     1
 )
-PortalTierList = CreatePortalSelectionColumn(
+local PortalTierList = CreatePortalSelectionColumn(
     "PortalTierColumn",
     "Select Tier",
     "เลือก Tier จาก T สูงสุดลงมาต่ำสุด",
     2
 )
 
-PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 2, 30)
-PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
+local PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 2, 30)
+local PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
 PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
-function FindLocalInventoryProfile()
+local function FindLocalInventoryProfile()
     if type(getgc) ~= "function" then return nil end
     local ok, objects = pcall(getgc, true)
     if not ok or type(objects) ~= "table" then return nil end
@@ -3337,7 +3101,7 @@ function FindLocalInventoryProfile()
     return nil
 end
 
-function GetOwnedPortals()
+local function GetOwnedPortals()
     local profile = FindLocalInventoryProfile()
     local portals, seen = {}, {}
     if not profile then return portals, "Inventory session not found (executor getgc support required)." end
@@ -3368,8 +3132,8 @@ function GetOwnedPortals()
     return portals, nil
 end
 
-portalInventoryCache = {}
-function RefreshPortalTierUI()
+local portalInventoryCache = {}
+local function RefreshPortalTierUI()
     for _, child in ipairs(PortalTierList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
@@ -3398,7 +3162,7 @@ function RefreshPortalTierUI()
     end
 end
 
-function RefreshPortalUI()
+local function RefreshPortalUI()
     for _, child in ipairs(PortalInventoryList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
@@ -3435,9 +3199,9 @@ RefreshPortalTierUI()
 PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
 CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 4)
 
-portalOpenBusy = false
-portalLastRefresh = 0
-portalOpenedUUIDs = {}
+local portalOpenBusy = false
+local portalLastRefresh = 0
+local portalOpenedUUIDs = {}
 task.spawn(function()
     while task.wait(1) do
         if State.AutoOpenPortal and not portalOpenBusy and IsInLobby() then
@@ -3482,18 +3246,18 @@ task.spawn(function()
 end)
 
 
-EventStatusCard = Instance.new("Frame")
+local EventStatusCard = Instance.new("Frame")
 EventStatusCard.Size = UDim2.new(1, -10, 0, 38)
 EventStatusCard.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
 EventStatusCard.LayoutOrder = 0
 EventStatusCard.ZIndex = 12
 EventStatusCard.Parent = EventPage
 
-EventStatusCorner = Instance.new("UICorner")
+local EventStatusCorner = Instance.new("UICorner")
 EventStatusCorner.CornerRadius = UDim.new(0, 6)
 EventStatusCorner.Parent = EventStatusCard
 
-EventStatusLabel = Instance.new("TextLabel")
+local EventStatusLabel = Instance.new("TextLabel")
 EventStatusLabel.Size = UDim2.new(1, -20, 1, 0)
 EventStatusLabel.Position = UDim2.new(0, 10, 0, 0)
 EventStatusLabel.BackgroundTransparency = 1
@@ -3505,7 +3269,7 @@ EventStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 EventStatusLabel.ZIndex = 13
 EventStatusLabel.Parent = EventStatusCard
 
-function UpdateEventStatus(text, color)
+local function UpdateEventStatus(text, color)
     if EventStatusLabel then
         EventStatusLabel.Text = "Target: Summer Hunt | " .. text
         if color then
@@ -3514,7 +3278,7 @@ function UpdateEventStatus(text, color)
     end
 end
 
-function HandlePopups()
+local function HandlePopups()
     local notifWindows = playerGui:FindFirstChild("NotificationWindows")
     if not notifWindows then
         return
@@ -3563,7 +3327,7 @@ function HandlePopups()
     end
 end
 
-eventAutomationStopped = false
+local eventAutomationStopped = false
 
 CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
     -- Manually toggling Auto Find Match back on resumes event automation.
@@ -3588,7 +3352,7 @@ CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are prefer
 CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, "DebuffAvoid", 8)
 CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 11)
 
-WebhookStatus = nil
+local WebhookStatus
 CreateTextBox(WebhookPage, "Discord Webhook URL", "https://discord.com/api/webhooks/...", 1, function(text)
     State.WebhookURL = text
     SaveConfig()
@@ -3642,12 +3406,12 @@ end, function(value)
     HubScale.Scale = State.UIScale
 end)
 
-farmStall = { count = 0, lastChange = 0 }
-matchEndHandled = false
+local farmStall = { count = 0, lastChange = 0 }
+local matchEndHandled = false
 
 -- Farm-first keeps the next Farm upgrade affordable before Auto Place spends
 -- remaining cash on other equipped units.
-function HasPendingFarmUpgrade(myUnits)
+local function HasPendingFarmUpgrade(myUnits)
     for _, unit in ipairs(myUnits or {}) do
         if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
             local stats = unit._stats
@@ -3667,13 +3431,13 @@ function HasPendingFarmUpgrade(myUnits)
     end
     return false
 end
-votedStart = false
-lastVoteAttempt = 0
-lobbyStartSent = false
-lastLobbyStartAttempt = 0
-unitRefreshClock = 0
+local votedStart = false
+local lastVoteAttempt = 0
+local lobbyStartSent = false
+local lastLobbyStartAttempt = 0
+local unitRefreshClock = 0
 
-function ResultsButtons()
+local function ResultsButtons()
     local results = playerGui:FindFirstChild("ResultsUI")
     if not results then
         return nil, nil, nil
@@ -3685,7 +3449,7 @@ function ResultsButtons()
     return finished:FindFirstChild("Next"), finished:FindFirstChild("NextRetry"), finished:FindFirstChild("NextLevel")
 end
 
-function ButtonText(button)
+local function ButtonText(button)
     if not button then
         return ""
     end
@@ -3697,7 +3461,7 @@ function ButtonText(button)
     return tostring(button.Text or "")
 end
 
-function NextActionAvailable()
+local function NextActionAvailable()
     local _, nextRetry, nextLevel = ResultsButtons()
     if nextLevel and nextLevel.Visible then
         return "story"
@@ -3709,7 +3473,7 @@ function NextActionAvailable()
     return nil
 end
 
-function FireGuiButton(button)
+local function FireGuiButton(button)
     if not button then
         return
     end
@@ -3722,7 +3486,7 @@ function FireGuiButton(button)
     end
 end
 
-function GetCurrentLobbyId()
+local function GetCurrentLobbyId()
     local lobbyId = nil
     pcall(function()
         local loaderModule = ReplicatedStorage:FindFirstChild("src")
@@ -3740,7 +3504,7 @@ function GetCurrentLobbyId()
     return lobbyId
 end
 
-function RequestLobbyStart(lobbyId)
+local function RequestLobbyStart(lobbyId)
     if lobbyId == nil or lobbyId == "" then
         return false
     end
@@ -3782,7 +3546,7 @@ function RequestLobbyStart(lobbyId)
     return false
 end
 
-function TryAutoStart()
+local function TryAutoStart()
     if not State.AutoStart then
         votedStart = false
         lastVoteAttempt = 0
@@ -3860,7 +3624,7 @@ function TryAutoStart()
     end
 end
 
-function HandleMatchEnd(gameFinished)
+local function HandleMatchEnd(gameFinished)
     if not gameFinished or gameFinished.Value ~= true then
         matchEndHandled = false
         return
@@ -3938,7 +3702,7 @@ end
 
 -- Roblox's standard idle timeout is around 20 minutes. The game source
 -- does not implement a separate AFK timer; handle the Player.Idled event here.
-antiAfkConnection = nil
+local antiAfkConnection
 pcall(function()
     antiAfkConnection = player.Idled:Connect(function()
         if not State.AntiAFK then
@@ -3961,7 +3725,7 @@ RefreshUnitConfigUI()
 
 -- Estimate the next upgrade price from live unit stats first, then unit data.
 -- Unknown prices sort last instead of being mistaken for free upgrades.
-function GetNextUpgradeCost(unit)
+local function GetNextUpgradeCost(unit)
     if not unit or not unit:FindFirstChild("_stats") then return math.huge end
     local stats = unit._stats
     local current = stats:FindFirstChild("upgrade")
@@ -3999,8 +3763,8 @@ function GetNextUpgradeCost(unit)
     return math.ceil(baseCost * math.max(0, multiplier))
 end
 
-pendingUpgradeRequests = {}
-pendingSpawnRequests = {}
+local pendingUpgradeRequests = {}
+local pendingSpawnRequests = {}
 
 -- In-game cash (same value the game HUD uses for upgrade/placement affordability).
 GetInGameCash = function()
@@ -4010,7 +3774,7 @@ GetInGameCash = function()
 end
 
 -- Cheapest next upgrade among farm units that still have farm upgrades pending.
-function GetNextFarmUpgradeCost(myUnits)
+local function GetNextFarmUpgradeCost(myUnits)
     local best = nil
     for _, unit in ipairs(myUnits or {}) do
         if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
@@ -4261,8 +4025,8 @@ task.spawn(function()
     end
 end)
 
-lastMatchmakingRequest = 0
-lastQuestClaim = 0
+local lastMatchmakingRequest = 0
+local lastQuestClaim = 0
 task.spawn(function()
     while true do
         task.wait(1.5)
@@ -4323,9 +4087,9 @@ task.spawn(function()
     end
 end)
 
-webhookSent = false
-webhookGameWasActive = false
-webhookDataFolder = nil
+local webhookSent = false
+local webhookGameWasActive = false
+local webhookDataFolder = nil
 task.spawn(function()
     while true do
         task.wait(0.5)
