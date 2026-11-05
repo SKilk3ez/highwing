@@ -1087,14 +1087,6 @@ function GetUnitCurseCooldownInfo(unit)
     return hasCurse, reduction, true
 end
 
-function IsElfySylphUnit(rawId, unitData)
-    local id = NormalizeName(rawId)
-    local name = NormalizeName(unitData and unitData.name)
-    return id == "leafaevolved"
-        or (id:find("leafa", 1, true) ~= nil and id:find("evolved", 1, true) ~= nil)
-        or name:find("sylph", 1, true) ~= nil
-end
-
 function GetBuffRotationGroups()
     local groups = {}
     local passiveElfyCount = 0
@@ -1105,31 +1097,15 @@ function GetBuffRotationGroups()
             local unitData = LookupUnitData(rawId)
             local activeValue = stats:FindFirstChild("active_attack")
             local activeId = activeValue and tostring(activeValue.Value) or "nil"
-            if activeId == "" or activeId == "nil" then activeId = nil end
 
-            local isElfy = IsElfySylphUnit(rawId, unitData)
-            local definition = activeId and BUFF_ROTATION_ATTACKS[activeId] or nil
-
-            -- game.lua's static Units.leafa_evolved record only declares the
-            -- buff-unit markers; it does not hardcode active_attack. The live
-            -- unit's _stats.active_attack is the same value consumed by
-            -- UnitServiceCore.get_active_id() in the game's ActiveButton.
-            -- Therefore only register Elfy when the live game has supplied an
-            -- actual active ID; never invent an endpoint/attack ID.
-            if isElfy then
-                if activeId then
-                    definition = definition or {
-                        name = "Elfy (Sylph) - Verdant Enchantment",
-                        duration = 30,
-                        buff = "Magic",
-                        unit = "elfy",
-                    }
-                    BUFF_ROTATION_ATTACKS[activeId] = definition
-                else
-                    passiveElfyCount = passiveElfyCount + 1
-                end
+            -- Current game.lua defines Elfy (Sylph) as a buff-highlight unit but
+            -- does not give leafa_evolved an active_attack. It is therefore not
+            -- safe to send use_active_attack for it; count it for the status UI.
+            if NormalizeName(rawId) == "leafaevolved" and activeId == "nil" then
+                passiveElfyCount = passiveElfyCount + 1
             end
 
+            local definition = BUFF_ROTATION_ATTACKS[activeId]
             if definition and (not unitData or unitData._show_as_buff_unit ~= false) then
                 local cooldownValue = stats:FindFirstChild("active_attack_cooldown")
                 local lastCastValue = stats:FindFirstChild("last_active_cast")
@@ -1172,6 +1148,12 @@ function GetBuffRotationGroups()
         table.sort(group.units, function(a, b)
             return tostring(a.uuid) < tostring(b.uuid)
         end)
+
+        -- The game's native Auto Active worker does NOT schedule one cast at
+        -- cooldown/count intervals. It independently checks every unit's own
+        -- active cooldown and requests each ready unit (with a 0.5s per-unit
+        -- request guard). Mirror that behavior below. For the UI, estimate the
+        -- group's sustainable cadence from the sum of each unit's cast rate.
         local totalRate = 0
         for _, entry in ipairs(group.units) do
             totalRate = totalRate + (1 / math.max(0.1, entry.cooldown))
@@ -1732,57 +1714,6 @@ function GetPlacementCFrameForInfo(index, info)
         if cf then return cf, kind end
     end
     return nil, primary
-end
-
--- Buff units of the same unit type form their own compact cluster.
--- Non-buff units continue using the original path-based placement formation.
-function IsBuffUnitInfo(info)
-    if not info then return false end
-    local data = LookupUnitData(info.unitId)
-    return type(data) == "table" and data._show_as_buff_unit == true
-end
-
-function GetBuffTypePlacementCFrame(info, placedUnits)
-    if not IsBuffUnitInfo(info) then return nil, nil end
-
-    local targetId = NormalizeName(info.unitId)
-    local anchor = nil
-    local sameTypeCount = 0
-    for _, unit in ipairs(placedUnits or {}) do
-        local rawId = GetRawUnitId(unit)
-        local data = LookupUnitData(rawId)
-        if NormalizeName(rawId) == targetId
-            and type(data) == "table" and data._show_as_buff_unit == true then
-            sameTypeCount = sameTypeCount + 1
-            if not anchor then anchor = unit end
-        end
-    end
-
-    -- The first copy keeps the existing placement behavior; later copies
-    -- search concentric rings around that type's first placed copy.
-    if not anchor then return nil, nil end
-
-    local kind = ResolvePlacementKind(info.unitId)
-    local anchorCF = anchor:GetPivot()
-    local center = anchorCF.Position
-    local spacing = 4.2
-    local maxRing = 4
-    local startSlot = ((sameTypeCount - 1) * 3) % 8
-    for ring = 1, maxRing do
-        local radius = spacing * ring
-        for step = 0, 7 do
-            local angle = ((startSlot + step) * math.pi / 4) + (ring % 2) * (math.pi / 8)
-            local candidate = center + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
-            local finalPos = PlacementIsClear(candidate, kind)
-            if finalPos then
-                local look = anchorCF.LookVector
-                local flatLook = Vector3.new(look.X, 0, look.Z)
-                if flatLook.Magnitude < 0.01 then flatLook = Vector3.new(0, 0, -1) end
-                return CFrame.new(finalPos, finalPos + flatLook.Unit), kind
-            end
-        end
-    end
-    return nil, kind
 end
 
 function CountCategory(myUnits, pred)
@@ -5040,10 +4971,7 @@ task.spawn(function()
             local statusParts = {}
             local hasActionableUnits = false
 
-            local attackIds = {}
-            for attackId in pairs(liveGroups) do table.insert(attackIds, attackId) end
-            table.sort(attackIds)
-            for _, attackId in ipairs(attackIds) do
+            for _, attackId in ipairs({ "erwin:buff_units", "wendy:buff_units" }) do
                 local group = liveGroups[attackId]
                 if group and #group.units > 0 then
                     hasActionableUnits = true
@@ -5120,30 +5048,7 @@ task.spawn(function()
                         runtime.pending[chosen.model] = { time = now, before = chosen.lastCast }
                         task.spawn(function()
                             local ok, err = pcall(function()
-                                local attackData
-                                pcall(function()
-                                    local attackModule = ReplicatedStorage.src.Data:FindFirstChild("Attacks")
-                                    if attackModule then attackData = require(attackModule) end
-                                end)
-                                local attack = type(attackData) == "table" and attackData[attackId] or nil
-                                local requestParam
-                                if type(attack) == "table" and attack._sets_aoe_point then
-                                    local pos
-                                    pcall(function()
-                                        local root = chosen.model:FindFirstChild("HumanoidRootPart")
-                                            or chosen.model:FindFirstChild("_root")
-                                        if root and root:IsA("BasePart") then pos = root.Position end
-                                        if not pos then pos = chosen.model:GetPivot().Position end
-                                    end)
-                                    if pos then requestParam = { aoe_point = pos } end
-                                end
-                                -- Matches the game's _use_active_endpoint call:
-                                -- use_active_attack(unit, optional custom payload).
-                                if requestParam then
-                                    InvokeEndpoint("use_active_attack", chosen.model, requestParam)
-                                else
-                                    InvokeEndpoint("use_active_attack", chosen.model)
-                                end
+                                InvokeEndpoint("use_active_attack", chosen.model)
                             end)
                             if not ok then
                                 warn("[OctoputHub] Buff request failed: " .. tostring(err))
@@ -5160,12 +5065,12 @@ task.spawn(function()
             BUFF_ROTATION_RUNTIME.groups = nextRuntimeGroups
             if not hasActionableUnits then
                 if passiveElfyCount > 0 then
-                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) detected but live active_attack is unavailable; waiting for game runtime skill data.", Color3.fromRGB(255, 190, 100))
+                    SetBuffRotationStatus("Auto Buff: Elfy (Sylph) has no active_attack in current game.lua; Commander / Windsong are required for active rotation.", Color3.fromRGB(255, 190, 100))
                 else
                     SetBuffRotationStatus("Auto Buff: No placed Commander / Windsong buff units detected.", Color3.fromRGB(160, 160, 180))
                 end
             else
-                local suffix = passiveElfyCount > 0 and " | Elfy waiting for live active_attack" or ""
+                local suffix = passiveElfyCount > 0 and " | Elfy has no active_attack" or ""
                 SetBuffRotationStatus("Auto Buff: " .. table.concat(statusParts, "  ||  ") .. suffix, Color3.fromRGB(100, 220, 160))
             end
         end)
@@ -5280,22 +5185,7 @@ task.spawn(function()
                         end
                         for _, chosen in ipairs(eligible) do
                             local placeIndex = #myUnits + math.random(1, 12)
-                            local cframe, kind = GetBuffTypePlacementCFrame(chosen, myUnits)
-                            if not cframe then
-                                -- First copy of a buff type, or no valid nearby
-                                -- cluster slot: retain the existing placement method
-                                -- for the first copy only. Existing groups do not
-                                -- scatter elsewhere when their local area is full.
-                                if not IsBuffUnitInfo(chosen) or not (function()
-                                    local wanted = NormalizeName(chosen.unitId)
-                                    for _, unit in ipairs(myUnits) do
-                                        if NormalizeName(GetRawUnitId(unit)) == wanted then return true end
-                                    end
-                                    return false
-                                end)() then
-                                    cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
-                                end
-                            end
+                            local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
                             if cframe then
                                 local countBefore = CountPlacedInfo(chosen)
                                 local ok = InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
