@@ -238,6 +238,9 @@ local State = {
     AutoNext = false,
     AutoLeave = false,
     AntiAFK = true,
+    AutoOpenPortal = false,
+    SelectedPortalTypes = {},
+    SelectedPortalTiers = {},
 }
 
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
@@ -358,6 +361,9 @@ local function CopyStateForSave()
         AutoNext = State.AutoNext,
         AutoLeave = State.AutoLeave,
         AntiAFK = State.AntiAFK,
+        AutoOpenPortal = State.AutoOpenPortal,
+        SelectedPortalTypes = State.SelectedPortalTypes,
+        SelectedPortalTiers = State.SelectedPortalTiers,
     }
 end
 
@@ -410,6 +416,28 @@ local function ApplySavedTable(saved)
     end
     if type(saved.DebuffAvoid) == "table" then
         State.DebuffAvoid = SanitizeIdList(saved.DebuffAvoid, DEBUFF_IDS)
+    end
+    if type(saved.AutoOpenPortal) == "boolean" then
+        State.AutoOpenPortal = saved.AutoOpenPortal
+    end
+    if type(saved.SelectedPortalTypes) == "table" then
+        local selected = {}
+        for key, value in pairs(saved.SelectedPortalTypes) do
+            local id = type(key) == "string" and key or (type(value) == "string" and value or nil)
+            if id and (value == true or type(key) == "number") then selected[id] = true end
+        end
+        State.SelectedPortalTypes = selected
+    end
+    if type(saved.SelectedPortalTiers) == "table" then
+        local selected = {}
+        for key, value in pairs(saved.SelectedPortalTiers) do
+            local tier = type(key) == "string" and key or value
+            local n = tonumber(tier)
+            if n and n >= 0 and n <= 99 and (value == true or type(key) == "number") then
+                selected[tostring(math.floor(n))] = true
+            end
+        end
+        State.SelectedPortalTiers = selected
     end
     if type(saved.UnitNames) == "table" then
         local names = {}
@@ -2074,7 +2102,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local SwitchBtn = Instance.new("TextButton")
     SwitchBtn.Size = UDim2.new(0, 44, 0, 22)
     SwitchBtn.Position = UDim2.new(1, -54, 0.5, -11)
-    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
+    SwitchBtn.BackgroundColor3 = State[stateKey] and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
     SwitchBtn.Text = ""
     SwitchBtn.ZIndex = 13
     SwitchBtn.Parent = ToggleContainer
@@ -2101,7 +2129,7 @@ local function CreateToggle(parent, title, stateKey, layoutOrder, callback)
 
         local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
         if isON then
-            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(210, 70, 170) }):Play()
+            TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(0, 168, 255) }):Play()
             TweenService:Create(Indicator, tweenInfo, { Position = UDim2.new(1, -19, 0.5, -8) }):Play()
         else
             TweenService:Create(SwitchBtn, tweenInfo, { BackgroundColor3 = Color3.fromRGB(45, 45, 58) }):Play()
@@ -2176,7 +2204,7 @@ end
 local function CreateButton(parent, title, layoutOrder, onClick)
     local Button = Instance.new("TextButton")
     Button.Size = UDim2.new(1, -10, 0, 36)
-    Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+    Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
     Button.Text = title
     Button.TextColor3 = Color3.fromRGB(255, 255, 255)
     Button.TextSize = 13
@@ -2236,7 +2264,7 @@ local function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, ma
 
     local Fill = Instance.new("Frame")
     Fill.Name = "Fill"
-    Fill.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+    Fill.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
     Fill.BorderSizePixel = 0
     Fill.ZIndex = 14
     Fill.Parent = Bar
@@ -2406,7 +2434,7 @@ local function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutO
             local Box = Instance.new("TextButton")
             Box.Size = UDim2.new(0, 18, 0, 18)
             Box.Position = UDim2.new(0, 8, 0.5, -9)
-            Box.BackgroundColor3 = rank and Color3.fromRGB(210, 70, 170) or Color3.fromRGB(45, 45, 58)
+            Box.BackgroundColor3 = rank and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
             Box.Text = rank and "✓" or ""
             Box.TextColor3 = Color3.fromRGB(255, 255, 255)
             Box.TextSize = 12
@@ -2491,7 +2519,7 @@ local WebhookPage = CreateTab("Webhook", 4)
 local MiscPage = CreateTab("Misc", 5)
 
 tabs["Auto Play"].Page.Visible = true
-tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(210, 70, 170)
+tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 tabs["Auto Play"].Button.TextColor3 = Color3.fromRGB(255, 255, 255)
 
 CreateHint(MainPage, "When a match ends: Next runs if it is enabled and a next stage is available. Otherwise Replay runs if it is enabled. Otherwise Leave runs if it is enabled.", 0, 44)
@@ -2795,6 +2823,264 @@ local function RefreshUnitConfigUI()
         end)
     end
 end
+
+-- Portal automation: only uses portal items owned by the local player.
+CreateSection(AutoPlayPage, "Portal", 30)
+CreateHint(AutoPlayPage, "เลือกประเภทประตูและ Tier ที่ต้องการ ระบบจะเปิด Tier สูงสุดที่เลือกก่อน", 31, 32)
+CreateToggle(AutoPlayPage, "Auto Open Portal", "AutoOpenPortal", 32)
+
+local PortalTypeList = Instance.new("ScrollingFrame")
+PortalTypeList.Name = "PortalTypeList"
+PortalTypeList.Size = UDim2.new(1, -10, 0, 150)
+PortalTypeList.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+PortalTypeList.BorderSizePixel = 0
+PortalTypeList.ScrollBarThickness = 4
+PortalTypeList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+PortalTypeList.CanvasSize = UDim2.new(0, 0, 0, 0)
+PortalTypeList.LayoutOrder = 34
+PortalTypeList.ZIndex = 12
+PortalTypeList.Parent = AutoPlayPage
+local PortalTypeCorner = Instance.new("UICorner")
+PortalTypeCorner.CornerRadius = UDim.new(0, 6)
+PortalTypeCorner.Parent = PortalTypeList
+local PortalTypeLayout = Instance.new("UIListLayout")
+PortalTypeLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PortalTypeLayout.Padding = UDim.new(0, 4)
+PortalTypeLayout.Parent = PortalTypeList
+local PortalTypePadding = Instance.new("UIPadding")
+PortalTypePadding.PaddingTop = UDim.new(0, 6)
+PortalTypePadding.PaddingBottom = UDim.new(0, 6)
+PortalTypePadding.PaddingLeft = UDim.new(0, 6)
+PortalTypePadding.PaddingRight = UDim.new(0, 6)
+PortalTypePadding.Parent = PortalTypeList
+
+local PortalTierList = Instance.new("ScrollingFrame")
+PortalTierList.Name = "PortalTierList"
+PortalTierList.Size = UDim2.new(1, -10, 0, 92)
+PortalTierList.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+PortalTierList.BorderSizePixel = 0
+PortalTierList.ScrollBarThickness = 4
+PortalTierList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+PortalTierList.CanvasSize = UDim2.new(0, 0, 0, 0)
+PortalTierList.LayoutOrder = 37
+PortalTierList.ZIndex = 12
+PortalTierList.Parent = AutoPlayPage
+local PortalTierCorner = Instance.new("UICorner")
+PortalTierCorner.CornerRadius = UDim.new(0, 6)
+PortalTierCorner.Parent = PortalTierList
+local PortalTierLayout = Instance.new("UIListLayout")
+PortalTierLayout.SortOrder = Enum.SortOrder.LayoutOrder
+PortalTierLayout.Padding = UDim.new(0, 4)
+PortalTierLayout.Parent = PortalTierList
+local PortalTierPadding = Instance.new("UIPadding")
+PortalTierPadding.PaddingTop = UDim.new(0, 6)
+PortalTierPadding.PaddingBottom = UDim.new(0, 6)
+PortalTierPadding.PaddingLeft = UDim.new(0, 6)
+PortalTierPadding.PaddingRight = UDim.new(0, 6)
+PortalTierPadding.Parent = PortalTierList
+
+local PortalInventoryStatus = CreateHint(AutoPlayPage, "กด Refresh เพื่อโหลดประตูในกระเป๋า", 38, 30)
+local PortalInventoryCache = {}
+local PortalItemData = nil
+local PortalInventory = nil
+
+local function GetPortalServices()
+    local src = ReplicatedStorage:FindFirstChild("src")
+    local loaderModule = src and src:FindFirstChild("Loader")
+    if not loaderModule then return nil end
+    local Loader = require(loaderModule)
+    local inventoryService = Loader.load_client_service(game, "ItemInventoryServiceClient")
+    local session = inventoryService and inventoryService.session
+    local inventory = session and session.inventory
+    local items = Loader.load_data(game, "Items")
+    return inventory, items, Loader
+end
+
+local function ClearPortalRows(list)
+    for _, child in ipairs(list:GetChildren()) do
+        if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
+    end
+end
+
+local function AddPortalChoice(list, label, selected, order, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -8, 0, 30)
+    row.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+    row.LayoutOrder = order
+    row.ZIndex = 13
+    row.Parent = list
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = row
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 1, 0)
+    button.BackgroundTransparency = 1
+    button.Text = (selected and "☑  " or "☐  ") .. label
+    button.TextColor3 = Color3.fromRGB(225, 230, 240)
+    button.TextSize = 12
+    button.Font = Enum.Font.Gotham
+    button.TextXAlignment = Enum.TextXAlignment.Left
+    button.ZIndex = 14
+    button.Parent = row
+    button.Activated:Connect(callback)
+end
+
+local function RefreshPortalInventory()
+    local ok, inventory, items = pcall(function()
+        local inv, data = GetPortalServices()
+        return inv, data
+    end)
+    if not ok or not inventory or not items then
+        PortalInventoryStatus.Text = "โหลดข้อมูลกระเป๋าไม่สำเร็จ ลอง Refresh อีกครั้ง"
+        return
+    end
+    PortalInventory = inventory
+    PortalItemData = items
+    PortalInventoryCache = {}
+    local uniqueItems = inventory.inventory_profile_data and inventory.inventory_profile_data.unique_items
+    if type(uniqueItems) == "table" then
+        for _, owned in pairs(uniqueItems) do
+            local itemData = owned and items[owned.item_id]
+            local portalData = owned and owned._unique_item_data and owned._unique_item_data._unique_portal_data
+            if itemData and itemData.item_group == "Portals" and itemData.usage_from_inventory and itemData.usage and itemData.usage.type == "open_portal" and owned.uuid then
+                table.insert(PortalInventoryCache, {
+                    uuid = owned.uuid,
+                    id = owned.item_id,
+                    name = itemData.name or owned.item_id,
+                    tier = tonumber(portalData and portalData.portal_depth) or 0,
+                })
+            end
+        end
+    end
+
+    local typeMap, tierMap = {}, {}
+    for _, portal in ipairs(PortalInventoryCache) do
+        typeMap[portal.id] = {name = portal.name, count = (typeMap[portal.id] and typeMap[portal.id].count or 0) + 1}
+        tierMap[tostring(portal.tier)] = true
+    end
+    local typeIds = {}
+    for id in pairs(typeMap) do table.insert(typeIds, id) end
+    table.sort(typeIds, function(a, b) return typeMap[a].name < typeMap[b].name end)
+    local tiers = {}
+    for tier in pairs(tierMap) do table.insert(tiers, tonumber(tier) or 0) end
+    table.sort(tiers, function(a, b) return a > b end)
+
+    ClearPortalRows(PortalTypeList)
+    ClearPortalRows(PortalTierList)
+    if #typeIds == 0 then
+        local empty = Instance.new("TextLabel")
+        empty.Size = UDim2.new(1, -8, 0, 28)
+        empty.BackgroundTransparency = 1
+        empty.Text = "ไม่พบ Portal ในกระเป๋า"
+        empty.TextColor3 = Color3.fromRGB(145, 150, 165)
+        empty.TextSize = 12
+        empty.Font = Enum.Font.Gotham
+        empty.TextXAlignment = Enum.TextXAlignment.Left
+        empty.LayoutOrder = 1
+        empty.ZIndex = 13
+        empty.Parent = PortalTypeList
+    else
+        for index, id in ipairs(typeIds) do
+            local info = typeMap[id]
+            AddPortalChoice(PortalTypeList, string.format("%s  (x%d)", info.name, info.count), State.SelectedPortalTypes[id] == true, index, function()
+                State.SelectedPortalTypes[id] = not State.SelectedPortalTypes[id] or nil
+                SaveConfig()
+                RefreshPortalInventory()
+            end)
+        end
+    end
+
+    if #tiers == 0 then
+        local empty = Instance.new("TextLabel")
+        empty.Size = UDim2.new(1, -8, 0, 26)
+        empty.BackgroundTransparency = 1
+        empty.Text = "ไม่มี Tier ให้เลือก"
+        empty.TextColor3 = Color3.fromRGB(145, 150, 165)
+        empty.TextSize = 12
+        empty.Font = Enum.Font.Gotham
+        empty.TextXAlignment = Enum.TextXAlignment.Left
+        empty.LayoutOrder = 1
+        empty.ZIndex = 13
+        empty.Parent = PortalTierList
+    else
+        for index, tier in ipairs(tiers) do
+            local key = tostring(tier)
+            AddPortalChoice(PortalTierList, "Tier " .. key, State.SelectedPortalTiers[key] == true, index, function()
+                State.SelectedPortalTiers[key] = not State.SelectedPortalTiers[key] or nil
+                SaveConfig()
+                RefreshPortalInventory()
+            end)
+        end
+    end
+    PortalInventoryStatus.Text = string.format("พบ Portal %d ชิ้น | %d ประเภท | %d Tier", #PortalInventoryCache, #typeIds, #tiers)
+end
+
+local function CreatePortalRefreshButton()
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, -10, 0, 34)
+    button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
+    button.Text = "Refresh Portal Inventory"
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.TextSize = 12
+    button.Font = Enum.Font.GothamBold
+    button.LayoutOrder = 35
+    button.ZIndex = 12
+    button.Parent = AutoPlayPage
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = button
+    button.Activated:Connect(RefreshPortalInventory)
+end
+CreatePortalRefreshButton()
+CreateSection(AutoPlayPage, "Select Portal", 33)
+CreateSection(AutoPlayPage, "Select Tier", 36)
+task.defer(RefreshPortalInventory)
+
+local portalAttemptedUUIDs = {}
+local function GetSelectedPortalCandidate()
+    local candidates = {}
+    if not PortalInventory or not PortalItemData then
+        RefreshPortalInventory()
+    end
+    for _, portal in ipairs(PortalInventoryCache) do
+        if not portalAttemptedUUIDs[portal.uuid]
+            and State.SelectedPortalTypes[portal.id]
+            and State.SelectedPortalTiers[tostring(portal.tier)] then
+            table.insert(candidates, portal)
+        end
+    end
+    table.sort(candidates, function(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        if a.name ~= b.name then return a.name < b.name end
+        return a.uuid < b.uuid
+    end)
+    return candidates[1]
+end
+
+local portalUseBusy = false
+task.spawn(function()
+    while ScreenGui.Parent do
+        if State.AutoOpenPortal and not portalUseBusy then
+            local ok, candidate = pcall(GetSelectedPortalCandidate)
+            if ok and candidate then
+                local inLobby = false
+                pcall(function() inLobby = IsInLobby() end)
+                if inLobby then
+                    portalUseBusy = true
+                    portalAttemptedUUIDs[candidate.uuid] = true
+                    local used = pcall(function()
+                        InvokeEndpoint("use_portal", candidate.uuid)
+                    end)
+                    if not used then warn("[OctoputHub] Auto Open Portal request failed") end
+                    task.wait(12)
+                    portalUseBusy = false
+                    RefreshPortalInventory()
+                end
+            end
+        end
+        task.wait(3)
+    end
+end)
 
 local EventStatusCard = Instance.new("Frame")
 EventStatusCard.Size = UDim2.new(1, -10, 0, 38)
