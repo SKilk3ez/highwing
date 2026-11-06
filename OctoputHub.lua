@@ -2891,7 +2891,9 @@ function LoadGameDataModule(moduleName)
     return nil
 end
 
-function ReadSecretRewardSnapshot()
+-- Snapshot all inventory rewards at match start/end. This includes stackable
+-- normal_items, unique inventory items (Portals/Charms/materials/etc.), and units.
+function ReadInventoryRewardSnapshot()
     local snapshot = {}
     if type(getgc) ~= "function" then return snapshot, false end
     local ok, objects = pcall(getgc, true)
@@ -2922,53 +2924,96 @@ function ReadSecretRewardSnapshot()
     end
 
     if inventoryProfile then
-        for _, owned in pairs(inventoryProfile.unique_items) do
+        -- Stackable drops are stored as item_id -> quantity.
+        for itemId, amount in pairs(inventoryProfile.normal_items or {}) do
+            local count = tonumber(amount) or 0
+            if count > 0 then
+                local def = itemData[itemId] or {}
+                snapshot["normal:" .. tostring(itemId)] = {
+                    category = tostring(def.item_group or "Item"),
+                    name = tostring(def.name or itemId),
+                    rarity = tostring(def.rarity or "Unknown"),
+                    tier = tonumber(def.tier),
+                    amount = count,
+                    secret = tostring(def.rarity or ""):lower() == "secret",
+                }
+            end
+        end
+
+        -- Unique drops have their own UUID; use it to avoid confusing duplicates.
+        for _, owned in pairs(inventoryProfile.unique_items or {}) do
             if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
-                local def = itemData[owned.item_id]
-                if type(def) == "table" and def.rarity == "Secret" then
-                    local category = def.item_group == "Portals" and "Secret Portal" or "Secret Item"
-                    snapshot["item:" .. owned.uuid] = { category = category, name = tostring(def.name or owned.item_id) }
-                end
+                local def = itemData[owned.item_id] or {}
+                snapshot["item:" .. owned.uuid] = {
+                    category = tostring(def.item_group or "Item"),
+                    name = tostring(def.name or owned.item_id),
+                    rarity = tostring(def.rarity or "Unknown"),
+                    tier = tonumber(def.tier),
+                    amount = 1,
+                    secret = tostring(def.rarity or ""):lower() == "secret",
+                }
             end
         end
     end
 
     if collectionProfile then
-        for uuid, owned in pairs(collectionProfile.owned_units) do
+        for uuid, owned in pairs(collectionProfile.owned_units or {}) do
             if type(owned) == "table" and type(owned.unit_id) == "string" then
-                local def = unitData[owned.unit_id]
-                if type(def) == "table" and def.rarity == "Secret" then
-                    snapshot["unit:" .. tostring(uuid)] = { category = "Secret Unit", name = tostring(def.name or owned.unit_id) }
-                end
+                local def = unitData[owned.unit_id] or {}
+                snapshot["unit:" .. tostring(uuid)] = {
+                    category = "Unit",
+                    name = tostring(def.name or owned.unit_id),
+                    rarity = tostring(def.rarity or "Unknown"),
+                    amount = 1,
+                    secret = tostring(def.rarity or ""):lower() == "secret",
+                }
             end
         end
     end
     return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
 end
 
-function BuildSecretRewardLines(before, after)
-    local totals = { ["Secret Unit"] = {}, ["Secret Portal"] = {} }
+function BuildInventoryRewardLines(before, after)
+    local normalEntries, secretEntries = {}, {}
     for key, reward in pairs(after or {}) do
-        if not (before and before[key]) and totals[reward.category] then
-            local name = reward.name or "Unknown"
-            totals[reward.category][name] = (totals[reward.category][name] or 0) + 1
+        local old = before and before[key]
+        local amount = tonumber(reward.amount) or 1
+        local gained = amount
+        if key:sub(1, 7) == "normal:" then
+            gained = math.max(0, amount - (old and tonumber(old.amount) or 0))
+        elseif old then
+            gained = 0
+        end
+
+        if gained > 0 then
+            local category = tostring(reward.category or "Item")
+            local name = tostring(reward.name or "Unknown")
+            local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
+            local rarityText = reward.rarity and reward.rarity ~= "" and reward.rarity ~= "Unknown"
+                and (" · " .. tostring(reward.rarity)) or ""
+            local line = string.format("• **%s ×%s** — %s%s%s",
+                name, FormatNumber(gained), category, rarityText, tierText)
+            if reward.secret then
+                table.insert(secretEntries, {
+                    line = string.format("🌈 **✨ %s ×%s ✨** — %s%s%s",
+                        name, FormatNumber(gained), category, rarityText, tierText),
+                    sort = name .. category,
+                })
+            else
+                table.insert(normalEntries, { line = line, sort = name .. category })
+            end
         end
     end
 
-    local sections = {}
-    for _, category in ipairs({"Secret Unit", "Secret Portal"}) do
-        local entries = {}
-        for name, count in pairs(totals[category]) do
-            table.insert(entries, string.format("🌈 **✨ %s ×%d ✨**", name, count))
-        end
-        table.sort(entries)
-        if #entries > 0 then
-            table.insert(sections, "━━━━━━━━━━━━━━━━\n**🚨 💎 " .. string.upper(category) .. " 💎 🚨**\n"
-                .. table.concat(entries, "\n") .. "\n━━━━━━━━━━━━━━━━")
-        end
-    end
-    if #sections == 0 then return nil end
-    return table.concat(sections, "\n\n")
+    table.sort(normalEntries, function(a, b) return a.sort < b.sort end)
+    table.sort(secretEntries, function(a, b) return a.sort < b.sort end)
+    local normalLines, secretLines = {}, {}
+    for _, entry in ipairs(normalEntries) do table.insert(normalLines, entry.line) end
+    for _, entry in ipairs(secretEntries) do table.insert(secretLines, entry.line) end
+
+    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+        #secretLines > 0 and ("━━━━━━━━━━━━━━━━\n**🚨 💎 SECRET REWARDS 💎 🚨**\n"
+            .. table.concat(secretLines, "\n") .. "\n━━━━━━━━━━━━━━━━") or nil
 end
 
 function BuildMatchRewardLines(resultDetails)
@@ -3038,7 +3083,7 @@ webhookSecretRewardBefore = nil
 webhookSecretRewardBaselineAvailable = false
 function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
-    webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadSecretRewardSnapshot()
+    webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
     return table.clone(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
 end
 
@@ -3144,11 +3189,11 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     end
     local outcome = ResolveWebhookOutcome(resultDetails)
 
-    local secretRewardText
+    local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        local secretRewardsAfter, secretRewardsAvailable = ReadSecretRewardSnapshot()
-        if secretRewardsAvailable then
-            secretRewardText = BuildSecretRewardLines(secretBaseline, secretRewardsAfter)
+        local inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
+        if inventoryRewardsAvailable then
+            inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
         end
     end
 
@@ -3182,7 +3227,14 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         value = LimitEmbedText(rewardText, 900),
         inline = false,
     }}
-    -- Show this section only when a new Secret Unit or Secret Portal was found.
+    if inventoryRewardText then
+        table.insert(fields, {
+            name = "📦 New Items / Units",
+            value = LimitEmbedText(inventoryRewardText, 900),
+            inline = false,
+        })
+    end
+    -- Highlight every newly obtained Secret item, portal, charm, or unit.
     if secretRewardText then
         table.insert(fields, {
             name = "🚨 SECRET REWARDS 🚨",
