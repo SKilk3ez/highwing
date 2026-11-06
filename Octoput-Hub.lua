@@ -3211,7 +3211,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
     local rewardText = BuildMatchRewardLines(resultDetails)
     if inventoryRewardText then
-        rewardText = rewardText .. "\\n\\n**📦 New Items / Units**\\n" .. inventoryRewardText
+        rewardText = rewardText .. "\n\n**📦 New Items / Units**\n" .. inventoryRewardText
     end
 
     local function LimitEmbedText(value, limit)
