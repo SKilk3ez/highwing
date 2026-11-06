@@ -32,7 +32,10 @@ ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "XT_Hub_UI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
-ScreenGui.DisplayOrder = 120
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+-- Keep the hub above game HUDs such as Player Stats, even if they use a
+-- higher DisplayOrder or are recreated while BlackScreen is active.
+ScreenGui.DisplayOrder = 10000
 ScreenGui.Parent = playerGui
 
 BlackOverlay = Instance.new("Frame")
@@ -2686,6 +2689,22 @@ end
 task.spawn(function()
     while ScreenGui.Parent do
         task.wait(0.25)
+
+        if State.BlackScreen then
+            local highestDisplayOrder = 9999
+            for _, gui in ipairs(playerGui:GetChildren()) do
+                if gui:IsA("ScreenGui") and gui ~= ScreenGui then
+                    highestDisplayOrder = math.max(highestDisplayOrder, gui.DisplayOrder)
+                end
+            end
+            local targetDisplayOrder = math.min(highestDisplayOrder + 1, 2147483000)
+            if ScreenGui.DisplayOrder ~= targetDisplayOrder then
+                ScreenGui.DisplayOrder = targetDisplayOrder
+            end
+        elseif ScreenGui.DisplayOrder ~= 10000 then
+            ScreenGui.DisplayOrder = 10000
+        end
+
         local dataFolder = workspace:FindFirstChild("_DATA")
         local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
