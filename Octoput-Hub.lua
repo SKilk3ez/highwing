@@ -161,7 +161,7 @@ MatchInfoPanel.BackgroundColor3 = Color3.fromRGB(12, 15, 24)
 MatchInfoPanel.BackgroundTransparency = 0.08
 MatchInfoPanel.BorderSizePixel = 0
 MatchInfoPanel.Visible = false
-MatchInfoPanel.ZIndex = 180
+MatchInfoPanel.ZIndex = 2
 MatchInfoPanel.Parent = ScreenGui
 MatchPanelCorner = Instance.new("UICorner")
 MatchPanelCorner.CornerRadius = UDim.new(0, 18)
@@ -180,7 +180,7 @@ PromoLogo.BackgroundColor3 = Color3.fromRGB(25, 29, 43)
 PromoLogo.BackgroundTransparency = 0.05
 PromoLogo.BorderSizePixel = 0
 PromoLogo.ScaleType = Enum.ScaleType.Fit
-PromoLogo.ZIndex = 181
+PromoLogo.ZIndex = 3
 PromoLogo.Parent = MatchInfoPanel
 PromoLogoCorner = Instance.new("UICorner")
 PromoLogoCorner.CornerRadius = UDim.new(0, 14)
@@ -192,7 +192,7 @@ PromoLogoFallback.Text = "OCTOPUT HUB"
 PromoLogoFallback.TextColor3 = Color3.new(1, 1, 1)
 PromoLogoFallback.Font = Enum.Font.GothamBlack
 PromoLogoFallback.TextSize = 12
-PromoLogoFallback.ZIndex = 182
+PromoLogoFallback.ZIndex = 4
 PromoLogoFallback.Parent = PromoLogo
 
 function MakeMatchLabel(name, position, size, text, textSize, color, font)
@@ -208,7 +208,7 @@ function MakeMatchLabel(name, position, size, text, textSize, color, font)
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.TextYAlignment = Enum.TextYAlignment.Center
     label.TextTruncate = Enum.TextTruncate.AtEnd
-    label.ZIndex = 181
+    label.ZIndex = 3
     label.Parent = MatchInfoPanel
     return label
 end
