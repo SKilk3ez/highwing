@@ -3010,7 +3010,7 @@ function ReadInventoryRewardSnapshot()
 end
 
 function BuildInventoryRewardLines(before, after)
-    local normalEntries, secretEntries = {}, {}
+    local normalEntries, charmEntries, secretEntries = {}, {}, {}
     for key, reward in pairs(after or {}) do
         local old = before and before[key]
         local amount = tonumber(reward.amount) or 1
@@ -3035,19 +3035,35 @@ function BuildInventoryRewardLines(before, after)
                         name, FormatNumber(gained), category, rarityText, tierText),
                     sort = name .. category,
                 })
+            elseif category:lower():find("charm", 1, true) then
+                table.insert(charmEntries, { line = line, sort = name .. category })
             else
                 table.insert(normalEntries, { line = line, sort = name .. category })
             end
         end
     end
 
-    table.sort(normalEntries, function(a, b) return a.sort < b.sort end)
-    table.sort(secretEntries, function(a, b) return a.sort < b.sort end)
-    local normalLines, secretLines = {}, {}
-    for _, entry in ipairs(normalEntries) do table.insert(normalLines, entry.line) end
-    for _, entry in ipairs(secretEntries) do table.insert(secretLines, entry.line) end
+    local function SortEntries(entries)
+        table.sort(entries, function(a, b) return a.sort < b.sort end)
+        local lines = {}
+        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
+        return lines
+    end
 
-    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+    local normalLines = SortEntries(normalEntries)
+    local charmLines = SortEntries(charmEntries)
+    local secretLines = SortEntries(secretEntries)
+    local groupedNormalLines = {}
+    if #charmLines > 0 then
+        table.insert(groupedNormalLines, "**🧿 Charms**")
+        for _, line in ipairs(charmLines) do table.insert(groupedNormalLines, line) end
+    end
+    if #normalLines > 0 then
+        table.insert(groupedNormalLines, "**📦 Other Items / Units**")
+        for _, line in ipairs(normalLines) do table.insert(groupedNormalLines, line) end
+    end
+
+    return #groupedNormalLines > 0 and table.concat(groupedNormalLines, "\n") or nil,
         #secretLines > 0 and ("━━━━━━━━━━━━━━━━\n**🚨 💎 SECRET REWARDS 💎 🚨**\n"
             .. table.concat(secretLines, "\n") .. "\n━━━━━━━━━━━━━━━━") or nil
 end
@@ -3057,7 +3073,7 @@ function BuildMatchRewardLines(resultDetails)
     local lines = {}
     if type(settings) == "table" then
         local rewardFields = {
-            { key = "xp_reward", label = "XP" },
+            { key = "xp_reward", label = "Player XP" },
             { key = "gold_reward", label = "Gold" },
             { key = "gem_reward", label = "Gems" },
             { key = "trophy_reward", label = "Trophies" },
@@ -3094,7 +3110,7 @@ function BuildMatchRewardLines(resultDetails)
         scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
         if scroll then
             local labels = {
-                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "XP",
+                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "Player XP",
             }
             for _, frame in ipairs(scroll:GetChildren()) do
                 if frame:IsA("GuiObject") and frame.Visible then
@@ -3110,8 +3126,67 @@ function BuildMatchRewardLines(resultDetails)
         end
     end
 
-    if #lines == 0 then return "No match rewards reported by ResultsUI" end
-    return table.concat(lines, "\n")
+    return #lines > 0 and table.concat(lines, "\n") or nil
+end
+
+-- ResultsUI.show_results() also supplies first-completion bonuses and per-unit XP.
+-- Keep these inside the same Match Rewards Discord field as the other rewards.
+function BuildAdditionalResultRewardLines(settings, inventorySnapshot, fallbackInventorySnapshot)
+    if type(settings) ~= "table" then return nil end
+    local sections = {}
+
+    if settings.first_completion then
+        local bonusLines = {}
+        local gems = tonumber(settings.first_completion_gems)
+        local trophies = tonumber(settings.first_completion_trophies)
+        if gems and gems > 0 then
+            table.insert(bonusLines, "• **Gems:** +" .. FormatNumber(gems))
+        end
+        if trophies and trophies > 0 then
+            table.insert(bonusLines, "• **Trophies:** +" .. FormatNumber(trophies))
+        end
+        if #bonusLines > 0 then
+            table.insert(sections, "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n"))
+        end
+    end
+
+    if type(settings.xp_updates) == "table" then
+        local unitNames = {}
+        for _, snapshot in ipairs({inventorySnapshot or {}, fallbackInventorySnapshot or {}}) do
+            for key, reward in pairs(snapshot) do
+                if type(key) == "string" and key:sub(1, 5) == "unit:" and type(reward) == "table" then
+                    local uuid = key:sub(6)
+                    if not unitNames[uuid] then
+                        unitNames[uuid] = tostring(reward.name or uuid)
+                    end
+                end
+            end
+        end
+
+        local xpLines = {}
+        for uuid, update in pairs(settings.xp_updates) do
+            if type(update) == "table" then
+                local oldXP = tonumber(update.old_xp)
+                local newXP = tonumber(update.new_xp)
+                local gained = oldXP and newXP and (newXP - oldXP) or 0
+                if gained > 0 then
+                    local unitName = unitNames[tostring(uuid)] or ("Unit " .. tostring(uuid):sub(1, 8))
+                    table.insert(xpLines, {
+                        sort = unitName:lower(),
+                        line = "• **" .. unitName .. ":** +" .. FormatNumber(gained) .. " Unit XP",
+                    })
+                end
+            end
+        end
+        table.sort(xpLines, function(a, b) return a.sort < b.sort end)
+        if #xpLines > 0 then
+            local lines = {}
+            for _, entry in ipairs(xpLines) do table.insert(lines, entry.line) end
+            table.insert(sections, "**⚔️ Unit XP**\n" .. table.concat(lines, "\n"))
+        end
+    end
+
+    return #sections > 0 and table.concat(sections, "\n\n") or nil
 end
 
 webhookCurrencyBefore = nil
@@ -3226,10 +3301,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local outcome = ResolveWebhookOutcome(resultDetails)
 
     local inventoryRewardText, secretRewardText
+    local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     if secretBaselineAvailable then
         -- Inventory replication can arrive shortly after ResultsUI. Retry briefly.
         -- Item drops are appended to Match Rewards; do not create extra status fields.
-        local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
         for attempt = 1, 8 do
             inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
             if inventoryRewardsAvailable then break end
@@ -3257,6 +3332,14 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
         .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
     local rewardText = BuildMatchRewardLines(resultDetails)
+    local rewardSections = {}
+    if rewardText then table.insert(rewardSections, rewardText) end
+    local additionalRewardText = BuildAdditionalResultRewardLines(
+        resultDetails and resultDetails.settings,
+        inventoryRewardsAvailable and inventoryRewardsAfter or nil,
+        secretBaseline
+    )
+    if additionalRewardText then table.insert(rewardSections, additionalRewardText) end
     local itemRewardParts = {}
     if inventoryRewardText then
         table.insert(itemRewardParts, "**📦 New Items / Units**\n" .. inventoryRewardText)
@@ -3265,8 +3348,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         table.insert(itemRewardParts, secretRewardText)
     end
     if #itemRewardParts > 0 then
-        rewardText = rewardText .. "\n\n" .. table.concat(itemRewardParts, "\n\n")
+        table.insert(rewardSections, table.concat(itemRewardParts, "\n\n"))
     end
+    rewardText = #rewardSections > 0 and table.concat(rewardSections, "\n\n")
+        or "No reward values or inventory changes were reported."
 
     local function LimitEmbedText(value, limit)
         value = tostring(value or "")
