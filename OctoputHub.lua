@@ -3954,6 +3954,41 @@ CreateToggle(MainPage, "Auto Replay", "MainAutoReplay", 2)
 CreateToggle(MainPage, "Auto Next", "AutoNext", 3)
 CreateToggle(MainPage, "Auto Leave", "AutoLeave", 4)
 
+-- Manual Return to Lobby button, using the game's own flow (party confirmation
+-- and private-server destination prompt are handled by TeleportServiceClient).
+returningToLobby = false
+CreateButton(MainPage, "Return to Lobby", 5, function()
+    if returningToLobby then
+        return
+    end
+    returningToLobby = true
+
+    local ok, err = pcall(function()
+        local srcFolder = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = srcFolder and srcFolder:FindFirstChild("Loader")
+        if not loaderModule then
+            error("Anime Adventures Loader module is unavailable")
+        end
+
+        local Loader = require(loaderModule)
+        local TeleportServiceClient = Loader.load_client_service(game, "TeleportServiceClient")
+        if not TeleportServiceClient or type(TeleportServiceClient.back_to_lobby) ~= "function" then
+            error("TeleportServiceClient.back_to_lobby is unavailable")
+        end
+
+        TeleportServiceClient.back_to_lobby()
+    end)
+
+    if not ok then
+        returningToLobby = false
+        warn("[OctoputHub] Return to Lobby failed: " .. tostring(err))
+    else
+        task.delay(5, function()
+            returningToLobby = false
+        end)
+    end
+end)
+
 AutoPlayStatusCard = Instance.new("Frame")
 AutoPlayStatusCard.Size = UDim2.new(1, -10, 0, 38)
 AutoPlayStatusCard.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
