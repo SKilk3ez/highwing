@@ -459,6 +459,7 @@ State = {
     AutoLeave = false,
     AntiAFK = true,
     AutoOpenPortal = false,
+    AutoNextPortal = false,
     SelectedPortalTypes = {},
     SelectedPortalTiers = {},
     SnipeBanner = "",
@@ -587,6 +588,7 @@ function CopyStateForSave()
         AutoLeave = State.AutoLeave,
         AntiAFK = State.AntiAFK,
         AutoOpenPortal = State.AutoOpenPortal,
+        AutoNextPortal = State.AutoNextPortal,
         SelectedPortalTypes = State.SelectedPortalTypes,
         SelectedPortalTiers = State.SelectedPortalTiers,
         SnipeBanner = State.SnipeBanner,
@@ -648,6 +650,9 @@ function ApplySavedTable(saved)
     end
     if type(saved.AutoOpenPortal) == "boolean" then
         State.AutoOpenPortal = saved.AutoOpenPortal
+    end
+    if type(saved.AutoNextPortal) == "boolean" then
+        State.AutoNextPortal = saved.AutoNextPortal
     end
     if type(saved.SelectedPortalTypes) == "table" then
         local selected = {}
@@ -4589,6 +4594,7 @@ end
 RefreshPortalTierUI()
 PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
 CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 4)
+CreateToggle(PortalPage, "Auto Next Portal (Win / Lose)", "AutoNextPortal", 5)
 
 portalOpenBusy = false
 portalLastRefresh = 0
@@ -5015,12 +5021,138 @@ function TryAutoStart()
     end
 end
 
+
+-- Auto Next Portal follows the game's ResultsUI replay flow. For portal levels,
+-- the official NextRetry button sends set_game_finished_vote("replay", {item_uuid})
+-- after LevelServiceCore validates that the replacement portal belongs to the same group.
+function GetAutoNextPortalCandidate()
+    local session = FindLocalGameSession()
+    local profile = session and session.inventory and session.inventory.inventory_profile_data
+    local uniqueItems = profile and profile.unique_items
+    if type(uniqueItems) ~= "table" then
+        return nil, "Inventory session not found", false
+    end
+
+    local loaderModule
+    local loaderOk = pcall(function()
+        loaderModule = require(ReplicatedStorage:WaitForChild("src"):WaitForChild("Loader"))
+    end)
+    local levelData = loaderOk and type(loaderModule) == "table" and loaderModule.LevelData or nil
+    if type(levelData) ~= "table" or levelData._is_map_or_portal_level ~= true then
+        return nil, "Current stage is not a portal", false
+    end
+    if tonumber(levelData._owner_player_userid) ~= player.UserId then
+        return nil, "Only the portal owner can choose the next portal", true
+    end
+
+    local portalGroup = levelData.portal_group
+    if type(portalGroup) ~= "string" or portalGroup == "" then
+        return nil, "Current portal group could not be identified", true
+    end
+
+    local items = LoadGameDataModule("Items")
+    local levels = LoadGameDataModule("Levels")
+    if type(items) ~= "table" or type(levels) ~= "table" then
+        return nil, "Portal game data unavailable", true
+    end
+
+    local currentUUID = levelData._portal_item_uuid or levelData._portal_uuid
+    local candidates = {}
+    for _, owned in pairs(uniqueItems) do
+        if type(owned) ~= "table" or type(owned.uuid) ~= "string"
+            or owned.uuid == currentUUID or portalOpenedUUIDs[owned.uuid] then
+            continue
+        end
+
+        local def = type(owned.item_id) == "string" and items[owned.item_id] or nil
+        if not def or def.item_group ~= "Portals" then
+            continue
+        end
+
+        local itemGroup
+        if type(def.static_portal_copy_to_level_params) == "table" then
+            itemGroup = def.static_portal_copy_to_level_params.portal_group
+        else
+            local usage = def.usage
+            local levelId = type(usage) == "table" and usage.level_id or nil
+            local uniqueData = owned._unique_item_data
+            if def._unique_portal and type(uniqueData) == "table"
+                and type(uniqueData._unique_portal_data) == "table" then
+                levelId = uniqueData._unique_portal_data.level_id or levelId
+            end
+            local portalLevel = levelId and levels[levelId]
+            itemGroup = portalLevel and portalLevel.portal_group
+        end
+        if itemGroup ~= portalGroup then
+            continue
+        end
+
+        local uniqueData = owned._unique_item_data
+        local tries = type(uniqueData) == "table" and tonumber(uniqueData._portal_tries) or nil
+        local maxTries = type(uniqueData) == "table" and tonumber(uniqueData._portal_max_tries) or tonumber(def._portal_max_tries)
+        local hasRemainingTries = def._portal_infinite_lives == true
+            or (tries ~= nil and maxTries ~= nil and tries < maxTries)
+        if not hasRemainingTries then
+            continue
+        end
+
+        local portalData = type(uniqueData) == "table" and uniqueData._unique_portal_data or nil
+        local tier = tonumber(portalData and portalData.portal_depth) or 0
+        if State.SelectedPortalTypes[owned.item_id] and State.SelectedPortalTiers[tostring(tier)] then
+            table.insert(candidates, {
+                uuid = owned.uuid,
+                itemId = owned.item_id,
+                tier = tier,
+                name = tostring(def.name or owned.item_id),
+            })
+        end
+    end
+
+    table.sort(candidates, function(a, b)
+        if a.tier == b.tier then return a.name < b.name end
+        return a.tier > b.tier
+    end)
+    return candidates[1], #candidates == 0 and "No other matching portal is available" or nil, true
+end
+
 function HandleMatchEnd(gameFinished)
     if not gameFinished or gameFinished.Value ~= true then
         matchEndHandled = false
         return
     end
     if matchEndHandled then
+        return
+    end
+
+    -- Portal Auto Next uses the same result-screen replay flow as the game itself.
+    -- It works after both Victory and Defeat and only for the portal owner.
+    local nextPortal, nextPortalReason, isPortalLevel
+    if State.AutoNextPortal then
+        nextPortal, nextPortalReason, isPortalLevel = GetAutoNextPortalCandidate()
+    end
+    if State.AutoNextPortal and isPortalLevel then
+        matchEndHandled = true
+        task.spawn(function()
+            task.wait(2.5)
+            if not gameFinished.Parent or gameFinished.Value ~= true then return end
+            if nextPortal then
+                portalOpenedUUIDs[nextPortal.uuid] = true
+                local ok, result = pcall(function()
+                    return InvokeEndpoint("set_game_finished_vote", "replay", { item_uuid = nextPortal.uuid })
+                end)
+                if not ok or result == false then
+                    portalOpenedUUIDs[nextPortal.uuid] = nil
+                    UpdateEventStatus("Auto Next Portal: Replay request failed", Color3.fromRGB(255, 100, 100))
+                else
+                    UpdateEventStatus(string.format("Auto Next Portal: Selecting %s (T%d)...", nextPortal.name, nextPortal.tier), Color3.fromRGB(70, 200, 255))
+                end
+            elseif nextPortalReason == "No other matching portal is available" and State.AutoOpenPortal then
+                UpdateEventStatus("Auto Next Portal: No matching portal; returning to Lobby for Auto Open Portal...", Color3.fromRGB(255, 170, 0))
+                InvokeEndpoint("teleport_back_to_lobby")
+            else
+                UpdateEventStatus("Auto Next Portal: " .. tostring(nextPortalReason or "No valid portal found"), Color3.fromRGB(255, 170, 0))
+            end
+        end)
         return
     end
 
