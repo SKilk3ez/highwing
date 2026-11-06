@@ -3383,10 +3383,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         value = tostring(value or "")
         local current = {}
         local currentLength = 0
-        for line in (value .. "\\n"):gmatch("(.-)\\n") do
+        for line in (value .. "\n"):gmatch("(.-)\n") do
             local extra = #line + (#current > 0 and 1 or 0)
             if #current > 0 and currentLength + extra > maxLength then
-                table.insert(fields, { name = fieldName, value = table.concat(current, "\\n"), inline = false })
+                table.insert(fields, { name = fieldName, value = table.concat(current, "\n"), inline = false })
                 current, currentLength = {}, 0
                 fieldName = fieldName .. " (continued)"
             end
@@ -3394,7 +3394,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
             currentLength = currentLength + #line + (#current > 1 and 1 or 0)
         end
         if #current > 0 then
-            table.insert(fields, { name = fieldName, value = LimitEmbedText(table.concat(current, "\\n"), maxLength), inline = false })
+            table.insert(fields, { name = fieldName, value = LimitEmbedText(table.concat(current, "\n"), maxLength), inline = false })
         end
     end
     AppendLineChunks("🎁 Rewards", rewardsText, 1000)
@@ -3404,7 +3404,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local embeds = {{
         title = outcome == "Victory" and "Anime Adventures — 🏆 VICTORY"
             or (outcome == "Defeat" and "Anime Adventures — 🟥 DEFEAT" or "Anime Adventures — MATCH RESULT"),
-        description = string.format("**User:** %s **Level:** %s (XP: %s)\\n\\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
+        description = string.format("**User:** %s **Level:** %s (XP: %s)\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
             player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(playerXP)),
         color = outcome == "Victory" and 5763719
             or (outcome == "Defeat" and 15548997 or 9807270),
@@ -3415,8 +3415,8 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     if secretRewardText then
         table.insert(embeds, {
             title = "🚨✨ SECRET REWARDS UNLOCKED ✨🚨",
-            description = LimitEmbedText("━━━━━━━━━━━━━━━━━━━━\\n🌈 **ULTRA RARE DROP!** 🌈\\n\\n"
-                .. secretRewardText .. "\\n\\n━━━━━━━━━━━━━━━━━━━━", 4000),
+            description = LimitEmbedText("━━━━━━━━━━━━━━━━━━━━\n🌈 **ULTRA RARE DROP!** 🌈\n\n"
+                .. secretRewardText .. "\n\n━━━━━━━━━━━━━━━━━━━━", 4000),
             color = 16753920,
             thumbnail = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
             timestamp = DateTime.now():ToIsoDate(),
