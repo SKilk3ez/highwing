@@ -499,15 +499,12 @@ BUFF_DEFS = {
     { id = "true_damage", label = "True Damage" },
     { id = "boss_damage", label = "Boss Damage" },
     { id = "flying_damage", label = "Damage vs Flying" },
-    { id = "damage_taken", label = "Enemy Damage Taken" },
     { id = "enemy_health", label = "Enemy Health" },
     { id = "enemy_speed", label = "Enemy Speed" },
     { id = "enemy_regen", label = "Enemy Regen" },
     { id = "enemy_shield", label = "Enemy Shield" },
     { id = "cost", label = "Placement/Upgrade Cost" },
-    { id = "reward_currency", label = "Summer Pearls / Reward Currency" },
     { id = "secret", label = "Secret Drop Rate" },
-    { id = "golem_chance", label = "Star Golem Chance" },
     { id = "blessing", label = "Blessings" },
 }
 
@@ -833,27 +830,9 @@ function InvokeEndpoint(endpointName, ...)
 end
 
 function IsInLobby()
-    if workspace:FindFirstChild("_MAP_CONFIG") ~= nil or workspace:FindFirstChild("_UNITS") ~= nil then
-        return false
-    end
-    local ok, isLobby = pcall(function()
-        local src = ReplicatedStorage:FindFirstChild("src")
-        local loaderModule = src and src:FindFirstChild("Loader")
-        if loaderModule then
-            local Loader = require(loaderModule)
-            if type(Loader) == "table" and type(Loader.IsLobby) == "boolean" then
-                return Loader.IsLobby
-            end
-        end
-        return nil
-    end)
-    if ok and type(isLobby) == "boolean" then
-        return isLobby
-    end
     return workspace:FindFirstChild("_LOBBIES") ~= nil
         or workspace:FindFirstChild("enel_ship") ~= nil
         or game.PlaceId == 8304191830
-        or game.PlaceId == 9987049970
 end
 
 function IsMatchmaking()
@@ -866,60 +845,6 @@ function IsMatchmaking()
         return true
     end
     return false
-end
-
-function FindLocalGameSession()
-    local okLoader, loaderSession = pcall(function()
-        local src = ReplicatedStorage:FindFirstChild("src")
-        local loaderModule = src and src:FindFirstChild("Loader")
-        if not loaderModule then return nil end
-        local Loader = require(loaderModule)
-        if type(Loader) ~= "table" or type(Loader.load_client_service) ~= "function" then
-            return nil
-        end
-        for _, serviceName in ipairs({ "GUIService", "ItemInventoryServiceClient", "UnitCollectionServiceClient", "SummonServiceClient" }) do
-            local sOk, svc = pcall(Loader.load_client_service, game, serviceName)
-            if sOk and type(svc) == "table" and type(svc.session) == "table" and svc.session.player == player then
-                return svc.session
-            end
-        end
-        return nil
-    end)
-    if okLoader and type(loaderSession) == "table" then
-        return loaderSession
-    end
-
-    local ok, guiService = pcall(function()
-        local src = ReplicatedStorage:FindFirstChild("src")
-        local client = src and src:FindFirstChild("client")
-        local services = client and client:FindFirstChild("Services")
-        local module = services and services:FindFirstChild("GUIService")
-        if module and module:IsA("ModuleScript") then return require(module) end
-        return nil
-    end)
-    if ok and type(guiService) == "table" then
-        local session = guiService.session
-        if type(session) == "table" and session.player == player then
-            return session
-        end
-    end
-
-    if type(getgc) ~= "function" then return nil end
-    local gcOk, objects = pcall(getgc, true)
-    if not gcOk or type(objects) ~= "table" then return nil end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local candidates = { object, object.session }
-            for _, candidate in ipairs(candidates) do
-                if type(candidate) == "table" and candidate.player == player
-                    and type(candidate.collection) == "table"
-                    and type(candidate.inventory) == "table" then
-                    return candidate
-                end
-            end
-        end
-    end
-    return nil
 end
 
 function NormalizeName(text)
@@ -1134,38 +1059,6 @@ function IsFarmUnit(unit)
 
     return false
 end
-function CalculateSpawnCost(baseCost, unitData)
-    baseCost = tonumber(baseCost) or (type(unitData) == "table" and tonumber(unitData.cost)) or 0
-    if baseCost <= 0 then
-        return 0
-    end
-    local mult = nil
-    local ok, coreMult = pcall(function()
-        local Loader = require(ReplicatedStorage.src.Loader)
-        local core = Loader.load_core_service(game, "UnitServiceCore")
-        if core and type(core.calculate_spawn_cost_multiplier) == "function" then
-            return core.calculate_spawn_cost_multiplier(FindLocalGameSession(), unitData)
-        end
-        return nil
-    end)
-    if ok and tonumber(coreMult) and tonumber(coreMult) > 0 then
-        mult = tonumber(coreMult)
-    else
-        mult = 1
-        local dataFolder = workspace:FindFirstChild("_DATA")
-        local modifiers = dataFolder and dataFolder:FindFirstChild("GameModifiers")
-        local playerCostScale = modifiers and modifiers:FindFirstChild("player_cost_scale")
-        if playerCostScale and tonumber(playerCostScale.Value) then
-            mult = tonumber(playerCostScale.Value)
-        end
-        local negateHighCost = tonumber(player:GetAttribute("_negate_high_cost")) or 0
-        if negateHighCost > 0 then
-            mult = math.min(mult, 1)
-        end
-    end
-    return math.ceil(baseCost * math.max(0, mult))
-end
-
 function GetEquippedUnitList()
     local unitsList = {}
 
@@ -1208,11 +1101,9 @@ function GetEquippedUnitList()
                     displayName = data.name
                 end
 
-                local baseCost = type(data) == "table" and tonumber(data.cost) or 0
                 table.insert(unitsList, {
                     uuid = uuid,
-                    baseCost = baseCost,
-                    cost = CalculateSpawnCost(baseCost, data),
+                    cost = type(data) == "table" and tonumber(data.cost) or 0,
                     name = displayName or unitId or "Unit",
                     unitId = unitId,
                     slot = slotKey,
@@ -1253,9 +1144,6 @@ function EnrichEquipped(list)
             if type(data.name) == "string" and data.name ~= "" then
                 info.name = data.name
             end
-            local baseCost = tonumber(data.cost) or tonumber(info.baseCost) or tonumber(info.cost) or 0
-            info.baseCost = baseCost
-            info.cost = CalculateSpawnCost(baseCost, data)
             info.spawnCap = tonumber(data.spawn_cap)
             info.globalSpawnCap = tonumber(data.global_spawn_cap)
             info.maxUpgrade = type(data.upgrade) == "table" and #data.upgrade or nil
@@ -1486,7 +1374,7 @@ function GetActiveCooldownMultiplier(unit, curseSum)
             local Loader = require(ReplicatedStorage.src.Loader)
             local core = Loader.load_core_service(game, "UnitServiceCore")
             if core and type(core.calculate_static_stat_multiplier) == "function" then
-                return core.calculate_static_stat_multiplier(owned, owned.xp or 0, "active_attack_cooldown", FindLocalGameSession())
+                return core.calculate_static_stat_multiplier(owned, owned.xp or 0, "active_attack_cooldown", nil)
             end
         end)
         if ok and tonumber(value) and tonumber(value) > 0 then
@@ -1495,14 +1383,7 @@ function GetActiveCooldownMultiplier(unit, curseSum)
         end
     end
     if not mult then
-        local scale = 1
-        local dataFolder = workspace:FindFirstChild("_DATA")
-        local modifiers = dataFolder and dataFolder:FindFirstChild("GameModifiers")
-        local cdScale = modifiers and modifiers:FindFirstChild("player_cooldown_scale")
-        if cdScale and tonumber(cdScale.Value) and tonumber(cdScale.Value) > 0 then
-            scale = tonumber(cdScale.Value)
-        end
-        mult = math.max(0.6, (1 + (tonumber(curseSum) or 0)) * scale)
+        mult = math.max(0.6, 1 + (tonumber(curseSum) or 0))
     end
     if not speedStat and unit then
         speedStat = tonumber(unit:GetAttribute("speed_stat"))
@@ -1549,31 +1430,12 @@ end
 function GetActiveAttackCooldownState(entry, now)
     -- Mirror game.lua AttacksReplicate.get_current_active_attack_cooldown():
     -- busy while _stats.active_queued_or_using is true, otherwise ready when
-    -- active_attack_cooldown - (tick() - last_active_cast) <= 0 and not on global cooldown.
+    -- active_attack_cooldown - (tick() - last_active_cast) <= 0.
     if entry.queued then
         return true, false, entry.cooldown, entry.cooldown
     end
     local remaining = entry.cooldown - (now - entry.lastCast)
     local isReady = remaining <= 0
-
-    local attacksReplicate = GetAttacksReplicateService()
-    if attacksReplicate and type(attacksReplicate.get_current_active_attack_cooldown) == "function" and entry.model and entry.attackId then
-        local ok, gameBusy, gameReady, gameCooldown, gameRemaining = pcall(
-            attacksReplicate.get_current_active_attack_cooldown,
-            entry.model,
-            entry.attackId
-        )
-        if ok then
-            if gameBusy == true then
-                return true, false, tonumber(gameCooldown) or entry.cooldown, tonumber(gameRemaining) or entry.cooldown
-            end
-            if gameReady == false and tonumber(gameRemaining) and tonumber(gameRemaining) > remaining then
-                isReady = false
-                remaining = tonumber(gameRemaining)
-            end
-        end
-    end
-
     if isReady and entry.lastCast <= 0 then
         local overheadReady = GetUnitOverheadReadyAttribute(entry.model)
         if overheadReady == false then
@@ -1749,11 +1611,8 @@ function GetBuffRotationGroups(now)
                     and rawLiveLastCast or nil
 
                 local globalLastCast = nil
-                if type(globalEntry) == "table" then
-                    local rawGlobalCast = tonumber(globalEntry.cast_time or globalEntry.last_cast)
-                    if rawGlobalCast and rawGlobalCast > 0 then
-                        globalLastCast = rawGlobalCast
-                    end
+                if type(globalEntry) == "table" and tonumber(globalEntry.last_cast) and tonumber(globalEntry.last_cast) > 0 then
+                    globalLastCast = tonumber(globalEntry.last_cast)
                 elseif tonumber(globalEntry) and tonumber(globalEntry) > 0 then
                     globalLastCast = tonumber(globalEntry)
                 end
@@ -2264,77 +2123,35 @@ end
 
 function PlacementIsClear(pos, kind, minDistance)
     minDistance = minDistance or 2.45
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local ignore = {}
+    if player.Character then
+        table.insert(ignore, player.Character)
+    end
     local unitsFolder = workspace:FindFirstChild("_UNITS")
     local deadFolder = workspace:FindFirstChild("_DEAD_UNITS")
-
-    local hit = nil
-    local terrain = workspace:FindFirstChild("_terrain")
-    local ground = terrain and terrain:FindFirstChild("ground")
-    local hill = terrain and terrain:FindFirstChild("hill")
-    local terrainExtra = terrain and terrain:FindFirstChild("terrain")
-    if ground or hill or terrainExtra then
-        -- Match game.lua PlacementCore.raycast: RaycastFilterType.Include on
-        -- {_terrain.ground, _terrain.hill, _terrain.terrain} so map props or
-        -- invisible decorations do not block valid ground/hill placement.
-        local includeList = {}
-        if ground then table.insert(includeList, ground) end
-        if hill then table.insert(includeList, hill) end
-        if terrainExtra then table.insert(includeList, terrainExtra) end
-        local includeParams = RaycastParams.new()
-        includeParams.FilterType = Enum.RaycastFilterType.Include
-        includeParams.FilterDescendantsInstances = includeList
-        hit = workspace:Raycast(pos + Vector3.new(0, 25, 0), Vector3.new(0, -80, 0), includeParams)
+    if unitsFolder then
+        table.insert(ignore, unitsFolder)
     end
-
-    if not hit then
-        local rayParams = RaycastParams.new()
-        rayParams.FilterType = Enum.RaycastFilterType.Exclude
-        local ignore = {}
-        if player.Character then
-            table.insert(ignore, player.Character)
-        end
-        if unitsFolder then
-            table.insert(ignore, unitsFolder)
-        end
-        if deadFolder then
-            table.insert(ignore, deadFolder)
-        end
-        rayParams.FilterDescendantsInstances = ignore
-        hit = workspace:Raycast(pos + Vector3.new(0, 25, 0), Vector3.new(0, -80, 0), rayParams)
+    if deadFolder then
+        table.insert(ignore, deadFolder)
     end
+    rayParams.FilterDescendantsInstances = ignore
 
+    local hit = workspace:Raycast(pos + Vector3.new(0, 25, 0), Vector3.new(0, -80, 0), rayParams)
     if not hit or not HitAllowsPlacement(hit.Instance, kind) then
         return nil
     end
 
-    -- Verify that _road, _bounds, or _donotplace does not cover the hit position
-    -- (mirrors game.lua PlacementServiceClient.can_place).
-    local blockerList = {}
-    local road = workspace:FindFirstChild("_road")
-    if road then table.insert(blockerList, road) end
-    local ignoreFolder = workspace:FindFirstChild("ignore")
-    local bounds = ignoreFolder and ignoreFolder:FindFirstChild("_bounds")
-    if bounds then table.insert(blockerList, bounds) end
-    if #blockerList > 0 then
-        local blockParams = RaycastParams.new()
-        blockParams.FilterType = Enum.RaycastFilterType.Include
-        blockParams.FilterDescendantsInstances = blockerList
-        local blockHit = workspace:Raycast(hit.Position + Vector3.new(0, 12, 0), Vector3.new(0, -16, 0), blockParams)
-        if blockHit and math.abs(blockHit.Position.Y - hit.Position.Y) <= 6 then
-            return nil
-        end
-    end
-
-    for _, folder in ipairs({ unitsFolder, deadFolder }) do
-        if folder then
-            for _, unit in ipairs(folder:GetChildren()) do
-                if unit:IsA("Model") then
-                    local unitPos = GetPlacedBuffUnitPosition(unit)
-                    if unitPos then
-                        local flat = Vector3.new(hit.Position.X - unitPos.X, 0, hit.Position.Z - unitPos.Z)
-                        if flat.Magnitude < minDistance then
-                            return nil
-                        end
+    if unitsFolder then
+        for _, unit in ipairs(unitsFolder:GetChildren()) do
+            if unit:IsA("Model") then
+                local unitPos = GetPlacedBuffUnitPosition(unit)
+                if unitPos then
+                    local flat = Vector3.new(hit.Position.X - unitPos.X, 0, hit.Position.Z - unitPos.Z)
+                    if flat.Magnitude < minDistance then
+                        return nil
                     end
                 end
             end
@@ -3114,45 +2931,30 @@ end
 -- normal_items, unique inventory items (Portals/Charms/materials/etc.), and units.
 function ReadInventoryRewardSnapshot()
     local snapshot = {}
+    if type(getgc) ~= "function" then return snapshot, false end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return snapshot, false end
+
     local itemData = LoadGameDataModule("Items") or {}
     local unitData = LoadGameDataModule("Units") or {}
     local inventoryProfile, collectionProfile = nil, nil
 
-    local localSession = FindLocalGameSession()
-    if type(localSession) == "table" then
-        local inv = localSession.inventory
-        local prof = type(inv) == "table" and inv.inventory_profile_data
-        if type(prof) == "table" and type(prof.unique_items) == "table" then
-            inventoryProfile = prof
-        end
-        local col = localSession.collection
-        local colProf = type(col) == "table" and col.collection_profile_data
-        if type(colProf) == "table" and type(colProf.owned_units) == "table" then
-            collectionProfile = colProf
-        end
-    end
-
-    if (not inventoryProfile or not collectionProfile) and type(getgc) == "function" then
-        local ok, objects = pcall(getgc, true)
-        if ok and type(objects) == "table" then
-            for _, object in ipairs(objects) do
-                if type(object) == "table" then
-                    local session = object.session
-                    local inventory = object.inventory or (type(session) == "table" and session.inventory)
-                    local profile = type(inventory) == "table" and inventory.inventory_profile_data or object.inventory_profile_data
-                    if not inventoryProfile and type(profile) == "table" and type(profile.unique_items) == "table" then
-                        inventoryProfile = profile
-                    end
-                    local directCollection = object.collection_profile_data
-                    if not collectionProfile and type(directCollection) == "table" and type(directCollection.owned_units) == "table" then
-                        collectionProfile = directCollection
-                    end
-                    local collection = object.collection or (type(session) == "table" and session.collection)
-                    if not collectionProfile and type(collection) == "table" and type(collection.collection_profile_data) == "table"
-                        and type(collection.collection_profile_data.owned_units) == "table" then
-                        collectionProfile = collection.collection_profile_data
-                    end
-                end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local session = object.session
+            local inventory = object.inventory or (type(session) == "table" and session.inventory)
+            local profile = type(inventory) == "table" and inventory.inventory_profile_data or object.inventory_profile_data
+            if type(profile) == "table" and type(profile.unique_items) == "table" then
+                inventoryProfile = profile
+            end
+            local directCollection = object.collection_profile_data
+            if type(directCollection) == "table" and type(directCollection.owned_units) == "table" then
+                collectionProfile = directCollection
+            end
+            local collection = object.collection or (type(session) == "table" and session.collection)
+            if type(collection) == "table" and type(collection.collection_profile_data) == "table"
+                and type(collection.collection_profile_data.owned_units) == "table" then
+                collectionProfile = collection.collection_profile_data
             end
         end
     end
@@ -3178,13 +2980,11 @@ function ReadInventoryRewardSnapshot()
         for _, owned in pairs(inventoryProfile.unique_items or {}) do
             if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
                 local def = itemData[owned.item_id] or {}
-                local portalData = owned._unique_item_data and owned._unique_item_data._unique_portal_data
-                local portalTier = tonumber(portalData and portalData.portal_depth)
                 snapshot["item:" .. owned.uuid] = {
                     category = tostring(def.item_group or "Item"),
                     name = tostring(def.name or owned.item_id),
                     rarity = tostring(def.rarity or "Unknown"),
-                    tier = portalTier or tonumber(def.tier),
+                    tier = tonumber(def.tier),
                     amount = 1,
                     secret = tostring(def.rarity or ""):lower() == "secret",
                 }
@@ -3207,75 +3007,6 @@ function ReadInventoryRewardSnapshot()
         end
     end
     return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
-end
-
--- Extract item/unit drops directly from ResultsUI.settings (new_items and new_units)
--- exactly as game.lua ResultsUI.show_unit_and_item_rewards() does. Used when the
--- inventory snapshot baseline was unavailable or items replicated before the diff.
-function BuildSettingsItemRewardLines(settings)
-    if type(settings) ~= "table" then return nil, nil end
-    local itemData = LoadGameDataModule("Items") or {}
-    local unitData = LoadGameDataModule("Units") or {}
-    local aggregated = {}
-
-    local function addReward(key, reward)
-        local existing = aggregated[key]
-        if existing then
-            existing.amount = existing.amount + (tonumber(reward.amount) or 1)
-        else
-            aggregated[key] = reward
-        end
-    end
-
-    if type(settings.new_items) == "table" then
-        for itemId, amount in pairs(settings.new_items.normal_items or {}) do
-            local count = tonumber(amount) or 0
-            if count > 0 then
-                local def = itemData[itemId] or {}
-                addReward("normal:" .. tostring(itemId), {
-                    category = tostring(def.item_group or "Item"),
-                    name = tostring(def.name or itemId),
-                    rarity = tostring(def.rarity or "Unknown"),
-                    tier = tonumber(def.tier),
-                    amount = count,
-                    secret = tostring(def.rarity or ""):lower() == "secret",
-                })
-            end
-        end
-        for idx, owned in pairs(settings.new_items.unique_items or {}) do
-            if type(owned) == "table" and type(owned.item_id) == "string" then
-                local def = itemData[owned.item_id] or {}
-                local portalData = owned._unique_item_data and owned._unique_item_data._unique_portal_data
-                local tier = tonumber(portalData and portalData.portal_depth) or tonumber(def.tier)
-                local key = "unique:" .. tostring(owned.item_id) .. ":" .. tostring(tier or 0)
-                addReward(key, {
-                    category = tostring(def.item_group or "Item"),
-                    name = tostring(def.name or owned.item_id),
-                    rarity = tostring(def.rarity or "Unknown"),
-                    tier = tier,
-                    amount = 1,
-                    secret = tostring(def.rarity or ""):lower() == "secret",
-                })
-            end
-        end
-    end
-
-    if type(settings.new_units) == "table" then
-        for _, owned in pairs(settings.new_units) do
-            if type(owned) == "table" and type(owned.unit_id) == "string" then
-                local def = unitData[owned.unit_id] or {}
-                addReward("unit:" .. tostring(owned.unit_id), {
-                    category = "Unit",
-                    name = tostring(def.name or owned.unit_id),
-                    rarity = tostring(def.rarity or "Unknown"),
-                    amount = 1,
-                    secret = tostring(def.rarity or ""):lower() == "secret",
-                })
-            end
-        end
-    end
-
-    return BuildInventoryRewardLines(nil, aggregated)
 end
 
 function BuildInventoryRewardLines(before, after)
@@ -3329,9 +3060,7 @@ function BuildMatchRewardLines(resultDetails)
             { key = "xp_reward", label = "XP" },
             { key = "gold_reward", label = "Gold" },
             { key = "gem_reward", label = "Gems" },
-            { key = "first_completion_gems", label = "First Clear Gems" },
             { key = "trophy_reward", label = "Trophies" },
-            { key = "first_completion_trophies", label = "First Clear Trophies" },
         }
         for _, entry in ipairs(rewardFields) do
             local amount = tonumber(settings[entry.key])
@@ -3339,19 +3068,10 @@ function BuildMatchRewardLines(resultDetails)
                 table.insert(lines, string.format("• **%s:** +%s", entry.label, FormatNumber(amount)))
             end
         end
-        local resourceTables = {}
         if type(settings.resource_reward) == "table" then
-            table.insert(resourceTables, settings.resource_reward)
-        end
-        if type(settings.new_resources) == "table" and settings.new_resources ~= settings.resource_reward then
-            table.insert(resourceTables, settings.new_resources)
-        end
-        local seenResources = {}
-        local resourceEntries = {}
-        for _, resTable in ipairs(resourceTables) do
-            for resourceName, amount in pairs(resTable) do
-                if not seenResources[resourceName] and tonumber(amount) and tonumber(amount) > 0 then
-                    seenResources[resourceName] = true
+            local resourceEntries = {}
+            for resourceName, amount in pairs(settings.resource_reward) do
+                if tonumber(amount) and tonumber(amount) > 0 then
                     local rawName = tostring(resourceName)
                     local label = rawName:gsub("_", " "):gsub("(%l)(%u)", "%1 %2"):gsub("(%a)([%w']*)", function(first, rest)
                         return first:upper() .. rest
@@ -3359,10 +3079,10 @@ function BuildMatchRewardLines(resultDetails)
                     table.insert(resourceEntries, { key = resourceName, label = label, amount = tonumber(amount) })
                 end
             end
-        end
-        table.sort(resourceEntries, function(a, b) return a.label < b.label end)
-        for _, entry in ipairs(resourceEntries) do
-            table.insert(lines, string.format("• **%s:** +%s", entry.label, FormatNumber(entry.amount)))
+            table.sort(resourceEntries, function(a, b) return a.label < b.label end)
+            for _, entry in ipairs(resourceEntries) do
+                table.insert(lines, string.format("• **%s:** +%s", entry.label, FormatNumber(entry.amount)))
+            end
         end
     end
 
@@ -3518,13 +3238,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
         else
-            warn("[Octoput Hub Webhook] Inventory check unavailable after retrying; falling back to ResultsUI.settings.")
+            warn("[Octoput Hub Webhook] Inventory check unavailable after retrying; item rewards omitted.")
         end
-    end
-    if not inventoryRewardText and not secretRewardText and resultDetails and type(resultDetails.settings) == "table" then
-        local settingsItems, settingsSecrets = BuildSettingsItemRewardLines(resultDetails.settings)
-        inventoryRewardText = inventoryRewardText or settingsItems
-        secretRewardText = secretRewardText or settingsSecrets
+    else
+        warn("[Octoput Hub Webhook] Inventory baseline unavailable; item rewards omitted.")
     end
 
     local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
@@ -3609,13 +3326,6 @@ function IsGoodEffectColor(color)
     return color and color.G > 0.55 and color.R < 0.45 and color.B < 0.55
 end
 
--- game.lua CardSelectRoguelike.refresh_effects colors Resource buffs
--- ("candy_multiplier" / Summer Pearls and "secret_drop" / Secret Drop Rate)
--- with Color3.fromRGB(255, 204, 0).
-function IsResourceEffectColor(color)
-    return color and color.R > 0.85 and color.G > 0.65 and color.B < 0.25
-end
-
 function IsBadEffectColor(color)
     return color and color.R > 0.55 and color.G < 0.45 and color.B < 0.55
 end
@@ -3637,17 +3347,15 @@ function LineIsBuff(id, lower, good)
     elseif id == "magic_crit" then
         return lower:find("magic crit", 1, true) ~= nil
     elseif id == "phys_damage" then
-        return lower:find("phys damage", 1, true) ~= nil and lower:find("taken", 1, true) == nil
+        return lower:find("phys damage", 1, true) ~= nil
     elseif id == "magic_damage" then
-        return lower:find("magic damage", 1, true) ~= nil and lower:find("taken", 1, true) == nil
+        return lower:find("magic damage", 1, true) ~= nil
     elseif id == "true_damage" then
         return lower:find("true damage", 1, true) ~= nil
     elseif id == "boss_damage" then
         return lower:find("boss damage", 1, true) ~= nil
     elseif id == "flying_damage" then
         return lower:find("damage vs flying", 1, true) ~= nil or (lower:find("flying", 1, true) and lower:find("damage", 1, true) and lower:find("chance", 1, true) == nil and lower:find("soaring", 1, true) == nil)
-    elseif id == "damage_taken" then
-        return lower:find("damage taken", 1, true) ~= nil
     elseif id == "enemy_health" then
         return lower:find("enemy", 1, true) ~= nil and lower:find("health", 1, true) ~= nil
     elseif id == "enemy_speed" then
@@ -3658,12 +3366,8 @@ function LineIsBuff(id, lower, good)
         return lower:find("shield", 1, true) ~= nil
     elseif id == "cost" then
         return lower:find("placement/upgrade cost", 1, true) ~= nil or lower:find("placement", 1, true) ~= nil and lower:find("cost", 1, true) ~= nil
-    elseif id == "reward_currency" then
-        return lower:find("summer pearls", 1, true) ~= nil or lower:find("reward currency", 1, true) ~= nil
     elseif id == "secret" then
         return lower:find("secret drop", 1, true) ~= nil
-    elseif id == "golem_chance" then
-        return lower:find("star golem", 1, true) ~= nil
     elseif id == "blessing" then
         return lower:find("blessing", 1, true) ~= nil
     end
@@ -3724,7 +3428,7 @@ function ScoreRoguelikeCard(card)
             local text = tostring(label.Text or "")
             local lower = text:lower()
             if text ~= "" and not text:match("^%d+$") then
-                local good = IsGoodEffectColor(label.TextColor3) or IsResourceEffectColor(label.TextColor3)
+                local good = IsGoodEffectColor(label.TextColor3)
                 local bad = IsBadEffectColor(label.TextColor3)
                 for index, id in ipairs(buffs) do
                     if LineIsBuff(id, lower, good) then
@@ -4851,6 +4555,42 @@ PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 
 PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
 PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
+-- The game Session owns both services; this mirrors the structure in game.lua:
+-- session.collection.collection_profile_data and session.inventory.inventory_profile_data.
+function FindLocalGameSession()
+    local ok, guiService = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local client = src and src:FindFirstChild("client")
+        local services = client and client:FindFirstChild("Services")
+        local module = services and services:FindFirstChild("GUIService")
+        if module and module:IsA("ModuleScript") then return require(module) end
+        return nil
+    end)
+    if ok and type(guiService) == "table" then
+        local session = guiService.session
+        if type(session) == "table" and session.player == player then
+            return session
+        end
+    end
+
+    if type(getgc) ~= "function" then return nil end
+    local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player
+                    and type(candidate.collection) == "table"
+                    and type(candidate.inventory) == "table" then
+                    return candidate
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function FindLocalInventoryProfile()
     local session = FindLocalGameSession()
     if session and type(session.inventory) == "table" then
@@ -5067,6 +4807,24 @@ function HandlePopups()
 
     for _, popup in ipairs(popups:GetChildren()) do
         if popup:IsA("GuiObject") and popup.Visible then
+            local captcha = popup:FindFirstChild("Captcha")
+            local typeBox = popup:FindFirstChild("TypeBox")
+            local btnHolder = popup:FindFirstChild("ButtonHolder")
+            if captcha and typeBox and captcha.Text and captcha.Text ~= "" and typeBox.Text ~= captcha.Text then
+                typeBox.Text = captcha.Text
+                task.wait(0.15)
+                if btnHolder and btnHolder:FindFirstChild("Yes") then
+                    local yesBtn = btnHolder.Yes
+                    if typeof(firesignal) == "function" then
+                        firesignal(yesBtn.MouseButton1Click)
+                    elseif typeof(getconnections) == "function" then
+                        for _, c in ipairs(getconnections(yesBtn.MouseButton1Click)) do
+                            c:Fire()
+                        end
+                    end
+                end
+            end
+
             local main = popup:FindFirstChild("Main")
             local buttons = main and main:FindFirstChild("Buttons")
             local mmBtn = buttons and buttons:FindFirstChild("Matchmaking")
@@ -5418,13 +5176,6 @@ function GetAutoNextPortalCandidate()
     end
 
     local currentUUID = levelData._portal_item_uuid or levelData._portal_uuid
-    local levelServiceCore = nil
-    pcall(function()
-        if loaderOk and type(loaderModule) == "table" and type(loaderModule.load_core_service) == "function" then
-            levelServiceCore = loaderModule.load_core_service(game, "LevelServiceCore")
-        end
-    end)
-
     local candidates = {}
     for _, owned in pairs(uniqueItems) do
         if type(owned) ~= "table" or type(owned.uuid) ~= "string"
@@ -5437,47 +5188,33 @@ function GetAutoNextPortalCandidate()
             continue
         end
 
-        local isValidByCore = nil
-        if levelServiceCore and type(levelServiceCore.is_valid_replay_portal_item) == "function" then
-            local validOk, validRes = pcall(levelServiceCore.is_valid_replay_portal_item, owned, levelData)
-            if validOk and type(validRes) == "boolean" then
-                isValidByCore = validRes
+        local itemGroup
+        if type(def.static_portal_copy_to_level_params) == "table" then
+            itemGroup = def.static_portal_copy_to_level_params.portal_group
+        else
+            local usage = def.usage
+            local levelId = type(usage) == "table" and usage.level_id or nil
+            local uniqueData = owned._unique_item_data
+            if def._unique_portal and type(uniqueData) == "table"
+                and type(uniqueData._unique_portal_data) == "table" then
+                levelId = uniqueData._unique_portal_data.level_id or levelId
             end
+            local portalLevel = levelId and levels[levelId]
+            itemGroup = portalLevel and portalLevel.portal_group
         end
-        if isValidByCore == false then
+        if itemGroup ~= portalGroup then
             continue
         end
 
-        if isValidByCore ~= true then
-            local itemGroup
-            if type(def.static_portal_copy_to_level_params) == "table" then
-                itemGroup = def.static_portal_copy_to_level_params.portal_group
-            else
-                local usage = def.usage
-                local levelId = type(usage) == "table" and usage.level_id or nil
-                local uniqueData = owned._unique_item_data
-                if def._unique_portal and type(uniqueData) == "table"
-                    and type(uniqueData._unique_portal_data) == "table" then
-                    levelId = uniqueData._unique_portal_data.level_id or levelId
-                end
-                local portalLevel = levelId and levels[levelId]
-                itemGroup = portalLevel and portalLevel.portal_group
-            end
-            if itemGroup ~= portalGroup then
-                continue
-            end
-
-            local uniqueData = owned._unique_item_data
-            local tries = type(uniqueData) == "table" and tonumber(uniqueData._portal_tries) or nil
-            local maxTries = type(uniqueData) == "table" and tonumber(uniqueData._portal_max_tries) or tonumber(def._portal_max_tries)
-            local hasRemainingTries = def._portal_infinite_lives == true
-                or (tries ~= nil and maxTries ~= nil and tries < maxTries)
-            if not hasRemainingTries then
-                continue
-            end
+        local uniqueData = owned._unique_item_data
+        local tries = type(uniqueData) == "table" and tonumber(uniqueData._portal_tries) or nil
+        local maxTries = type(uniqueData) == "table" and tonumber(uniqueData._portal_max_tries) or tonumber(def._portal_max_tries)
+        local hasRemainingTries = def._portal_infinite_lives == true
+            or (tries ~= nil and maxTries ~= nil and tries < maxTries)
+        if not hasRemainingTries then
+            continue
         end
 
-        local uniqueData = owned._unique_item_data
         local portalData = type(uniqueData) == "table" and uniqueData._unique_portal_data or nil
         local tier = tonumber(portalData and portalData.portal_depth) or 0
         if State.SelectedPortalTypes[owned.item_id] and State.SelectedPortalTiers[tostring(tier)] then
@@ -5667,20 +5404,6 @@ local function SnipeGetGameData()
 end
 
 local function SnipeGetBannerUnitData(bannerId)
-    -- Match game.lua SummonServiceClient.BANNER_UNITS, which is populated on init
-    -- and updated live by on_hatch_banner_changed without needing extra remote calls.
-    local okService, cachedUnits = pcall(function()
-        local loader = require(ReplicatedStorage:WaitForChild("src"):WaitForChild("Loader"))
-        local summonService = loader.load_client_service(game, "SummonServiceClient")
-        if type(summonService) == "table" and type(summonService.BANNER_UNITS) == "table" then
-            return summonService.BANNER_UNITS
-        end
-        return nil
-    end)
-    if okService and type(cachedUnits) == "table" and cachedUnits[bannerId] ~= nil then
-        return cachedUnits[bannerId], cachedUnits
-    end
-
     local ok, bannerUnits = pcall(function()
         local remote = ReplicatedStorage:WaitForChild("endpoints"):WaitForChild("client_to_server"):WaitForChild("get_hatch_setup_data")
         return remote:InvokeServer()
@@ -6181,21 +5904,6 @@ function GetNextUpgradeCost(unit)
     if not baseCost then
         local okGui, guiCost = pcall(function()
             local pgui = player:FindFirstChild("PlayerGui")
-            -- Match game.lua UnitUpgrade2 (UnitUpgrade2.Main.Main.Buttons.Upgrade.Main.Text)
-            local upgrade2 = pgui and pgui:FindFirstChild("UnitUpgrade2")
-            if upgrade2 and upgrade2.Enabled then
-                local textObj = upgrade2:FindFirstChild("Main")
-                    and upgrade2.Main:FindFirstChild("Main")
-                    and upgrade2.Main.Main:FindFirstChild("Buttons")
-                    and upgrade2.Main.Main.Buttons:FindFirstChild("Upgrade")
-                    and upgrade2.Main.Main.Buttons.Upgrade:FindFirstChild("Main")
-                    and upgrade2.Main.Main.Buttons.Upgrade.Main:FindFirstChild("Text")
-                local rawText = textObj and tostring(textObj.Text or "") or ""
-                local digits = rawText:gsub("[^%d]", "")
-                if digits ~= "" then
-                    return tonumber(digits)
-                end
-            end
             local overview = pgui and pgui:FindFirstChild("UnitOverview")
             local ref = overview and overview:FindFirstChild("_unit_char_ref")
             if ref and ref.Value == unit then
@@ -6220,35 +5928,22 @@ function GetNextUpgradeCost(unit)
         return 0
     end
 
-    local multiplier = nil
-    local okMult, coreMult = pcall(function()
-        local Loader = require(ReplicatedStorage.src.Loader)
-        local core = Loader.load_core_service(game, "UnitServiceCore")
-        if core and type(core.calculate_upgrade_cost_multiplier) == "function" then
-            return core.calculate_upgrade_cost_multiplier(unit, FindLocalGameSession())
-        end
-        return nil
-    end)
-    if okMult and tonumber(coreMult) and tonumber(coreMult) > 0 then
-        multiplier = tonumber(coreMult)
-    else
-        multiplier = 1
-        local dataFolder = workspace:FindFirstChild("_DATA")
-        local modifiers = dataFolder and dataFolder:FindFirstChild("GameModifiers")
-        local playerCostScale = modifiers and modifiers:FindFirstChild("player_cost_scale")
-        if playerCostScale and tonumber(playerCostScale.Value) then
-            multiplier = tonumber(playerCostScale.Value)
-        end
+    local multiplier = 1
+    local dataFolder = workspace:FindFirstChild("_DATA")
+    local modifiers = dataFolder and dataFolder:FindFirstChild("GameModifiers")
+    local playerCostScale = modifiers and modifiers:FindFirstChild("player_cost_scale")
+    if playerCostScale and tonumber(playerCostScale.Value) then
+        multiplier = tonumber(playerCostScale.Value)
+    end
 
-        local unitMultiplier = stats:FindFirstChild("upgrade_cost_multiplier")
-        if unitMultiplier and tonumber(unitMultiplier.Value) then
-            multiplier = multiplier * tonumber(unitMultiplier.Value)
-        end
+    local unitMultiplier = stats:FindFirstChild("upgrade_cost_multiplier")
+    if unitMultiplier and tonumber(unitMultiplier.Value) then
+        multiplier = multiplier * tonumber(unitMultiplier.Value)
+    end
 
-        local negateHighCost = tonumber(player:GetAttribute("_negate_high_cost")) or 0
-        if negateHighCost > 0 then
-            multiplier = math.min(multiplier, 1)
-        end
+    local negateHighCost = tonumber(player:GetAttribute("_negate_high_cost")) or 0
+    if negateHighCost > 0 then
+        multiplier = math.min(multiplier, 1)
     end
 
     return math.ceil(baseCost * math.max(0, multiplier))
@@ -6887,38 +6582,7 @@ task.spawn(function()
 
         if State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
             lastQuestClaim = os.clock()
-            local shouldClaim = true
-            pcall(function()
-                local Loader = require(ReplicatedStorage.src.Loader)
-                local guiService = Loader.load_client_service(game, "GUIService")
-                local huntUi = type(guiService) == "table" and guiService.summer2_hunt_maps_ui
-                if type(huntUi) == "table" and type(huntUi.ready_count) == "number" then
-                    shouldClaim = huntUi.ready_count > 0
-                    return
-                end
-                local session = FindLocalGameSession()
-                local profileData = session and session.profile_data
-                local boardCore = Loader.load_core_service(game, "Summer2MapBoardCore")
-                if type(profileData) == "table" and type(boardCore) == "table"
-                    and type(boardCore.get_completed_lines) == "function"
-                    and type(profileData._summer2_map_board) == "table" then
-                    local completed = boardCore.get_completed_lines(
-                        profileData._summer2_map_board,
-                        profileData._summer2_map_board_wins or {}
-                    )
-                    local claimed = profileData._summer2_map_board_claimed_lines or {}
-                    local unclaimedCount = 0
-                    for _, lineId in pairs(completed or {}) do
-                        if not claimed[lineId] then
-                            unclaimedCount = unclaimedCount + 1
-                        end
-                    end
-                    shouldClaim = unclaimedCount > 0
-                end
-            end)
-            if shouldClaim then
-                InvokeEndpoint("claim_summer2_map_board_lines")
-            end
+            InvokeEndpoint("claim_summer2_map_board_lines")
         end
         end)
         if not mmOk then
