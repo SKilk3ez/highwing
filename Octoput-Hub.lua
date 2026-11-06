@@ -2498,27 +2498,45 @@ end
 
 function DescribeWebhookResult(ok, result)
     if not ok then
-        return false, tostring(result)
+        return false, tostring(result), nil
     end
     if type(result) == "table" then
         local code = tonumber(result.StatusCode or result.status_code or result.Status or result.status)
         local requestSucceeded = result.Success
         if requestSucceeded == nil then requestSucceeded = result.success end
         local body = tostring(result.Body or result.body or "")
+        local headers = result.Headers or result.headers or {}
+        local retryAfter
+        for key, value in pairs(headers) do
+            local lowerKey = string.lower(tostring(key))
+            if lowerKey == "retry-after" or lowerKey == "x-ratelimit-reset-after" then
+                retryAfter = tonumber(value)
+                if retryAfter then break end
+            end
+        end
+        if not retryAfter and type(result.Body or result.body) == "string" then
+            local okJson, decoded = pcall(function()
+                return HttpService:JSONDecode(result.Body or result.body)
+            end)
+            if okJson and type(decoded) == "table" then
+                retryAfter = tonumber(decoded.retry_after)
+            end
+        end
+        if retryAfter then retryAfter = math.clamp(retryAfter, 1, 120) end
         if #body > 180 then body = body:sub(1, 180) end
 
         if requestSucceeded == false then
-            return false, (code and ("HTTP " .. tostring(code) .. ": ") or "Request failed: ") .. body
+            return false, (code and ("HTTP " .. tostring(code) .. ": ") or "Request failed: ") .. body, retryAfter
         end
         if code and (code < 200 or code >= 300) then
             if body ~= "" then
-                return false, "HTTP " .. tostring(code) .. ": " .. body
+                return false, "HTTP " .. tostring(code) .. ": " .. body, retryAfter
             end
-            return false, "HTTP " .. tostring(code)
+            return false, "HTTP " .. tostring(code), retryAfter
         end
     end
     -- Discord webhooks commonly answer with HTTP 204 and an empty body.
-    return true, "Webhook request accepted."
+    return true, "Webhook request accepted.", nil
 end
 
 
@@ -3188,19 +3206,24 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     })
 
     local lastError = "Unknown HTTP error"
-    for attempt = 1, 3 do
+    local retryDelay
+    for attempt = 1, 4 do
         local ok, response = pcall(HttpPost, url, body)
-        local success, message = DescribeWebhookResult(ok, response)
+        local success, message, responseRetryAfter = DescribeWebhookResult(ok, response)
         if success then
             print("[Octoput Hub Webhook] End-of-match notification sent.")
             return true
         end
         lastError = message
-        warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. " failed: " .. tostring(message))
-        if attempt < 3 then task.wait(attempt * 2) end
+        retryDelay = responseRetryAfter or math.min(attempt * 2, 10)
+        warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. "/4 failed: " .. tostring(message))
+        if attempt < 4 then
+            print("[Octoput Hub Webhook] Retrying in " .. tostring(retryDelay) .. "s.")
+            task.wait(retryDelay)
+        end
     end
-    warn("[Octoput Hub Webhook] Giving up after 3 attempts: " .. tostring(lastError))
-    return false
+    warn("[Octoput Hub Webhook] Giving up after 4 attempts: " .. tostring(lastError))
+    return false, lastError, retryDelay
 end
 
 function IsGoodEffectColor(color)
@@ -6499,6 +6522,7 @@ webhookResultsVisibleLast = initialResultsForWebhook ~= nil and initialResultsFo
 webhookLastSentSettings = nil
 webhookBoundGameFinished = nil
 webhookBoundResultsGui = nil
+webhookMatchToken = 0
 
 function StartWebhookEndSend(reason)
     if not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
@@ -6506,6 +6530,7 @@ function StartWebhookEndSend(reason)
     end
 
     webhookSending = true
+    local sendToken = webhookMatchToken
     local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
     local secretBaseline = webhookSecretRewardBefore
     local secretAvailable = webhookSecretRewardBaselineAvailable
@@ -6513,7 +6538,13 @@ function StartWebhookEndSend(reason)
 
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
     task.spawn(function()
-        local callOk, sendResult = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        -- A previous match's HTTP request may finish after a new match has begun.
+        -- Never let that old task mutate the new match's send/retry state.
+        if webhookMatchToken ~= sendToken then
+            print("[Octoput Hub Webhook] Ignoring completion from an older match.")
+            return
+        end
         webhookSending = false
         if callOk and sendResult == true then
             webhookSent = true
@@ -6521,9 +6552,9 @@ function StartWebhookEndSend(reason)
             webhookLastSentSettings = finalDetails and finalDetails.settings or nil
             print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
         else
-            local failure = callOk and "SendEndWebhook returned false" or tostring(sendResult)
+            local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
             warn("[Octoput Hub Webhook] Send failed: " .. failure)
-            webhookRetryAt = os.clock() + 8
+            webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 8, 3, 120)
         end
     end)
     return true
@@ -6546,6 +6577,7 @@ task.spawn(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
                 webhookDataFolder = dataFolder
+                webhookMatchToken = webhookMatchToken + 1
                 webhookGameWasActive = false
                 webhookEndDetected = false
                 webhookSent = false
@@ -6571,7 +6603,9 @@ task.spawn(function()
                 webhookBoundGameFinished = gameFinished
                 if gameFinished then
                     gameFinished.Changed:Connect(function()
-                        if gameFinished.Value == true then
+                        if webhookBoundGameFinished == gameFinished
+                            and workspace:FindFirstChild("_DATA") == webhookDataFolder
+                            and gameFinished.Value == true then
                             task.spawn(function()
                                 task.wait(0.15)
                                 MarkWebhookEnd("GameFinished.Changed")
@@ -6584,7 +6618,9 @@ task.spawn(function()
                 webhookBoundResultsGui = resultsGui
                 if resultsGui then
                     resultsGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-                        if resultsGui.Enabled == true then
+                        if webhookBoundResultsGui == resultsGui
+                            and playerGui:FindFirstChild("ResultsUI") == resultsGui
+                            and resultsGui.Enabled == true then
                             task.spawn(function()
                                 task.wait(0.1)
                                 local details = GetResultDetails()
@@ -6626,6 +6662,7 @@ task.spawn(function()
             local startedByWorld = unitsFolder ~= nil and not IsInLobby() and not finished
             local isActive = (startedByFlag or startedByWorld) and not finished
             if isActive and not webhookGameWasActive then
+                webhookMatchToken = webhookMatchToken + 1
                 local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
                 webhookCurrencyBefore = currencySnapshot
                 webhookSecretRewardBefore = secretSnapshot
@@ -6633,7 +6670,6 @@ task.spawn(function()
                 webhookGameWasActive = true
                 webhookEndDetected = false
                 webhookSent = false
-                webhookSending = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
                 webhookResultTitleAtStart = resultTitle
