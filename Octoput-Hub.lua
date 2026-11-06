@@ -3336,21 +3336,26 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
             table.insert(fallbackLines, string.format("• **%s:** +%s", entry.label, FormatNumber(delta)))
         end
     end
+    local function NormalizeRewardKey(value)
+        return tostring(value or ""):lower():gsub("[^%w]", "")
+    end
+    local reportedResourceKeys = {}
+    if type(settings) == "table" and type(settings.resource_reward) == "table" then
+        for resourceName in pairs(settings.resource_reward) do
+            reportedResourceKeys[NormalizeRewardKey(resourceName)] = true
+        end
+    end
+    local seenCurrencyAliases = {}
     for key, value in pairs(currentCurrencies) do
         if not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
-            local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
-            local alreadyReported = false
-            if type(settings) == "table" and type(settings.resource_reward) == "table" then
-                for resourceName in pairs(settings.resource_reward) do
-                    if tostring(resourceName):lower() == tostring(key):lower() then
-                        alreadyReported = true
-                        break
-                    end
+            local normalizedKey = NormalizeRewardKey(key)
+            if not seenCurrencyAliases[normalizedKey] then
+                seenCurrencyAliases[normalizedKey] = true
+                local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
+                if delta > 0 and not reportedResourceKeys[normalizedKey] then
+                    local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
+                    table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
                 end
-            end
-            if delta > 0 and not alreadyReported then
-                local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
-                table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
             end
         end
     end
