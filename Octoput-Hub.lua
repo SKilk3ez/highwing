@@ -3956,7 +3956,7 @@ CreateToggle(MainPage, "Auto Leave", "AutoLeave", 4)
 
 -- Manual Return to Lobby button, using the game's own flow (party confirmation
 -- and private-server destination prompt are handled by TeleportServiceClient).
-local returningToLobby = false
+returningToLobby = false
 CreateButton(MainPage, "Return to Lobby", 5, function()
     if returningToLobby then
         return
