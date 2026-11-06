@@ -6725,7 +6725,10 @@ task.spawn(function()
             local finishedRising = finished and not webhookFinishedLastValue
             webhookFinishedLastValue = finished
 
-            local resultDetails = resultsVisible and GetResultDetails() or nil
+            -- Read the result controller even while its ScreenGui is disabled.
+            -- In BlackScreen / low-render mode, waiting for the UI to become visible
+            -- can delay the result edge until the client receives fresh input.
+            local resultDetails = GetResultDetails()
             local resultTitle = string.upper(tostring(resultDetails and resultDetails.result or ""))
             local currentSettings = resultDetails and resultDetails.settings or nil
             local resultsRising = resultsVisible and not webhookResultsVisibleLast
@@ -6738,8 +6741,10 @@ task.spawn(function()
                 and currentSettings ~= webhookLastSentSettings
             local hasResultTitle = resultTitle:find("VICTORY", 1, true) ~= nil
                 or resultTitle:find("DEFEAT", 1, true) ~= nil
-            local resultScreenConfirmed = resultsVisible and hasResultTitle
-                and (freshResultSettings or resultsRising)
+            -- A fresh settings payload with a definitive result is enough to
+            -- confirm completion; do not require ResultsUI.Enabled to flip first.
+            local resultScreenConfirmed = hasResultTitle
+                and (freshResultSettings or (resultsVisible and resultsRising))
 
             -- GameStarted is the normal baseline point. If the monitor misses
             -- that edge, a fresh ResultsUI transition / GameFinished edge still
