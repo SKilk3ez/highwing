@@ -3973,7 +3973,7 @@ PortalPage = CreateTab("Portal", 3)
 EventPage = CreateTab("Event", 4)
 WebhookPage = CreateTab("Webhook", 5)
 MiscPage = CreateTab("Misc", 6)
-SummonPage = CreateTab("Snipe Summon", 7)
+SummonPage = CreateTab("Summon", 7)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -5108,7 +5108,7 @@ pcall(function()
     end)
 end)
 
--- [[ SNIPE SUMMON ]] --
+-- [[ SUMMON ]] --
 -- Watches the selected live banner and stops as soon as a newly obtained target unit is detected.
 SnipeRuntime = { Running = false, StopReason = "Idle", LastAction = "" }
 SnipeBannerOptions = {}
@@ -5395,13 +5395,13 @@ local function SnipeStop(reason)
     SnipeRuntime.Running = false
     SnipeRuntime.StopReason = reason or "Stopped"
     SnipeSetStatus(SnipeRuntime.StopReason, Color3.fromRGB(235, 180, 100))
-    if SnipeStartButton then SnipeStartButton.Text = "Start Snipe Summon" end
+    if SnipeStartButton then SnipeStartButton.Text = "Start Summon" end
 end
 
 local function SnipeStart()
     if SnipeRuntime.Running then SnipeStop("Stopped by user") return end
     if State.SnipeBanner == "" then SnipeSetStatus("Select a banner first", Color3.fromRGB(235, 100, 100)) return end
-    if not workspace:FindFirstChild("_shop") then SnipeSetStatus("Snipe Summon is available in the lobby only", Color3.fromRGB(235, 100, 100)) return end
+    if not workspace:FindFirstChild("_shop") then SnipeSetStatus("Summon is available in the lobby only", Color3.fromRGB(235, 100, 100)) return end
 
     local selectedBanner = State.SnipeBanner
     local targetCount = 0
@@ -5465,7 +5465,7 @@ local function SnipeStart()
 
     SnipeRuntime.Running = true
     SnipeRuntime.StopReason = "Running"
-    if SnipeStartButton then SnipeStartButton.Text = "Stop Snipe Summon" end
+    if SnipeStartButton then SnipeStartButton.Text = "Stop Summon" end
     SnipeSetStatus("Watching " .. selectedBanner .. " | " .. currencyLabel .. " | Targets: " .. targetCount, Color3.fromRGB(100, 220, 160))
 
     task.spawn(function()
@@ -5552,7 +5552,7 @@ local function SnipeStart()
     end)
 end
 
-CreateSection(SummonPage, "SNIPE SUMMON", 1)
+CreateSection(SummonPage, "SUMMON", 1)
 CreateHint(SummonPage, "Choose a banner and one or more target units. The system sends summons only to the selected banner and stops when a new target unit appears in your collection.", 2, 42)
 SnipeBannerSelectedLabel = SnipeMakeLabel(SummonPage, "Selected Banner: " .. (State.SnipeBanner ~= "" and State.SnipeBanner or "None"), 3, 22, Color3.fromRGB(120, 190, 255))
 CreateSection(SummonPage, "1. SELECT BANNER", 4)
@@ -5613,7 +5613,7 @@ SnipeRefreshButton = CreateButton(SummonPage, "Refresh Banners / Units", 11, fun
     SnipeSetStatus("Lists refreshed", Color3.fromRGB(100, 220, 160))
 end)
 SnipeStatusLabel = SnipeMakeLabel(SummonPage, "Status: Idle", 12, 34, Color3.fromRGB(190, 210, 230))
-SnipeStartButton = CreateButton(SummonPage, "Start Snipe Summon", 13, SnipeStart)
+SnipeStartButton = CreateButton(SummonPage, "Start Summon", 13, SnipeStart)
 SnipeBuildBannerList()
 SnipeBuildUnitList()
 SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x" or "1x") .. " (click to switch)"
