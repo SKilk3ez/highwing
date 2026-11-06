@@ -4374,7 +4374,10 @@ function CreatePortalSelectionColumn(name, title, hint, order)
     list.BorderSizePixel = 0
     list.ScrollBarThickness = 4
     list.ScrollingDirection = Enum.ScrollingDirection.Y
+    list.ScrollingEnabled = true
+    list.Active = true
     list.ClipsDescendants = true
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
     list.CanvasSize = UDim2.new(0, 0, 0, 0)
     list.LayoutOrder = 3
     list.ZIndex = 12
@@ -4415,9 +4418,12 @@ function ApplyResponsiveGuiSizing()
         return
     end
     local scale = math.max(HubScale.Scale, 0.01)
-    PortalInventoryList.Size = UDim2.new(1, -4, 0, 160 / scale)
-    PortalTierList.Size = UDim2.new(1, -4, 0, 350 / scale)
-    PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 410 / scale)
+    -- Match the Event Buff/Debuff priority editor's scroll behavior.
+    local inventoryHeight = 160 / scale
+    local tierHeight = 350 / scale
+    PortalInventoryList.Size = UDim2.new(1, -4, 0, inventoryHeight)
+    PortalTierList.Size = UDim2.new(1, -4, 0, tierHeight)
+    PortalSelectionContainer.Size = UDim2.new(1, -10, 0, math.max(inventoryHeight, tierHeight) + 54)
 end
 ApplyResponsiveGuiSizing()
 
@@ -4425,23 +4431,65 @@ PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 
 PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
 PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
+-- The game Session owns both services; this mirrors the structure in game.lua:
+-- session.collection.collection_profile_data and session.inventory.inventory_profile_data.
+function FindLocalGameSession()
+    local ok, guiService = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local client = src and src:FindFirstChild("client")
+        local services = client and client:FindFirstChild("Services")
+        local module = services and services:FindFirstChild("GUIService")
+        if module and module:IsA("ModuleScript") then return require(module) end
+        return nil
+    end)
+    if ok and type(guiService) == "table" then
+        local session = guiService.session
+        if type(session) == "table" and session.player == player then
+            return session
+        end
+    end
+
+    if type(getgc) ~= "function" then return nil end
+    local gcOk, objects = pcall(getgc, true)
+    if not gcOk or type(objects) ~= "table" then return nil end
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player
+                    and type(candidate.collection) == "table"
+                    and type(candidate.inventory) == "table" then
+                    return candidate
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function FindLocalInventoryProfile()
+    local session = FindLocalGameSession()
+    if session and type(session.inventory) == "table" then
+        local profile = session.inventory.inventory_profile_data
+        if type(profile) == "table" and type(profile.unique_items) == "table" then
+            return profile
+        end
+    end
+
     if type(getgc) ~= "function" then return nil end
     local ok, objects = pcall(getgc, true)
     if not ok or type(objects) ~= "table" then return nil end
     for _, object in ipairs(objects) do
-        if type(object) == "table" and type(object.inventory) == "table" then
-            local profile = object.inventory.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                return profile
-            end
-        end
-    end
-    for _, object in ipairs(objects) do
         if type(object) == "table" then
-            local profile = object.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                return profile
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player then
+                    local inventory = candidate.inventory
+                    local profile = type(inventory) == "table" and inventory.inventory_profile_data
+                    if type(profile) == "table" and type(profile.unique_items) == "table" then
+                        return profile
+                    end
+                end
             end
         end
     end
@@ -4452,13 +4500,7 @@ function GetOwnedPortals()
     local profile = FindLocalInventoryProfile()
     local portals, seen = {}, {}
     if not profile then return portals, "Inventory session not found (executor getgc support required)." end
-    local itemData = nil
-    pcall(function()
-        local itemsModule = ReplicatedStorage:FindFirstChild("Items", true)
-        if itemsModule and itemsModule:IsA("ModuleScript") then
-            itemData = require(itemsModule)
-        end
-    end)
+    local itemData = LoadGameDataModule("Items")
     for _, owned in pairs(profile.unique_items) do
         if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
             local def = itemData and itemData[owned.item_id]
@@ -4481,6 +4523,7 @@ end
 
 portalInventoryCache = {}
 function RefreshPortalTierUI()
+    PortalTierList.CanvasPosition = Vector2.new(0, 0)
     for _, child in ipairs(PortalTierList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
@@ -4510,6 +4553,7 @@ function RefreshPortalTierUI()
 end
 
 function RefreshPortalUI()
+    PortalInventoryList.CanvasPosition = Vector2.new(0, 0)
     for _, child in ipairs(PortalInventoryList:GetChildren()) do
         if child:IsA("TextButton") then child:Destroy() end
     end
@@ -5287,20 +5331,34 @@ function SnipeBuildUnitList()
 end
 
 local function SnipeFindOwnedUnits()
+    local session = FindLocalGameSession()
+    if session then
+        local collection = session.collection
+        local profile = type(collection) == "table" and collection.collection_profile_data
+        if type(profile) == "table" and type(profile.owned_units) == "table" then
+            return profile.owned_units
+        end
+    end
+
+    -- Fallback for executor environments where the GUIService session is not exposed.
     if type(getgc) ~= "function" then return nil end
     local ok, objects = pcall(getgc, true)
     if not ok or type(objects) ~= "table" then return nil end
     for _, object in ipairs(objects) do
         if type(object) == "table" then
-            local collection = object.collection
-            if type(collection) == "table" and collection.player == player then
-                local profile = collection.collection_profile_data
-                if type(profile) == "table" and type(profile.owned_units) == "table" then
-                    return profile.owned_units
+            local candidates = { object, object.session }
+            for _, candidate in ipairs(candidates) do
+                if type(candidate) == "table" and candidate.player == player then
+                    local collection = candidate.collection
+                    local profile = type(collection) == "table" and collection.collection_profile_data
+                    if type(profile) == "table" and type(profile.owned_units) == "table" then
+                        return profile.owned_units
+                    end
+                    profile = candidate.collection_profile_data
+                    if type(profile) == "table" and type(profile.owned_units) == "table" then
+                        return profile.owned_units
+                    end
                 end
-            end
-            if object.player == player and type(object.collection_profile_data) == "table" and type(object.collection_profile_data.owned_units) == "table" then
-                return object.collection_profile_data.owned_units
             end
         end
     end
