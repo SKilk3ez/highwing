@@ -735,7 +735,38 @@ function LoadConfig()
 end
 
 LoadConfig()
-HubScale.Scale = State.UIScale
+
+-- Keep the hub inside the available screen area at large UI scales.
+-- The user's selected scale remains saved; only the effective display scale is clamped.
+function ApplyHubScale()
+    local effectiveScale = State.UIScale
+    local camera = workspace.CurrentCamera
+    if camera then
+        local viewport = camera.ViewportSize
+        local widthLimit = math.max(0.5, (viewport.X - 24) / 780)
+        local heightLimit = math.max(0.5, (viewport.Y - 24) / 480)
+        effectiveScale = math.min(effectiveScale, widthLimit, heightLimit)
+    end
+    HubScale.Scale = effectiveScale
+    if type(ApplyResponsiveGuiSizing) == "function" then
+        ApplyResponsiveGuiSizing()
+    end
+end
+
+local viewportConnection = nil
+local function BindViewportScale()
+    if viewportConnection then
+        viewportConnection:Disconnect()
+        viewportConnection = nil
+    end
+    local camera = workspace.CurrentCamera
+    if camera then
+        viewportConnection = camera:GetPropertyChangedSignal("ViewportSize"):Connect(ApplyHubScale)
+    end
+    ApplyHubScale()
+end
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(BindViewportScale)
+BindViewportScale()
 
 EVENT_LEVEL_ID = "summer2_event"
 
@@ -4299,7 +4330,7 @@ end
 -- Portal page: inventory-based portal types + game-defined tier selection.
 PortalSelectionContainer = Instance.new("Frame")
 PortalSelectionContainer.Name = "PortalSelectionContainer"
-PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 174)
+PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 410)
 PortalSelectionContainer.BackgroundTransparency = 1
 PortalSelectionContainer.LayoutOrder = 1
 PortalSelectionContainer.ZIndex = 12
@@ -4335,10 +4366,15 @@ function CreatePortalSelectionColumn(name, title, hint, order)
 
     local list = Instance.new("ScrollingFrame")
     list.Name = name .. "List"
-    list.Size = UDim2.new(1, -4, 0, 116)
+    -- Preserve a useful physical viewing area when the whole hub is scaled.
+    -- Tier list is tall enough to show every game-defined tier without clipping.
+    local visibleHeight = name == "PortalTierColumn" and 350 or 160
+    list.Size = UDim2.new(1, -4, 0, visibleHeight / math.max(HubScale.Scale, 0.01))
     list.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
     list.BorderSizePixel = 0
-    list.ScrollBarThickness = 3
+    list.ScrollBarThickness = 4
+    list.ScrollingDirection = Enum.ScrollingDirection.Y
+    list.ClipsDescendants = true
     list.CanvasSize = UDim2.new(0, 0, 0, 0)
     list.LayoutOrder = 3
     list.ZIndex = 12
@@ -4371,6 +4407,19 @@ PortalTierList = CreatePortalSelectionColumn(
     "เลือก Tier จาก T สูงสุดลงมาต่ำสุด",
     2
 )
+
+-- Recalculate the portal selector's physical height whenever UI Scale or the
+-- game viewport changes. The Portal page itself remains scrollable on short screens.
+function ApplyResponsiveGuiSizing()
+    if not PortalSelectionContainer or not PortalInventoryList or not PortalTierList then
+        return
+    end
+    local scale = math.max(HubScale.Scale, 0.01)
+    PortalInventoryList.Size = UDim2.new(1, -4, 0, 160 / scale)
+    PortalTierList.Size = UDim2.new(1, -4, 0, 350 / scale)
+    PortalSelectionContainer.Size = UDim2.new(1, -10, 0, 410 / scale)
+end
+ApplyResponsiveGuiSizing()
 
 PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 2, 30)
 PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
@@ -4701,7 +4750,7 @@ CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 6, 50, 15
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
-    HubScale.Scale = State.UIScale
+    ApplyHubScale()
 end)
 
 farmStall = { count = 0, lastChange = 0 }
