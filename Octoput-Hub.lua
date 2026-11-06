@@ -2783,7 +2783,9 @@ function ReadAuthoritativeResultSettings()
     -- game.lua ResultsUI.new() stores the ResultsUI ScreenGui in screenGUI,
     -- and ResultsUI.show_results(settings) stores the exact server result in .settings.
     local results = playerGui:FindFirstChild("ResultsUI")
-    if not results or results.Enabled ~= true or type(getgc) ~= "function" then return nil end
+    -- ResultsUI.settings is assigned before the GUI is enabled. Do not gate
+    -- result access on ScreenGui.Enabled: rendering/BlackScreen can keep it hidden.
+    if not results or type(getgc) ~= "function" then return nil end
 
     local ok, objects = pcall(getgc, true)
     if not ok or type(objects) ~= "table" then return nil end
@@ -3224,11 +3226,26 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local outcome = ResolveWebhookOutcome(resultDetails)
 
     local inventoryRewardText, secretRewardText
+    local inventoryStatusText
     if secretBaselineAvailable then
-        local inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
+        -- Inventory replication can arrive shortly after ResultsUI. Retry briefly
+        -- instead of silently omitting the item section on a transient read miss.
+        local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
+        for attempt = 1, 8 do
+            inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
+            if inventoryRewardsAvailable then break end
+            task.wait(0.5)
+        end
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
+            if not inventoryRewardText and not secretRewardText then
+                inventoryStatusText = "No new items or units detected."
+            end
+        else
+            inventoryStatusText = "⚠️ Inventory check unavailable after retrying."
         end
+    else
+        inventoryStatusText = "⚠️ Inventory baseline unavailable at match start; item changes could not be compared."
     end
 
     local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
@@ -3261,10 +3278,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         value = LimitEmbedText(rewardText, 900),
         inline = false,
     }}
-    if inventoryRewardText then
+    if inventoryRewardText or inventoryStatusText then
         table.insert(fields, {
             name = "📦 New Items / Units",
-            value = LimitEmbedText(inventoryRewardText, 900),
+            value = LimitEmbedText(inventoryRewardText or inventoryStatusText, 900),
             inline = false,
         })
     end
@@ -6599,6 +6616,7 @@ webhookUnitLinesSnapshot = nil
 webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
+webhookNextResultReadAt = 0
 
 local initialDataForWebhook = workspace:FindFirstChild("_DATA")
 local initialFinishedForWebhook = initialDataForWebhook and initialDataForWebhook:FindFirstChild("GameFinished")
@@ -6648,10 +6666,16 @@ end
 
 function MarkWebhookEnd(reason)
     if not webhookEndDetected then
-        webhookUnitLinesSnapshot = ReadMatchUnitLines()
+        -- Commit the end state first. Optional snapshot readers must never block
+        -- the webhook trigger if a folder/module disappears during match teardown.
         webhookEndDetected = true
         webhookGameWasActive = false
-        print("[Octoput Hub Webhook] Match end detected by " .. tostring(reason or "game result") .. ".")
+        local snapshotOk, snapshot = pcall(ReadMatchUnitLines)
+        webhookUnitLinesSnapshot = snapshotOk and snapshot or nil
+        if not snapshotOk then
+            warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
+        end
+        print("[Octoput Hub Webhook] END DETECTED by " .. tostring(reason or "game result") .. ".")
     end
     StartWebhookEndSend(reason)
 end
@@ -6674,6 +6698,7 @@ task.spawn(function()
                 webhookSecretRewardBaselineAvailable = false
                 webhookUnitLinesSnapshot = nil
                 webhookResultSettingsAtStart = nil
+                webhookNextResultReadAt = 0
                 local finishedValue = dataFolder and dataFolder:FindFirstChild("GameFinished")
                 webhookFinishedLastValue = finishedValue ~= nil and finishedValue.Value == true
             end
@@ -6728,7 +6753,19 @@ task.spawn(function()
             -- Read the result controller even while its ScreenGui is disabled.
             -- In BlackScreen / low-render mode, waiting for the UI to become visible
             -- can delay the result edge until the client receives fresh input.
-            local resultDetails = GetResultDetails()
+            local resultDetails = {}
+            -- getgc(true) is an expensive executor scan. Only inspect result
+            -- controller tables near completion, and throttle the scan.
+            if (resultsVisible or finished or webhookEndDetected)
+                and os.clock() >= (webhookNextResultReadAt or 0) then
+                webhookNextResultReadAt = os.clock() + 0.75
+                local readOk, details = pcall(GetResultDetails)
+                if readOk and type(details) == "table" then
+                    resultDetails = details
+                elseif not readOk then
+                    warn("[Octoput Hub Webhook] Result read failed: " .. tostring(details))
+                end
+            end
             local resultTitle = string.upper(tostring(resultDetails and resultDetails.result or ""))
             local currentSettings = resultDetails and resultDetails.settings or nil
             local resultsRising = resultsVisible and not webhookResultsVisibleLast
@@ -6756,11 +6793,21 @@ task.spawn(function()
                 webhookMatchToken = webhookMatchToken + 1
                 -- A new match owns a fresh send slot; older requests are token-isolated.
                 webhookSending = false
-                local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
-                webhookCurrencyBefore = currencySnapshot
-                webhookSecretRewardBefore = secretSnapshot
-                webhookSecretRewardBaselineAvailable = secretAvailable
+                -- Mark the match active before optional inventory readers run.
+                -- A transient getgc/profile error must not prevent end detection.
                 webhookGameWasActive = true
+                local baselineOk, currencySnapshot, secretSnapshot, secretAvailable =
+                    pcall(CaptureWebhookCurrencyBaseline)
+                if baselineOk then
+                    webhookCurrencyBefore = currencySnapshot
+                    webhookSecretRewardBefore = secretSnapshot
+                    webhookSecretRewardBaselineAvailable = secretAvailable == true
+                else
+                    webhookCurrencyBefore = ReadPlayerCurrencies()
+                    webhookSecretRewardBefore = nil
+                    webhookSecretRewardBaselineAvailable = false
+                    warn("[Octoput Hub Webhook] Baseline capture failed: " .. tostring(currencySnapshot))
+                end
                 webhookEndDetected = false
                 webhookSent = false
                 webhookRetryAt = 0
