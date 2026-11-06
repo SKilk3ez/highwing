@@ -3226,10 +3226,9 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local outcome = ResolveWebhookOutcome(resultDetails)
 
     local inventoryRewardText, secretRewardText
-    local inventoryStatusText
     if secretBaselineAvailable then
-        -- Inventory replication can arrive shortly after ResultsUI. Retry briefly
-        -- instead of silently omitting the item section on a transient read miss.
+        -- Inventory replication can arrive shortly after ResultsUI. Retry briefly.
+        -- Item drops are appended to Match Rewards; do not create extra status fields.
         local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
         for attempt = 1, 8 do
             inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
@@ -3238,14 +3237,11 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         end
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
-            if not inventoryRewardText and not secretRewardText then
-                inventoryStatusText = "No new items or units detected."
-            end
         else
-            inventoryStatusText = "⚠️ Inventory check unavailable after retrying."
+            warn("[Octoput Hub Webhook] Inventory check unavailable after retrying; item rewards omitted.")
         end
     else
-        inventoryStatusText = "⚠️ Inventory baseline unavailable at match start; item changes could not be compared."
+        warn("[Octoput Hub Webhook] Inventory baseline unavailable; item rewards omitted.")
     end
 
     local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
@@ -3261,6 +3257,16 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
         .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
     local rewardText = BuildMatchRewardLines(resultDetails)
+    local itemRewardParts = {}
+    if inventoryRewardText then
+        table.insert(itemRewardParts, "**📦 New Items / Units**\n" .. inventoryRewardText)
+    end
+    if secretRewardText then
+        table.insert(itemRewardParts, secretRewardText)
+    end
+    if #itemRewardParts > 0 then
+        rewardText = rewardText .. "\n\n" .. table.concat(itemRewardParts, "\n\n")
+    end
 
     local function LimitEmbedText(value, limit)
         value = tostring(value or "")
@@ -3273,26 +3279,13 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
         playerStatsText, unitLines, matchResultText)
 
+    -- Keep all match currencies and newly obtained inventory items in one
+    -- Discord field. No empty/status-only reward sections are added.
     local fields = {{
         name = "🎁 Match Rewards",
         value = LimitEmbedText(rewardText, 900),
         inline = false,
     }}
-    if inventoryRewardText or inventoryStatusText then
-        table.insert(fields, {
-            name = "📦 New Items / Units",
-            value = LimitEmbedText(inventoryRewardText or inventoryStatusText, 900),
-            inline = false,
-        })
-    end
-    -- Highlight every newly obtained Secret item, portal, charm, or unit.
-    if secretRewardText then
-        table.insert(fields, {
-            name = "🚨 SECRET REWARDS 🚨",
-            value = LimitEmbedText(secretRewardText, 900),
-            inline = false,
-        })
-    end
 
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
