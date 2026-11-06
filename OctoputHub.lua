@@ -56,8 +56,23 @@ MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
 MainFrame.Draggable = true
-MainFrame.ZIndex = 10
+-- Keep the complete control window above the BlackScreen Live Match panel.
+-- Use Global ZIndex and lift every child together so nested controls stay visible.
+MainFrame.ZIndex = 300
 MainFrame.Parent = ScreenGui
+
+local function LiftHubGuiObject(guiObject)
+    if guiObject and guiObject:IsA("GuiObject") and guiObject ~= MainFrame then
+        guiObject.ZIndex = math.max(guiObject.ZIndex, 1) + 300
+    end
+end
+
+for _, descendant in ipairs(MainFrame:GetDescendants()) do
+    LiftHubGuiObject(descendant)
+end
+MainFrame.DescendantAdded:Connect(function(descendant)
+    LiftHubGuiObject(descendant)
+end)
 
 HubScale = Instance.new("UIScale")
 HubScale.Name = "HubScale"
@@ -161,7 +176,7 @@ MatchInfoPanel.BackgroundColor3 = Color3.fromRGB(12, 15, 24)
 MatchInfoPanel.BackgroundTransparency = 0.08
 MatchInfoPanel.BorderSizePixel = 0
 MatchInfoPanel.Visible = false
-MatchInfoPanel.ZIndex = 180
+MatchInfoPanel.ZIndex = 2
 MatchInfoPanel.Parent = ScreenGui
 MatchPanelCorner = Instance.new("UICorner")
 MatchPanelCorner.CornerRadius = UDim.new(0, 18)
@@ -180,7 +195,7 @@ PromoLogo.BackgroundColor3 = Color3.fromRGB(25, 29, 43)
 PromoLogo.BackgroundTransparency = 0.05
 PromoLogo.BorderSizePixel = 0
 PromoLogo.ScaleType = Enum.ScaleType.Fit
-PromoLogo.ZIndex = 181
+PromoLogo.ZIndex = 3
 PromoLogo.Parent = MatchInfoPanel
 PromoLogoCorner = Instance.new("UICorner")
 PromoLogoCorner.CornerRadius = UDim.new(0, 14)
@@ -192,7 +207,7 @@ PromoLogoFallback.Text = "OCTOPUT HUB"
 PromoLogoFallback.TextColor3 = Color3.new(1, 1, 1)
 PromoLogoFallback.Font = Enum.Font.GothamBlack
 PromoLogoFallback.TextSize = 12
-PromoLogoFallback.ZIndex = 182
+PromoLogoFallback.ZIndex = 4
 PromoLogoFallback.Parent = PromoLogo
 
 function MakeMatchLabel(name, position, size, text, textSize, color, font)
@@ -208,7 +223,7 @@ function MakeMatchLabel(name, position, size, text, textSize, color, font)
     label.TextXAlignment = Enum.TextXAlignment.Left
     label.TextYAlignment = Enum.TextYAlignment.Center
     label.TextTruncate = Enum.TextTruncate.AtEnd
-    label.ZIndex = 181
+    label.ZIndex = 3
     label.Parent = MatchInfoPanel
     return label
 end
