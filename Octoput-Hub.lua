@@ -3210,9 +3210,6 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
         .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
     local rewardText = BuildMatchRewardLines(resultDetails)
-    if inventoryRewardText then
-        rewardText = rewardText .. "\n\n**📦 New Items / Units**\n" .. inventoryRewardText
-    end
 
     local function LimitEmbedText(value, limit)
         value = tostring(value or "")
@@ -3230,7 +3227,14 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         value = LimitEmbedText(rewardText, 900),
         inline = false,
     }}
-    -- Show this section only when a new Secret Unit or Secret Portal was found.
+    if inventoryRewardText then
+        table.insert(fields, {
+            name = "📦 New Items / Units",
+            value = LimitEmbedText(inventoryRewardText, 900),
+            inline = false,
+        })
+    end
+    -- Highlight every newly obtained Secret item, portal, charm, or unit.
     if secretRewardText then
         table.insert(fields, {
             name = "🚨 SECRET REWARDS 🚨",
