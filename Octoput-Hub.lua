@@ -3057,7 +3057,7 @@ function BuildMatchRewardLines(resultDetails)
     local lines = {}
     if type(settings) == "table" then
         local rewardFields = {
-            { key = "xp_reward", label = "XP" },
+            { key = "xp_reward", label = "Player XP" },
             { key = "gold_reward", label = "Gold" },
             { key = "gem_reward", label = "Gems" },
             { key = "trophy_reward", label = "Trophies" },
@@ -3094,7 +3094,7 @@ function BuildMatchRewardLines(resultDetails)
         scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
         if scroll then
             local labels = {
-                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "XP",
+                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "Player XP",
             }
             for _, frame in ipairs(scroll:GetChildren()) do
                 if frame:IsA("GuiObject") and frame.Visible then
@@ -3110,8 +3110,62 @@ function BuildMatchRewardLines(resultDetails)
         end
     end
 
-    if #lines == 0 then return "No match rewards reported by ResultsUI" end
-    return table.concat(lines, "\n")
+    return #lines > 0 and table.concat(lines, "\n") or nil
+end
+
+-- ResultsUI.show_results() also supplies first-completion bonuses and per-unit XP.
+-- Keep these inside the same Match Rewards Discord field as the other rewards.
+function BuildAdditionalResultRewardLines(settings, inventorySnapshot)
+    if type(settings) ~= "table" then return nil end
+    local sections = {}
+
+    if settings.first_completion == true then
+        local bonusLines = {}
+        local gems = tonumber(settings.first_completion_gems)
+        local trophies = tonumber(settings.first_completion_trophies)
+        if gems and gems > 0 then
+            table.insert(bonusLines, "• **Gems:** +" .. FormatNumber(gems))
+        end
+        if trophies and trophies > 0 then
+            table.insert(bonusLines, "• **Trophies:** +" .. FormatNumber(trophies))
+        end
+        if #bonusLines > 0 then
+            table.insert(sections, "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n"))
+        end
+    end
+
+    if type(settings.xp_updates) == "table" then
+        local unitNames = {}
+        for key, reward in pairs(inventorySnapshot or {}) do
+            if type(key) == "string" and key:sub(1, 5) == "unit:" and type(reward) == "table" then
+                unitNames[key:sub(6)] = tostring(reward.name or key:sub(6))
+            end
+        end
+
+        local xpLines = {}
+        for uuid, update in pairs(settings.xp_updates) do
+            if type(update) == "table" then
+                local oldXP = tonumber(update.old_xp)
+                local newXP = tonumber(update.new_xp)
+                local gained = oldXP and newXP and (newXP - oldXP) or 0
+                if gained > 0 then
+                    local unitName = unitNames[tostring(uuid)] or ("Unit " .. tostring(uuid):sub(1, 8))
+                    table.insert(xpLines, {
+                        sort = unitName:lower(),
+                        line = "• **" .. unitName .. ":** +" .. FormatNumber(gained) .. " Unit XP",
+                    })
+                end
+            end
+        end
+        table.sort(xpLines, function(a, b) return a.sort < b.sort end)
+        if #xpLines > 0 then
+            local lines = {}
+            for _, entry in ipairs(xpLines) do table.insert(lines, entry.line) end
+            table.insert(sections, "**⚔️ Unit XP**\n" .. table.concat(lines, "\n"))
+        end
+    end
+
+    return #sections > 0 and table.concat(sections, "\n\n") or nil
 end
 
 webhookCurrencyBefore = nil
@@ -3226,10 +3280,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local outcome = ResolveWebhookOutcome(resultDetails)
 
     local inventoryRewardText, secretRewardText
+    local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     if secretBaselineAvailable then
         -- Inventory replication can arrive shortly after ResultsUI. Retry briefly.
         -- Item drops are appended to Match Rewards; do not create extra status fields.
-        local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
         for attempt = 1, 8 do
             inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
             if inventoryRewardsAvailable then break end
@@ -3257,6 +3311,13 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
         .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
     local rewardText = BuildMatchRewardLines(resultDetails)
+    local rewardSections = {}
+    if rewardText then table.insert(rewardSections, rewardText) end
+    local additionalRewardText = BuildAdditionalResultRewardLines(
+        resultDetails and resultDetails.settings,
+        inventoryRewardsAvailable and inventoryRewardsAfter or secretBaseline
+    )
+    if additionalRewardText then table.insert(rewardSections, additionalRewardText) end
     local itemRewardParts = {}
     if inventoryRewardText then
         table.insert(itemRewardParts, "**📦 New Items / Units**\n" .. inventoryRewardText)
@@ -3265,8 +3326,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         table.insert(itemRewardParts, secretRewardText)
     end
     if #itemRewardParts > 0 then
-        rewardText = rewardText .. "\n\n" .. table.concat(itemRewardParts, "\n\n")
+        table.insert(rewardSections, table.concat(itemRewardParts, "\n\n"))
     end
+    rewardText = #rewardSections > 0 and table.concat(rewardSections, "\n\n")
+        or "No reward values or inventory changes were reported."
 
     local function LimitEmbedText(value, limit)
         value = tostring(value or "")
