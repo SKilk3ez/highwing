@@ -3010,7 +3010,7 @@ function ReadInventoryRewardSnapshot()
 end
 
 function BuildInventoryRewardLines(before, after)
-    local normalEntries, secretEntries = {}, {}
+    local normalEntries, charmEntries, secretEntries = {}, {}, {}
     for key, reward in pairs(after or {}) do
         local old = before and before[key]
         local amount = tonumber(reward.amount) or 1
@@ -3035,19 +3035,35 @@ function BuildInventoryRewardLines(before, after)
                         name, FormatNumber(gained), category, rarityText, tierText),
                     sort = name .. category,
                 })
+            elseif category:lower():find("charm", 1, true) then
+                table.insert(charmEntries, { line = line, sort = name .. category })
             else
                 table.insert(normalEntries, { line = line, sort = name .. category })
             end
         end
     end
 
-    table.sort(normalEntries, function(a, b) return a.sort < b.sort end)
-    table.sort(secretEntries, function(a, b) return a.sort < b.sort end)
-    local normalLines, secretLines = {}, {}
-    for _, entry in ipairs(normalEntries) do table.insert(normalLines, entry.line) end
-    for _, entry in ipairs(secretEntries) do table.insert(secretLines, entry.line) end
+    local function SortEntries(entries)
+        table.sort(entries, function(a, b) return a.sort < b.sort end)
+        local lines = {}
+        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
+        return lines
+    end
 
-    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+    local normalLines = SortEntries(normalEntries)
+    local charmLines = SortEntries(charmEntries)
+    local secretLines = SortEntries(secretEntries)
+    local groupedNormalLines = {}
+    if #charmLines > 0 then
+        table.insert(groupedNormalLines, "**🧿 Charms**")
+        for _, line in ipairs(charmLines) do table.insert(groupedNormalLines, line) end
+    end
+    if #normalLines > 0 then
+        table.insert(groupedNormalLines, "**📦 Other Items / Units**")
+        for _, line in ipairs(normalLines) do table.insert(groupedNormalLines, line) end
+    end
+
+    return #groupedNormalLines > 0 and table.concat(groupedNormalLines, "\n") or nil,
         #secretLines > 0 and ("━━━━━━━━━━━━━━━━\n**🚨 💎 SECRET REWARDS 💎 🚨**\n"
             .. table.concat(secretLines, "\n") .. "\n━━━━━━━━━━━━━━━━") or nil
 end
