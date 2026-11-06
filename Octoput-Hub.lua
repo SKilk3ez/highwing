@@ -6663,6 +6663,8 @@ task.spawn(function()
             local isActive = (startedByFlag or startedByWorld) and not finished
             if isActive and not webhookGameWasActive then
                 webhookMatchToken = webhookMatchToken + 1
+                -- A new match owns a fresh send slot; older requests are token-isolated.
+                webhookSending = false
                 local currencySnapshot, secretSnapshot, secretAvailable = CaptureWebhookCurrencyBaseline()
                 webhookCurrencyBefore = currencySnapshot
                 webhookSecretRewardBefore = secretSnapshot
