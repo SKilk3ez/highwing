@@ -3010,7 +3010,7 @@ function ReadInventoryRewardSnapshot()
 end
 
 function BuildInventoryRewardLines(before, after)
-    local normalEntries, charmEntries, secretEntries = {}, {}, {}
+    local normalEntries, secretEntries = {}, {}
     for key, reward in pairs(after or {}) do
         local old = before and before[key]
         local amount = tonumber(reward.amount) or 1
@@ -3024,48 +3024,29 @@ function BuildInventoryRewardLines(before, after)
         if gained > 0 then
             local category = tostring(reward.category or "Item")
             local name = tostring(reward.name or "Unknown")
+            local rarity = tostring(reward.rarity or "")
             local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
-            local rarityText = reward.rarity and reward.rarity ~= "" and reward.rarity ~= "Unknown"
-                and (" · " .. tostring(reward.rarity)) or ""
+            local rarityText = rarity ~= "" and rarity ~= "Unknown" and (" · " .. rarity) or ""
             local line = string.format("• **%s ×%s** — %s%s%s",
                 name, FormatNumber(gained), category, rarityText, tierText)
-            if reward.secret then
-                table.insert(secretEntries, {
-                    line = string.format("🌈 **✨ %s ×%s ✨** — %s%s%s",
-                        name, FormatNumber(gained), category, rarityText, tierText),
-                    sort = name .. category,
-                })
-            elseif category:lower():find("charm", 1, true) then
-                table.insert(charmEntries, { line = line, sort = name .. category })
+            if tostring(reward.rarity or ""):lower() == "secret" or reward.secret == true then
+                table.insert(secretEntries, { sort = name:lower(), line = "🌟 " .. line })
             else
-                table.insert(normalEntries, { line = line, sort = name .. category })
+                table.insert(normalEntries, { sort = name:lower(), line = line })
             end
         end
     end
 
-    local function SortEntries(entries)
+    local function SortLines(entries)
         table.sort(entries, function(a, b) return a.sort < b.sort end)
         local lines = {}
         for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
         return lines
     end
-
-    local normalLines = SortEntries(normalEntries)
-    local charmLines = SortEntries(charmEntries)
-    local secretLines = SortEntries(secretEntries)
-    local groupedNormalLines = {}
-    if #charmLines > 0 then
-        table.insert(groupedNormalLines, "**🧿 Charms**")
-        for _, line in ipairs(charmLines) do table.insert(groupedNormalLines, line) end
-    end
-    if #normalLines > 0 then
-        table.insert(groupedNormalLines, "**📦 Other Items / Units**")
-        for _, line in ipairs(normalLines) do table.insert(groupedNormalLines, line) end
-    end
-
-    return #groupedNormalLines > 0 and table.concat(groupedNormalLines, "\n") or nil,
-        #secretLines > 0 and ("━━━━━━━━━━━━━━━━\n**🚨 💎 SECRET REWARDS 💎 🚨**\n"
-            .. table.concat(secretLines, "\n") .. "\n━━━━━━━━━━━━━━━━") or nil
+    local normalLines = SortLines(normalEntries)
+    local secretLines = SortLines(secretEntries)
+    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+        #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
 
 function BuildMatchRewardLines(resultDetails)
@@ -3226,12 +3207,10 @@ function ReadPlayerLevel()
 end
 
 function ReadMatchUnitLines()
-    -- Keep the webhook compact: one row per unit type, using the highest
-    -- takedown value reached by a single placed copy of that unit.
-    -- Do not add together every duplicate unit placed on the map.
+    -- Aggregate every placed copy of the same unit type. Anime Adventures exposes
+    -- these exact per-instance values through unit._stats.total_damage/takedown_count.
     local units = GetPlayerUnits()
     local grouped = {}
-
     for _, unit in ipairs(units) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
@@ -3239,29 +3218,34 @@ function ReadMatchUnitLines()
             local unitId = idValue and tostring(idValue.Value) or unit.Name
             local def = LookupUnitData(unitId)
             local displayName = tostring((def and def.name) or unitId)
+            local damageValue = stats:FindFirstChild("total_damage")
             local takedownValue = stats:FindFirstChild("takedown_count")
+            local damage = damageValue and tonumber(damageValue.Value) or 0
             local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
             local key = NormalizeName(unitId)
             local entry = grouped[key]
-
             if not entry then
-                entry = { name = displayName, takedowns = takedowns }
+                entry = { name = displayName, damage = 0, takedowns = 0, copies = 0 }
                 grouped[key] = entry
-            elseif takedowns > entry.takedowns then
-                entry.takedowns = takedowns
             end
+            entry.damage = entry.damage + damage
+            entry.takedowns = entry.takedowns + takedowns
+            entry.copies = entry.copies + 1
         end
     end
 
     local entries = {}
     for _, entry in pairs(grouped) do
-        table.insert(entries, string.format("• **%s** — Takedowns: **%s**",
-            entry.name, FormatNumber(entry.takedowns)))
+        table.insert(entries, {
+            sort = entry.name:lower(),
+            line = string.format("• **%s** ×%d — Damage: **%s** | Takedowns: **%s**",
+                entry.name, entry.copies, FormatCompact(entry.damage), FormatNumber(entry.takedowns)),
+        })
     end
-    table.sort(entries)
-
-    if #entries == 0 then return "No placed unit stats found" end
-    return table.concat(entries, "\n")
+    table.sort(entries, function(a, b) return a.sort < b.sort end)
+    local lines = {}
+    for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
+    return #lines > 0 and table.concat(lines, "\n") or "No placed unit stats captured."
 end
 
 function ResolveWebhookOutcome(resultDetails)
@@ -3281,8 +3265,8 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         return false
     end
 
-    -- game_finished calls ResultsUI.show_results(settings). Wait for that exact
-    -- settings payload to become available before reading the match result.
+    -- Wait for this match's authoritative ResultsUI settings. game.lua calls
+    -- ResultsUI.show_results(settings), where victory/title/stats/rewards live.
     local resultDetails
     for attempt = 1, 12 do
         local currentSettings = ReadAuthoritativeResultSettings()
@@ -3293,19 +3277,15 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         task.wait(0.5)
     end
     resultDetails = resultDetails or GetResultDetails()
-    -- If no fresh server result payload appeared, do not reuse a previous run's
-    -- victory/defeat title from a still-open ResultsUI.
     if not resultDetails.authoritative and resultDetails.result == webhookResultTitleAtStart then
         resultDetails.result = nil
     end
     local outcome = ResolveWebhookOutcome(resultDetails)
 
-    local inventoryRewardText, secretRewardText
     local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
+    local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        -- Inventory replication can arrive shortly after ResultsUI. Retry briefly.
-        -- Item drops are appended to Match Rewards; do not create extra status fields.
-        for attempt = 1, 8 do
+        for attempt = 1, 10 do
             inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
             if inventoryRewardsAvailable then break end
             task.wait(0.5)
@@ -3313,77 +3293,144 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
         else
-            warn("[Octoput Hub Webhook] Inventory check unavailable after retrying; item rewards omitted.")
+            warn("[Octoput Hub Webhook] Inventory snapshot unavailable after retries.")
         end
     else
-        warn("[Octoput Hub Webhook] Inventory baseline unavailable; item rewards omitted.")
+        warn("[Octoput Hub Webhook] Inventory baseline unavailable; inventory drops cannot be diffed.")
     end
 
-    local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
-    local playerStatsText = BuildPlayerStatsText(ReadPlayerCurrencies())
-    local playerLevel = ReadPlayerLevel()
     local currentCurrencies = ReadPlayerCurrencies()
-    local xp = currentCurrencies.XP or 0
-    local matchTime = resultDetails.Timer or "Unknown"
-    local waveText = resultDetails.WavesCompleted or "Unknown"
-    local stageText = tostring(resultDetails.level or "Unknown stage")
-    local outcomeLabel = outcome == "Victory" and "🟩 **VICTORY**"
-        or (outcome == "Defeat" and "🟥 **DEFEAT**" or "⚪ **UNKNOWN RESULT**")
-    local matchResultText = outcomeLabel .. " — Total Time: " .. tostring(matchTime)
-        .. " — Waves Completed: " .. tostring(waveText) .. " — " .. stageText
-    local rewardText = BuildMatchRewardLines(resultDetails)
+    local playerLevel = ReadPlayerLevel()
+    local playerStatsText = BuildPlayerStatsText(currentCurrencies)
+    local playerXP = currentCurrencies.XP or 0
+
+    -- Rewards field combines ResultsUI's authoritative stage rewards, first-clear
+    -- bonuses, unit XP and every inventory delta (units/items/portals/materials).
     local rewardSections = {}
-    if rewardText then table.insert(rewardSections, rewardText) end
+    local resultRewardText = BuildMatchRewardLines(resultDetails)
+    if resultRewardText then table.insert(rewardSections, resultRewardText) end
+
     local additionalRewardText = BuildAdditionalResultRewardLines(
         resultDetails and resultDetails.settings,
         inventoryRewardsAvailable and inventoryRewardsAfter or nil,
         secretBaseline
     )
     if additionalRewardText then table.insert(rewardSections, additionalRewardText) end
-    local itemRewardParts = {}
-    if inventoryRewardText then
-        table.insert(itemRewardParts, "**📦 New Items / Units**\n" .. inventoryRewardText)
+    if inventoryRewardText then table.insert(rewardSections, inventoryRewardText) end
+
+    -- Fallback to currency deltas only for reward types absent from the ResultsUI
+    -- payload, preventing the same reward from being reported twice.
+    local settings = resultDetails and resultDetails.settings
+    local before = currencyBaseline or {}
+    local fallbackLines = {}
+    local fallbackKeys = {
+        { key = "XP", setting = "xp_reward", label = "Player XP" },
+        { key = "Gold", setting = "gold_reward", label = "Gold" },
+        { key = "Gems", setting = "gem_reward", label = "Gems" },
+        { key = "Trophies", setting = "trophy_reward", label = "Trophies" },
+    }
+    for _, entry in ipairs(fallbackKeys) do
+        local settingValue = type(settings) == "table" and tonumber(settings[entry.setting]) or nil
+        local delta = (tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)
+        if (not settingValue or settingValue <= 0) and delta > 0 then
+            table.insert(fallbackLines, string.format("• **%s:** +%s", entry.label, FormatNumber(delta)))
+        end
     end
-    if secretRewardText then
-        table.insert(itemRewardParts, secretRewardText)
+    local function NormalizeRewardKey(value)
+        return tostring(value or ""):lower():gsub("[^%w]", "")
     end
-    if #itemRewardParts > 0 then
-        table.insert(rewardSections, table.concat(itemRewardParts, "\n\n"))
+    local reportedResourceKeys = {}
+    if type(settings) == "table" and type(settings.resource_reward) == "table" then
+        for resourceName in pairs(settings.resource_reward) do
+            reportedResourceKeys[NormalizeRewardKey(resourceName)] = true
+        end
     end
-    rewardText = #rewardSections > 0 and table.concat(rewardSections, "\n\n")
-        or "No reward values or inventory changes were reported."
+    local seenCurrencyAliases = {}
+    for key, value in pairs(currentCurrencies) do
+        if not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
+            local normalizedKey = NormalizeRewardKey(key)
+            if not seenCurrencyAliases[normalizedKey] then
+                seenCurrencyAliases[normalizedKey] = true
+                local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
+                if delta > 0 and not reportedResourceKeys[normalizedKey] then
+                    local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
+                    table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
+                end
+            end
+        end
+    end
+    if #fallbackLines > 0 then
+        table.sort(fallbackLines)
+        table.insert(rewardSections, table.concat(fallbackLines, "\n"))
+    end
+    local rewardsText = #rewardSections > 0 and table.concat(rewardSections, "\n\n")
+        or "No additional rewards detected."
+
+    local unitLines = unitLinesSnapshot or ReadMatchUnitLines()
+    local matchTime = tostring(resultDetails.Timer or "Unknown")
+    local waveText = tostring(resultDetails.WavesCompleted or "Unknown")
+    local stageText = tostring(resultDetails.level or "Unknown stage")
+    local outcomeLabel = outcome == "Victory" and "🟩 **VICTORY**"
+        or (outcome == "Defeat" and "🟥 **DEFEAT**" or "⚪ **UNKNOWN RESULT**")
+    local matchResultText = outcomeLabel .. " — Total Time: " .. matchTime
+        .. " — Waves Completed: " .. waveText .. " — **" .. stageText .. "**"
 
     local function LimitEmbedText(value, limit)
         value = tostring(value or "")
         if #value <= limit then return value end
-        return value:sub(1, math.max(1, limit - 18)) .. "\n… (truncated)"
+        return value:sub(1, math.max(1, limit - 22)) .. "\n… (truncated)"
     end
 
-    local description = string.format(
-        "**User:** %s **Level:** %s (XP: %s)\n\n**💰 Player Stats**\n%s\n\n**⚔️ Units**\n%s\n\n**🏁 Match Result**\n%s\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
-        player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(xp),
-        playerStatsText, unitLines, matchResultText)
+    local fields = {
+        { name = "💰 Player Stats", value = LimitEmbedText(playerStatsText, 1024), inline = false },
+    }
+    local function AppendLineChunks(fieldName, value, maxLength)
+        value = tostring(value or "")
+        local current = {}
+        local currentLength = 0
+        for line in (value .. "\n"):gmatch("(.-)\n") do
+            local extra = #line + (#current > 0 and 1 or 0)
+            if #current > 0 and currentLength + extra > maxLength then
+                table.insert(fields, { name = fieldName, value = table.concat(current, "\n"), inline = false })
+                current, currentLength = {}, 0
+                fieldName = fieldName .. " (continued)"
+            end
+            table.insert(current, line)
+            currentLength = currentLength + #line + (#current > 1 and 1 or 0)
+        end
+        if #current > 0 then
+            table.insert(fields, { name = fieldName, value = LimitEmbedText(table.concat(current, "\n"), maxLength), inline = false })
+        end
+    end
+    AppendLineChunks("🎁 Rewards", rewardsText, 1000)
+    AppendLineChunks("⚔️ Units — Damage & Takedowns", unitLines, 1000)
+    table.insert(fields, { name = "🏁 Match Result", value = LimitEmbedText(matchResultText, 1024), inline = false })
 
-    -- Keep all match currencies and newly obtained inventory items in one
-    -- Discord field. No empty/status-only reward sections are added.
-    local fields = {{
-        name = "🎁 Match Rewards",
-        value = LimitEmbedText(rewardText, 900),
-        inline = false,
+    local embeds = {{
+        title = outcome == "Victory" and "Anime Adventures — 🏆 VICTORY"
+            or (outcome == "Defeat" and "Anime Adventures — 🟥 DEFEAT" or "Anime Adventures — MATCH RESULT"),
+        description = string.format("**User:** %s **Level:** %s (XP: %s)\n\n[Octoput Hub Logo](https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png)",
+            player.Name, playerLevel and FormatNumber(playerLevel) or "Unknown", FormatNumber(playerXP)),
+        color = outcome == "Victory" and 5763719
+            or (outcome == "Defeat" and 15548997 or 9807270),
+        thumbnail = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
+        fields = fields,
+        timestamp = DateTime.now():ToIsoDate(),
     }}
+    if secretRewardText then
+        table.insert(embeds, {
+            title = "🚨✨ SECRET REWARDS UNLOCKED ✨🚨",
+            description = LimitEmbedText("━━━━━━━━━━━━━━━━━━━━\n🌈 **ULTRA RARE DROP!** 🌈\n\n"
+                .. secretRewardText .. "\n\n━━━━━━━━━━━━━━━━━━━━", 4000),
+            color = 16753920,
+            thumbnail = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
+            timestamp = DateTime.now():ToIsoDate(),
+        })
+    end
 
     local body = HttpService:JSONEncode({
         username = "Octoput Hub",
-        embeds = {{
-            title = outcome == "Victory" and "Anime Adventures — 🏆 VICTORY"
-                or (outcome == "Defeat" and "Anime Adventures — DEFEAT" or "Anime Adventures — MATCH RESULT"),
-            description = LimitEmbedText(description, 2400),
-            color = outcome == "Victory" and 5763719
-                or (outcome == "Defeat" and 15548997 or 9807270),
-            image = { url = "https://raw.githubusercontent.com/SKilk3ez/highwing/refs/heads/main/Untitled-2.png" },
-            fields = fields,
-            timestamp = DateTime.now():ToIsoDate(),
-        }},
+        embeds = embeds,
     })
 
     local lastError = "Unknown HTTP error"
@@ -3398,10 +3445,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         lastError = message
         retryDelay = responseRetryAfter or math.min(attempt * 2, 10)
         warn("[Octoput Hub Webhook] Attempt " .. tostring(attempt) .. "/4 failed: " .. tostring(message))
-        if attempt < 4 then
-            print("[Octoput Hub Webhook] Retrying in " .. tostring(retryDelay) .. "s.")
-            task.wait(retryDelay)
-        end
+        if attempt < 4 then task.wait(retryDelay) end
     end
     warn("[Octoput Hub Webhook] Giving up after 4 attempts: " .. tostring(lastError))
     return false, lastError, retryDelay
