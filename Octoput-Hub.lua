@@ -3115,11 +3115,11 @@ end
 
 -- ResultsUI.show_results() also supplies first-completion bonuses and per-unit XP.
 -- Keep these inside the same Match Rewards Discord field as the other rewards.
-function BuildAdditionalResultRewardLines(settings, inventorySnapshot)
+function BuildAdditionalResultRewardLines(settings, inventorySnapshot, fallbackInventorySnapshot)
     if type(settings) ~= "table" then return nil end
     local sections = {}
 
-    if settings.first_completion == true then
+    if settings.first_completion then
         local bonusLines = {}
         local gems = tonumber(settings.first_completion_gems)
         local trophies = tonumber(settings.first_completion_trophies)
@@ -3136,9 +3136,14 @@ function BuildAdditionalResultRewardLines(settings, inventorySnapshot)
 
     if type(settings.xp_updates) == "table" then
         local unitNames = {}
-        for key, reward in pairs(inventorySnapshot or {}) do
-            if type(key) == "string" and key:sub(1, 5) == "unit:" and type(reward) == "table" then
-                unitNames[key:sub(6)] = tostring(reward.name or key:sub(6))
+        for _, snapshot in ipairs({inventorySnapshot or {}, fallbackInventorySnapshot or {}}) do
+            for key, reward in pairs(snapshot) do
+                if type(key) == "string" and key:sub(1, 5) == "unit:" and type(reward) == "table" then
+                    local uuid = key:sub(6)
+                    if not unitNames[uuid] then
+                        unitNames[uuid] = tostring(reward.name or uuid)
+                    end
+                end
             end
         end
 
@@ -3315,7 +3320,8 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     if rewardText then table.insert(rewardSections, rewardText) end
     local additionalRewardText = BuildAdditionalResultRewardLines(
         resultDetails and resultDetails.settings,
-        inventoryRewardsAvailable and inventoryRewardsAfter or secretBaseline
+        inventoryRewardsAvailable and inventoryRewardsAfter or nil,
+        secretBaseline
     )
     if additionalRewardText then table.insert(rewardSections, additionalRewardText) end
     local itemRewardParts = {}
