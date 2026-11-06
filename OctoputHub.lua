@@ -5411,55 +5411,84 @@ local function SnipeStart()
     SnipeSetStatus("Watching " .. selectedBanner .. " | " .. currencyLabel .. " | Targets: " .. targetCount, Color3.fromRGB(100, 220, 160))
 
     task.spawn(function()
+        local launchedSummons = 0
         while SnipeRuntime.Running do
             if not player.Parent then SnipeStop("Player unavailable") break end
-
-            local currentBalance = tonumber(currencyStat.Value) or 0
-            local spent = math.max(0, startingBalance - currentBalance)
-            if currencyLimit > 0 and spent + estimatedCost > currencyLimit then
-                SnipeStop(currencyLabel .. " limit reached (spent " .. spent .. ")")
-                break
-            end
-            if currentBalance < estimatedCost then
-                SnipeStop("Not enough " .. currencyLabel .. " for next summon")
-                break
-            end
 
             local liveUnits = SnipeGetBannerUnitData(selectedBanner)
             if not liveUnits then
                 SnipeSetStatus("Waiting for selected banner data...", Color3.fromRGB(235, 180, 100))
-                task.wait(5)
+                task.wait(2)
             else
-                local ok, result = pcall(function()
-                    -- The game's BuyOne / BuyTen buttons use these same modes for all
-                    -- banners; the selected banner's Data.Banners entry determines cost.
-                    return remote:InvokeServer(selectedBanner, summonMode)
-                end)
-                if not ok then
-                    SnipeStop("Summon request failed: " .. tostring(result))
+                -- Reserve each launched request so parallel calls cannot exceed
+                -- the starting balance or the configured Currency Limit.
+                local currentBalance = tonumber(currencyStat.Value) or 0
+                local reservedCost = launchedSummons * estimatedCost
+                local safeBalance = math.min(currentBalance, math.max(0, startingBalance - reservedCost))
+                local safeLimit = currencyLimit > 0 and math.max(0, currencyLimit - reservedCost) or math.huge
+                local batchSize = math.min(5, math.floor(safeBalance / estimatedCost), math.floor(safeLimit / estimatedCost))
+
+                if batchSize <= 0 then
+                    if currencyLimit > 0 and reservedCost >= currencyLimit then
+                        SnipeStop(currencyLabel .. " limit reached (reserved " .. reservedCost .. ")")
+                    else
+                        SnipeStop("Not enough " .. currencyLabel .. " for next summon")
+                    end
                     break
                 end
 
-                SnipeSetStatus("Summon request sent | " .. currencyLabel .. " spent: " ..
-                    math.max(0, startingBalance - (tonumber(currencyStat.Value) or 0)),
+                local batch = { done = 0, failed = nil }
+                for requestIndex = 1, batchSize do
+                    launchedSummons += 1
+                    task.spawn(function()
+                        local ok, result = pcall(function()
+                            -- Match the game's BuyOne / BuyTen modes, dispatched
+                            -- as five independent requests running concurrently.
+                            return remote:InvokeServer(selectedBanner, summonMode)
+                        end)
+                        if not ok and not batch.failed then
+                            batch.failed = tostring(result)
+                        end
+                        batch.done += 1
+                    end)
+                end
+
+                SnipeSetStatus("Sending " .. batchSize .. " parallel summon request(s) | " ..
+                    currencyLabel .. " reserved: " .. (launchedSummons * estimatedCost),
                     Color3.fromRGB(100, 190, 255))
 
-                local found = false
-                for _ = 1, 20 do
-                    task.wait(0.5)
+                local foundUnitId = nil
+                while batch.done < batchSize do
+                    task.wait(0.2)
                     local liveOwned = SnipeFindOwnedUnits() or owned
                     local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
-                    if hasTarget then
-                        local _, unitsData = SnipeGetGameData()
-                        local unitName = unitsData and unitsData[unitId] and unitsData[unitId].name or unitId
-                        SnipeStop("TARGET OBTAINED: " .. tostring(unitName))
-                        found = true
-                        break
-                    end
-                    if not SnipeRuntime.Running then break end
+                    if hasTarget and not foundUnitId then foundUnitId = unitId end
+                    -- A user stop prevents another batch; in-flight calls finish safely.
                 end
-                if found then break end
-                if SnipeRuntime.Running then task.wait(1.2) end
+
+                -- Recheck collection after every request in the batch has returned.
+                local liveOwned = SnipeFindOwnedUnits() or owned
+                local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
+                if hasTarget then foundUnitId = unitId end
+
+                if foundUnitId then
+                    local _, unitsData = SnipeGetGameData()
+                    local unitName = unitsData and unitsData[foundUnitId] and unitsData[foundUnitId].name or foundUnitId
+                    SnipeStop("TARGET OBTAINED: " .. tostring(unitName))
+                    break
+                end
+                if batch.failed then
+                    SnipeStop("Summon request failed: " .. batch.failed)
+                    break
+                end
+                if not SnipeRuntime.Running then break end
+
+                local spent = math.max(
+                    math.max(0, startingBalance - (tonumber(currencyStat.Value) or 0)),
+                    launchedSummons * estimatedCost
+                )
+                SnipeSetStatus("Batch complete | " .. currencyLabel .. " spent/reserved: " .. spent,
+                    Color3.fromRGB(100, 220, 160))
             end
         end
     end)
