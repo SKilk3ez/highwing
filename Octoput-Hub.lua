@@ -56,8 +56,23 @@ MainFrame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
 MainFrame.BorderSizePixel = 0
 MainFrame.Active = true
 MainFrame.Draggable = true
-MainFrame.ZIndex = 10
+-- Keep the complete control window above the BlackScreen Live Match panel.
+-- Use Global ZIndex and lift every child together so nested controls stay visible.
+MainFrame.ZIndex = 300
 MainFrame.Parent = ScreenGui
+
+local function LiftHubGuiObject(guiObject)
+    if guiObject and guiObject:IsA("GuiObject") and guiObject ~= MainFrame then
+        guiObject.ZIndex = math.max(guiObject.ZIndex, 1) + 300
+    end
+end
+
+for _, descendant in ipairs(MainFrame:GetDescendants()) do
+    LiftHubGuiObject(descendant)
+end
+MainFrame.DescendantAdded:Connect(function(descendant)
+    LiftHubGuiObject(descendant)
+end)
 
 HubScale = Instance.new("UIScale")
 HubScale.Name = "HubScale"
