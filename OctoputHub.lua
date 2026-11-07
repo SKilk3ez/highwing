@@ -4849,6 +4849,7 @@ function GetOwnedPortals()
     local portals, seen = {}, {}
     if not profile then return portals, "Inventory session not found (executor getgc support required)." end
     local itemData = LoadGameDataModule("Items")
+    local levelsData = LoadGameDataModule("Levels")
     for _, owned in pairs(profile.unique_items) do
         if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
             local def = itemData and itemData[owned.item_id]
@@ -4858,40 +4859,45 @@ function GetOwnedPortals()
                 local tier = tonumber(portalData and portalData.portal_depth) or 0
                 local levelId = (type(portalData) == "table" and portalData.level_id)
                     or (type(def.usage) == "table" and def.usage.level_id)
-                local levelData = nil
-                if type(def.static_portal_copy_to_level_params) == "table" then
-                    levelData = def.static_portal_copy_to_level_params
-                elseif type(levelId) == "string" then
-                    local levels = LoadGameDataModule("Levels")
-                    levelData = type(levels) == "table" and levels[levelId] or nil
-                end
+                -- The game first resolves Levels[levelId], then builds static portal
+                -- params from that level. Do not mistake static_portal_copy_to_level_params
+                -- (which contains portal setup fields) for the actual Level definition.
+                local levelData = type(levelId) == "string"
+                    and type(levelsData) == "table" and levelsData[levelId] or nil
                 local increasedDamageElements = {}
                 local function addIncreasedDamageEntries(entries)
                     if type(entries) ~= "table" then return end
-                    for _, modifier in pairs(entries) do
-                        -- game.lua renders _weak_against with amplification:
-                        -- this is the modifier that makes the selected damage type hit harder.
-                        local amplification = type(modifier) == "table"
-                            and tonumber(modifier.amplification) or nil
-                        if type(modifier) == "table"
-                            and type(modifier.damage_type) == "string"
-                            and modifier.damage_type ~= ""
-                            and amplification ~= nil
-                            and amplification > 0 then
-                            increasedDamageElements[modifier.damage_type] = true
+                    local function addModifier(modifier)
+                        if type(modifier) ~= "table" then return end
+                        local damageType = modifier.damage_type
+                        local amplification = tonumber(modifier.amplification)
+                        if type(damageType) == "string" and damageType ~= ""
+                            and amplification ~= nil and amplification > 0 then
+                            increasedDamageElements[damageType] = true
+                        end
+                    end
+                    -- Support both the normal array form and a single modifier record.
+                    if entries.damage_type ~= nil then
+                        addModifier(entries)
+                    else
+                        for _, modifier in pairs(entries) do
+                            addModifier(modifier)
                         end
                     end
                 end
-                -- Match the game's modifier application order:
-                -- portalData._weak_against overrides the level's _weak_against when present.
-                -- _strong_against is deliberately excluded because it is resistance (damage reduced).
-                local increasedDamageEntries = nil
-                if type(portalData) == "table" and type(portalData._weak_against) == "table" then
-                    increasedDamageEntries = portalData._weak_against
-                elseif type(levelData) == "table" then
-                    increasedDamageEntries = levelData._weak_against
+                -- The visible "Aqua Weakness x2.6" style modifier is _weak_against
+                -- with a positive amplification value. Read every real source that the
+                -- portal preview can be built from; an empty portalData table must not
+                -- hide a modifier present in the resolved Level data.
+                if type(uniqueData) == "table" then
+                    addIncreasedDamageEntries(uniqueData._weak_against)
                 end
-                addIncreasedDamageEntries(increasedDamageEntries)
+                if type(portalData) == "table" then
+                    addIncreasedDamageEntries(portalData._weak_against)
+                end
+                if type(levelData) == "table" then
+                    addIncreasedDamageEntries(levelData._weak_against)
+                end
                 local key = owned.item_id
                 if not seen[key] then
                     seen[key] = { id = key, name = tostring(def.name or key), count = 0, entries = {} }
