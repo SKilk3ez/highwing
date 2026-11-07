@@ -4202,12 +4202,50 @@ HybridInfo = CreateHint(AutoPlayPage, "No hybrid units in the equipped squad.", 
 CreateSection(AutoPlayPage, "Unit Configuration", 27)
 CreateHint(AutoPlayPage, "Leave a field empty to keep the current Auto Play behavior for that unit.", 28, 28)
 
+-- Manual refresh for transient/missing equipped-unit metadata.
+UnitRefreshBar = Instance.new("Frame")
+UnitRefreshBar.Name = "UnitRefreshBar"
+UnitRefreshBar.Size = UDim2.new(1, -10, 0, 30)
+UnitRefreshBar.BackgroundTransparency = 1
+UnitRefreshBar.LayoutOrder = 29
+UnitRefreshBar.ZIndex = 13
+UnitRefreshBar.Parent = AutoPlayPage
+
+UnitRefreshButton = Instance.new("TextButton")
+UnitRefreshButton.Name = "RefreshUnitsButton"
+UnitRefreshButton.Size = UDim2.new(0, 112, 1, 0)
+UnitRefreshButton.Position = UDim2.new(0, 0, 0, 0)
+UnitRefreshButton.BackgroundColor3 = Color3.fromRGB(42, 75, 115)
+UnitRefreshButton.BorderSizePixel = 0
+UnitRefreshButton.Text = "↻ Refresh Units"
+UnitRefreshButton.TextColor3 = Color3.fromRGB(240, 245, 255)
+UnitRefreshButton.TextSize = 12
+UnitRefreshButton.Font = Enum.Font.GothamBold
+UnitRefreshButton.ZIndex = 14
+UnitRefreshButton.Parent = UnitRefreshBar
+local UnitRefreshCorner = Instance.new("UICorner")
+UnitRefreshCorner.CornerRadius = UDim.new(0, 5)
+UnitRefreshCorner.Parent = UnitRefreshButton
+
+UnitRefreshStatus = Instance.new("TextLabel")
+UnitRefreshStatus.Name = "RefreshStatus"
+UnitRefreshStatus.Size = UDim2.new(1, -122, 1, 0)
+UnitRefreshStatus.Position = UDim2.new(0, 122, 0, 0)
+UnitRefreshStatus.BackgroundTransparency = 1
+UnitRefreshStatus.Text = "Auto refresh enabled"
+UnitRefreshStatus.TextColor3 = Color3.fromRGB(145, 155, 175)
+UnitRefreshStatus.TextSize = 11
+UnitRefreshStatus.Font = Enum.Font.Gotham
+UnitRefreshStatus.TextXAlignment = Enum.TextXAlignment.Left
+UnitRefreshStatus.ZIndex = 14
+UnitRefreshStatus.Parent = UnitRefreshBar
+
 UnitConfigHolder = Instance.new("Frame")
 UnitConfigHolder.Name = "UnitConfigHolder"
 UnitConfigHolder.Size = UDim2.new(1, -10, 0, 0)
 UnitConfigHolder.AutomaticSize = Enum.AutomaticSize.Y
 UnitConfigHolder.BackgroundTransparency = 1
-UnitConfigHolder.LayoutOrder = 29
+UnitConfigHolder.LayoutOrder = 30
 UnitConfigHolder.ZIndex = 12
 UnitConfigHolder.Parent = AutoPlayPage
 UnitConfigList = Instance.new("UIListLayout")
@@ -4293,12 +4331,16 @@ function RefreshUnitConfigUI()
     local hybridNames = {}
     local byId = {}
     local ordered = {}
+    local missingMetadata = 0
     for _, info in ipairs(equipped) do
         if info.unitId and not byId[info.unitId] then
             byId[info.unitId] = info
             table.insert(ordered, info)
             if info.hybrid then
                 table.insert(hybridNames, info.name)
+            end
+            if info.spawnCap == nil or info.maxUpgrade == nil then
+                missingMetadata += 1
             end
         end
     end
@@ -4320,7 +4362,7 @@ function RefreshUnitConfigUI()
     end
     local key = table.concat(keyParts, "|")
     if key == lastUnitKey then
-        return
+        return #ordered, missingMetadata
     end
     lastUnitKey = key
 
@@ -4341,7 +4383,7 @@ function RefreshUnitConfigUI()
         Empty.TextXAlignment = Enum.TextXAlignment.Left
         Empty.ZIndex = 13
         Empty.Parent = UnitConfigHolder
-        return
+        return 0, 0
     end
 
     for index, info in ipairs(ordered) do
@@ -4447,7 +4489,56 @@ function RefreshUnitConfigUI()
             Header.Text = (unitExpanded[info.unitId] and "▼ " or "► ") .. info.name .. "   " .. kindText .. "  |  " .. capText .. "  |  " .. upText
         end)
     end
+    return #ordered, missingMetadata
 end
+
+unitRefreshBusy = false
+UnitRefreshButton.Activated:Connect(function()
+    if unitRefreshBusy then return end
+    unitRefreshBusy = true
+    UnitRefreshButton.Active = false
+    UnitRefreshButton.AutoButtonColor = false
+    UnitRefreshButton.Text = "Refreshing..."
+    UnitRefreshStatus.TextColor3 = Color3.fromRGB(255, 205, 115)
+    UnitRefreshStatus.Text = "Reloading equipped slots and unit data..."
+
+    task.spawn(function()
+        local count, missing = 0, 0
+        local refreshError = nil
+        for attempt = 1, 4 do
+            lastUnitKey = nil
+            local ok, a, b = pcall(RefreshUnitConfigUI)
+            if ok then
+                count = tonumber(a) or 0
+                missing = tonumber(b) or 0
+                if count > 0 and missing == 0 then break end
+            else
+                refreshError = tostring(a)
+            end
+            if attempt < 4 then task.wait(0.45) end
+        end
+
+        if refreshError and count == 0 then
+            UnitRefreshStatus.Text = "Refresh failed; check executor console"
+            UnitRefreshStatus.TextColor3 = Color3.fromRGB(255, 115, 115)
+            warn("[OctoputHub] Manual unit refresh failed: " .. refreshError)
+        elseif count == 0 then
+            UnitRefreshStatus.Text = "No equipped units detected; try again"
+            UnitRefreshStatus.TextColor3 = Color3.fromRGB(255, 170, 110)
+        elseif missing > 0 then
+            UnitRefreshStatus.Text = string.format("Loaded %d units; %d still missing data (?)", count, missing)
+            UnitRefreshStatus.TextColor3 = Color3.fromRGB(255, 190, 110)
+        else
+            UnitRefreshStatus.Text = string.format("Loaded %d equipped units successfully", count)
+            UnitRefreshStatus.TextColor3 = Color3.fromRGB(115, 225, 165)
+        end
+
+        UnitRefreshButton.Text = "↻ Refresh Units"
+        UnitRefreshButton.Active = true
+        UnitRefreshButton.AutoButtonColor = true
+        unitRefreshBusy = false
+    end)
+end)
 
 -- Portal page: inventory-based portal types + game-defined tier selection.
 PortalSelectionContainer = Instance.new("Frame")
@@ -4845,28 +4936,54 @@ task.spawn(function()
                     portalLastRefresh = now
                 end
                 local portals = GetOwnedPortals()
-                local candidates = {}
+                local preferredCandidates = {}
+                local fallbackCandidates = {}
                 local hasElementFilter = next(State.SelectedPortalModifiers) ~= nil
                 for _, portal in ipairs(portals) do
                     if State.SelectedPortalTypes[portal.id] then
                         for _, entry in ipairs(portal.entries) do
-                            local elementMatch = not hasElementFilter
-                            if hasElementFilter and type(entry.elements) == "table" then
-                                for elementId in pairs(State.SelectedPortalModifiers) do
-                                    if entry.elements[elementId] then
-                                        elementMatch = true
-                                        break
+                            if State.SelectedPortalTiers[tostring(entry.tier)]
+                                and not portalOpenedUUIDs[entry.uuid] then
+                                local elementMatch = false
+                                if hasElementFilter and type(entry.elements) == "table" then
+                                    -- OR matching: one selected element is enough.
+                                    -- Other unselected modifiers on the same portal do not disqualify it.
+                                    for elementId in pairs(State.SelectedPortalModifiers) do
+                                        if entry.elements[elementId] then
+                                            elementMatch = true
+                                            break
+                                        end
                                     end
                                 end
-                            end
-                            if elementMatch and State.SelectedPortalTiers[tostring(entry.tier)]
-                                and not portalOpenedUUIDs[entry.uuid] then
-                                table.insert(candidates, { uuid = entry.uuid, tier = entry.tier, name = portal.name })
+                                local candidate = {
+                                    uuid = entry.uuid,
+                                    tier = entry.tier,
+                                    name = portal.name,
+                                    elementMatch = elementMatch,
+                                }
+                                if not hasElementFilter or elementMatch then
+                                    table.insert(preferredCandidates, candidate)
+                                else
+                                    -- Keep non-matching portals as fallback so Auto Open
+                                    -- does not stall when no selected-element portal is available.
+                                    table.insert(fallbackCandidates, candidate)
+                                end
                             end
                         end
                     end
                 end
-                table.sort(candidates, function(a,b) return a.tier > b.tier end)
+                local function sortPortalCandidates(list)
+                    table.sort(list, function(a, b)
+                        if a.tier ~= b.tier then return a.tier > b.tier end
+                        return a.name < b.name
+                    end)
+                end
+                sortPortalCandidates(preferredCandidates)
+                sortPortalCandidates(fallbackCandidates)
+                local candidates = preferredCandidates
+                if #candidates == 0 then
+                    candidates = fallbackCandidates
+                end
                 local opened = false
                 for _, entry in ipairs(candidates) do
                     if not State.AutoOpenPortal then break end
