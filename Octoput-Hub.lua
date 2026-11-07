@@ -4866,35 +4866,28 @@ function GetOwnedPortals()
                     levelData = type(levels) == "table" and levels[levelId] or nil
                 end
                 local elements = {}
-                local function addElement(value)
-                    if type(value) == "string" and value ~= "" then
-                        elements[value] = true
-                    end
-                end
                 local function addElementEntries(entries)
                     if type(entries) ~= "table" then return end
-                    for key, entry in pairs(entries) do
-                        if type(entry) == "table" then
-                            addElement(entry.damage_type)
-                        elseif type(entry) == "string" then
-                            addElement(entry)
-                        elseif entry == true and type(key) == "string" then
-                            -- Also support modifier sets stored as { [damage_type] = true }.
-                            addElement(key)
+                    for _, modifier in pairs(entries) do
+                        -- game.lua modifier records are { damage_type = "...", resistance/amplification = number }.
+                        if type(modifier) == "table"
+                            and type(modifier.damage_type) == "string"
+                            and modifier.damage_type ~= "" then
+                            elements[modifier.damage_type] = true
                         end
                     end
                 end
-                -- Portal instances carry their rolled modifiers in _unique_portal_data.
-                -- Read those first; level definitions are a fallback for fixed portals.
-                local modifierSources = { portalData, levelData }
-                for _, source in ipairs(modifierSources) do
-                    if type(source) == "table" then
-                        addElementEntries(source._strong_against)
-                        addElementEntries(source._weak_against)
-                        addElementEntries(source._daily_challenge_weak_against)
-                        addElementEntries(source._daily_challenge_strong_against)
-                        addElementEntries(source._recommended_damage_types)
-                    end
+                -- Only actual combat modifiers count. Do not treat daily challenge,
+                -- recommendations, or other UI hints as a portal's secondary damage.
+                -- Unique portal rolls are stored on the owned inventory item's portalData.
+                if type(portalData) == "table" then
+                    addElementEntries(portalData._strong_against)
+                    addElementEntries(portalData._weak_against)
+                end
+                -- Fixed/static portal definitions can carry real modifiers on their level data.
+                if type(levelData) == "table" then
+                    addElementEntries(levelData._strong_against)
+                    addElementEntries(levelData._weak_against)
                 end
                 local key = owned.item_id
                 if not seen[key] then
@@ -5015,23 +5008,23 @@ task.spawn(function()
                                     end
                                 end
 
-                                table.insert(candidates, {
-                                    uuid = entry.uuid,
-                                    tier = entry.tier,
-                                    name = portal.name,
-                                    elementMatch = elementMatch,
-                                })
+                                -- A selected secondary damage is a hard requirement.
+                                -- Never open an item with a different modifier or no modifier.
+                                if not hasElementFilter or elementMatch then
+                                    table.insert(candidates, {
+                                        uuid = entry.uuid,
+                                        tier = entry.tier,
+                                        name = portal.name,
+                                        elementMatch = elementMatch,
+                                    })
+                                end
                             end
                         end
                     end
                 end
 
-                -- Prefer portals with the selected secondary modifier when available.
-                -- If none have it, still open a selected inventory portal; choose highest Tier.
+                -- After all selected filters match, choose the highest Tier first.
                 table.sort(candidates, function(a, b)
-                    if hasElementFilter and a.elementMatch ~= b.elementMatch then
-                        return a.elementMatch
-                    end
                     if a.tier ~= b.tier then return a.tier > b.tier end
                     return a.name < b.name
                 end)
@@ -5052,7 +5045,17 @@ task.spawn(function()
                     if #portals == 0 then
                         PortalStatus.Text = "No owned portals found."
                     elseif #candidates == 0 then
-                        PortalStatus.Text = "No owned portal matches the selected portal type and tier."
+                        if hasElementFilter then
+                            local selectedLabels = {}
+                            for _, def in ipairs(PORTAL_ELEMENT_FILTERS) do
+                                if State.SelectedPortalModifiers[def.id] then
+                                    table.insert(selectedLabels, def.label)
+                                end
+                            end
+                            PortalStatus.Text = "Waiting for portal with secondary damage: " .. table.concat(selectedLabels, " / ")
+                        else
+                            PortalStatus.Text = "No owned portal matches the selected portal type and tier."
+                        end
                     end
                 end
             end)
