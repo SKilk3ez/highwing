@@ -2903,47 +2903,82 @@ end
 -- normal_items, unique inventory items (Portals/Charms/materials/etc.), and units.
 function ReadInventoryRewardSnapshot()
     local snapshot = {}
-    if type(getgc) ~= "function" then return snapshot, false end
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return snapshot, false end
-
     local itemData = LoadGameDataModule("Items") or {}
     local unitData = LoadGameDataModule("Units") or {}
     local inventoryProfile, collectionProfile = nil, nil
 
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local session = object.session
-            local inventory = object.inventory or (type(session) == "table" and session.inventory)
-            local profile = type(inventory) == "table" and inventory.inventory_profile_data or object.inventory_profile_data
-            if type(profile) == "table" and type(profile.unique_items) == "table" then
-                inventoryProfile = profile
-            end
-            local directCollection = object.collection_profile_data
-            if type(directCollection) == "table" and type(directCollection.owned_units) == "table" then
-                collectionProfile = directCollection
-            end
-            local collection = object.collection or (type(session) == "table" and session.collection)
-            if type(collection) == "table" and type(collection.collection_profile_data) == "table"
-                and type(collection.collection_profile_data.owned_units) == "table" then
-                collectionProfile = collection.collection_profile_data
+    -- Always bind the snapshot to this client player's live GUIService session.
+    -- Never take the last arbitrary inventory_profile_data found in getgc(): that
+    -- can belong to another player/session and makes before/after reward diffs invalid.
+    local localSession = type(FindLocalGameSession) == "function" and FindLocalGameSession() or nil
+    if type(localSession) == "table" then
+        local inventory = localSession.inventory
+        local profile = type(inventory) == "table" and inventory.inventory_profile_data or nil
+        if type(profile) == "table" and type(profile.unique_items) == "table" then
+            inventoryProfile = profile
+        end
+
+        local collection = localSession.collection
+        local ownedProfile = type(collection) == "table" and collection.collection_profile_data or nil
+        if type(ownedProfile) == "table" and type(ownedProfile.owned_units) == "table" then
+            collectionProfile = ownedProfile
+        end
+    end
+
+    -- Executor fallback: only accept a session explicitly owned by LocalPlayer.
+    if (not inventoryProfile or not collectionProfile) and type(getgc) == "function" then
+        local ok, objects = pcall(getgc, true)
+        if ok and type(objects) == "table" then
+            for _, object in ipairs(objects) do
+                if type(object) == "table" then
+                    local candidates = { object, object.session }
+                    for _, candidate in ipairs(candidates) do
+                        if type(candidate) == "table" and candidate.player == player then
+                            if not inventoryProfile then
+                                local inventory = candidate.inventory
+                                local profile = type(inventory) == "table" and inventory.inventory_profile_data or nil
+                                if type(profile) == "table" and type(profile.unique_items) == "table" then
+                                    inventoryProfile = profile
+                                end
+                            end
+                            if not collectionProfile then
+                                local collection = candidate.collection
+                                local ownedProfile = type(collection) == "table" and collection.collection_profile_data or nil
+                                if type(ownedProfile) == "table" and type(ownedProfile.owned_units) == "table" then
+                                    collectionProfile = ownedProfile
+                                end
+                            end
+                        end
+                    end
+                end
             end
         end
     end
+
+    local portalNames = {
+        portal_item__skypiea = "Sky Portal",
+        portal_item__enel = "Sky God's Portal",
+    }
+    local portalRarities = {
+        portal_item__skypiea = "Mythic",
+        portal_item__enel = "Secret",
+    }
 
     if inventoryProfile then
         -- Stackable drops are stored as item_id -> quantity.
         for itemId, amount in pairs(inventoryProfile.normal_items or {}) do
             local count = tonumber(amount) or 0
             if count > 0 then
-                local def = itemData[itemId] or {}
-                snapshot["normal:" .. tostring(itemId)] = {
-                    category = tostring(def.item_group or "Item"),
-                    name = tostring(def.name or itemId),
-                    rarity = tostring(def.rarity or "Unknown"),
+                local id = tostring(itemId)
+                local def = itemData[id] or {}
+                snapshot["normal:" .. id] = {
+                    itemId = id,
+                    category = tostring(def.item_group or (portalNames[id] and "Portals") or "Item"),
+                    name = tostring(portalNames[id] or def.name or id),
+                    rarity = tostring(def.rarity or portalRarities[id] or "Unknown"),
                     tier = tonumber(def.tier),
                     amount = count,
-                    secret = tostring(def.rarity or ""):lower() == "secret",
+                    secret = tostring(def.rarity or portalRarities[id] or ""):lower() == "secret",
                 }
             end
         end
@@ -2951,14 +2986,18 @@ function ReadInventoryRewardSnapshot()
         -- Unique drops have their own UUID; use it to avoid confusing duplicates.
         for _, owned in pairs(inventoryProfile.unique_items or {}) do
             if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
-                local def = itemData[owned.item_id] or {}
+                local id = tostring(owned.item_id)
+                local def = itemData[id] or {}
+                local rarity = tostring(def.rarity or portalRarities[id] or "Unknown")
                 snapshot["item:" .. owned.uuid] = {
-                    category = tostring(def.item_group or "Item"),
-                    name = tostring(def.name or owned.item_id),
-                    rarity = tostring(def.rarity or "Unknown"),
+                    uuid = owned.uuid,
+                    itemId = id,
+                    category = tostring(def.item_group or (portalNames[id] and "Portals") or "Item"),
+                    name = tostring(portalNames[id] or def.name or id),
+                    rarity = rarity,
                     tier = tonumber(def.tier),
                     amount = 1,
-                    secret = tostring(def.rarity or ""):lower() == "secret",
+                    secret = rarity:lower() == "secret",
                 }
             end
         end
@@ -2969,6 +3008,7 @@ function ReadInventoryRewardSnapshot()
             if type(owned) == "table" and type(owned.unit_id) == "string" then
                 local def = unitData[owned.unit_id] or {}
                 snapshot["unit:" .. tostring(uuid)] = {
+                    unitId = owned.unit_id,
                     category = "Unit",
                     name = tostring(def.name or owned.unit_id),
                     rarity = tostring(def.rarity or "Unknown"),
@@ -2978,7 +3018,9 @@ function ReadInventoryRewardSnapshot()
             end
         end
     end
-    return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
+    -- Inventory availability must specifically mean the inventory profile was read.
+    -- A collection-only session is not sufficient to diff portal/item rewards.
+    return snapshot, inventoryProfile ~= nil
 end
 
 function BuildInventoryRewardLines(before, after)
@@ -3104,6 +3146,13 @@ webhookSecretRewardBaselineAvailable = false
 function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
+    -- Inventory profile data can initialize a moment after the match starts.
+    -- Retry briefly so the end-of-match diff has a real player-owned baseline.
+    for attempt = 1, 6 do
+        if webhookSecretRewardBaselineAvailable then break end
+        task.wait(0.35)
+        webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
+    end
     return table.clone(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
 end
 
@@ -3593,31 +3642,10 @@ function ApplyBlackScreen(enabled)
 end
 
 function SuppressErrorNotifications()
-    local msg = playerGui:FindFirstChild("MessageGui")
-    if msg then
-        for _, folderName in ipairs({ "messages", "messages_quick", "top_messages" }) do
-            local folder = msg:FindFirstChild(folderName)
-            if folder then
-                for _, child in ipairs(folder:GetChildren()) do
-                    if child:IsA("GuiObject") and child.Name ~= "Configuration" and child.Name ~= "message_templates" then
-                        child:Destroy()
-                    end
-                end
-            end
-        end
-    end
-
-    local notifWindows = playerGui:FindFirstChild("NotificationWindows")
-    if notifWindows then
-        local list = notifWindows:FindFirstChild("List")
-        if list then
-            for _, child in ipairs(list:GetChildren()) do
-                if child:IsA("GuiObject") and child.Name ~= "Notifications" then
-                    child:Destroy()
-                end
-            end
-        end
-    end
+    -- Do not clear MessageGui or NotificationWindows.List.
+    -- Anime Adventures uses these containers for legitimate item-drop messages;
+    -- deleting every child here hid Sky Portal drops as soon as they appeared.
+    return
 end
 
 tabs = {}
@@ -4841,6 +4869,80 @@ function FindLocalInventoryProfile()
     end
     return nil
 end
+
+-- Real-time detection for Summer Hunt Sky Portal drops.
+-- The webhook baseline is captured at match start; this worker compares the
+-- current LocalPlayer inventory against it and reports either Sky Portal item ID.
+local skyPortalMonitorKnown = nil
+local skyPortalMonitorWasInMatch = false
+
+function NotifySkyPortalDrop(reward)
+    local itemId = tostring(reward and reward.itemId or "")
+    local rewardName = itemId == "portal_item__enel" and "Sky God's Portal"
+        or (itemId == "portal_item__skypiea" and "Sky Portal" or tostring(reward and reward.name or "Sky Portal"))
+    local title = "☁️ SKY PORTAL OBTAINED!"
+    local message = rewardName .. " has been added to your inventory."
+
+    print("[Octoput Hub] " .. title .. " " .. message)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = title,
+            Text = message,
+            Duration = 10,
+        })
+    end)
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local ok, err = pcall(function()
+            local dataFolder = workspace:FindFirstChild("_DATA")
+            local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
+            local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
+            local inMatch = workspace:FindFirstChild("_UNITS") ~= nil
+                and not IsInLobby()
+                and not (gameFinished and gameFinished.Value == true)
+                and (not gameStarted or gameStarted.Value == true)
+
+            if not inMatch then
+                skyPortalMonitorKnown = nil
+                skyPortalMonitorWasInMatch = false
+                return
+            end
+
+            local current, available = ReadInventoryRewardSnapshot()
+            if not available then return end
+
+            if not skyPortalMonitorWasInMatch then
+                skyPortalMonitorWasInMatch = true
+                if webhookGameWasActive and webhookSecretRewardBaselineAvailable
+                    and type(webhookSecretRewardBefore) == "table" then
+                    skyPortalMonitorKnown = table.clone(webhookSecretRewardBefore)
+                else
+                    -- If no reliable start baseline exists, establish one now rather
+                    -- than falsely announcing portals already owned before monitoring.
+                    skyPortalMonitorKnown = table.clone(current)
+                    return
+                end
+            end
+
+            local known = skyPortalMonitorKnown or {}
+            for key, reward in pairs(current) do
+                local itemId = tostring(reward and reward.itemId or "")
+                if key:sub(1, 5) == "item:"
+                    and (itemId == "portal_item__skypiea" or itemId == "portal_item__enel")
+                    and not known[key] then
+                    NotifySkyPortalDrop(reward)
+                end
+            end
+            skyPortalMonitorKnown = table.clone(current)
+        end)
+        if not ok then
+            warn("[Octoput Hub] Sky Portal monitor error: " .. tostring(err))
+        end
+    end
+end)
 
 -- Shared damage-type normalization for portal data extraction and matching.
 -- Canonical IDs are the keys used by DamageTypes.TYPES in game.lua.
