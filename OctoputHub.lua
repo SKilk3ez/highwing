@@ -606,7 +606,6 @@ function CopyStateForSave()
         AutoNext = State.AutoNext,
         AutoLeave = State.AutoLeave,
         AntiAFK = State.AntiAFK,
-        AutoOpenPortal = State.AutoOpenPortal,
         AutoNextPortal = State.AutoNextPortal,
         SelectedPortalTypes = State.SelectedPortalTypes,
         SelectedPortalTiers = State.SelectedPortalTiers,
@@ -667,9 +666,6 @@ function ApplySavedTable(saved)
     end
     if type(saved.DebuffAvoid) == "table" then
         State.DebuffAvoid = SanitizeIdList(saved.DebuffAvoid, DEBUFF_IDS)
-    end
-    if type(saved.AutoOpenPortal) == "boolean" then
-        State.AutoOpenPortal = saved.AutoOpenPortal
     end
     if type(saved.AutoNextPortal) == "boolean" then
         State.AutoNextPortal = saved.AutoNextPortal
@@ -767,6 +763,8 @@ function LoadConfig()
 end
 
 LoadConfig()
+-- Auto Open Portal is intentionally session-only and always starts disabled.
+State.AutoOpenPortal = false
 
 -- Keep the hub inside the available screen area at large UI scales.
 -- The user's selected scale remains saved; only the effective display scale is clamped.
@@ -4844,6 +4842,24 @@ function FindLocalInventoryProfile()
     return nil
 end
 
+-- Shared damage-type normalization for portal data extraction and matching.
+-- Canonical IDs are the keys used by DamageTypes.TYPES in game.lua.
+function NormalizePortalDamageType(value)
+    if type(value) ~= "string" then return nil end
+    local key = string.lower(value):gsub("[%s%-]", "_")
+    key = key:gsub("_damage$", "")
+    local aliases = {
+        fire = "fire_damage", fire_damage = "fire_damage",
+        water = "water_damage", aqua = "water_damage", water_damage = "water_damage",
+        lightning = "lightning_damage", storm = "lightning_damage", lightning_damage = "lightning_damage",
+        air = "air_damage", air_damage = "air_damage",
+        ice = "ice_damage", rose = "ice_damage", ice_damage = "ice_damage",
+        light = "light_damage", light_damage = "light_damage",
+        dark = "dark_damage", dark_damage = "dark_damage",
+    }
+    return aliases[key]
+end
+
 function GetOwnedPortals()
     local profile = FindLocalInventoryProfile()
     local portals, seen = {}, {}
@@ -4865,26 +4881,11 @@ function GetOwnedPortals()
                 local levelData = type(levelId) == "string"
                     and type(levelsData) == "table" and levelsData[levelId] or nil
                 local increasedDamageElements = {}
-                local function normalizeDamageType(value)
-                    if type(value) ~= "string" then return nil end
-                    local key = string.lower(value):gsub("[%s%-]", "_")
-                    key = key:gsub("_damage$", "")
-                    local aliases = {
-                        fire = "fire_damage", fire_damage = "fire_damage",
-                        water = "water_damage", aqua = "water_damage", water_damage = "water_damage",
-                        lightning = "lightning_damage", storm = "lightning_damage", lightning_damage = "lightning_damage",
-                        air = "air_damage", air_damage = "air_damage",
-                        ice = "ice_damage", rose = "ice_damage", ice_damage = "ice_damage",
-                        light = "light_damage", light_damage = "light_damage",
-                        dark = "dark_damage", dark_damage = "dark_damage",
-                    }
-                    return aliases[key]
-                end
                 local function addIncreasedDamageEntries(entries)
                     if type(entries) ~= "table" then return end
                     local function addModifier(modifier)
                         if type(modifier) ~= "table" then return end
-                        local damageType = normalizeDamageType(modifier.damage_type)
+                        local damageType = NormalizePortalDamageType(modifier.damage_type)
                         local amplification = tonumber(modifier.amplification)
                         if damageType and amplification ~= nil and amplification > 0 then
                             increasedDamageElements[damageType] = true
@@ -5036,7 +5037,7 @@ task.spawn(function()
                                     -- Normalize selected IDs too, so Aqua/water aliases
                                     -- resolve to the same game damage type.
                                     for elementId, isSelected in pairs(State.SelectedPortalModifiers) do
-                                        local normalizedId = normalizeDamageType(elementId)
+                                        local normalizedId = NormalizePortalDamageType(elementId)
                                         if isSelected and normalizedId and entry.increasedDamageElements[normalizedId] then
                                             elementMatch = true
                                             break
