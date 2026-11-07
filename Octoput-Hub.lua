@@ -4994,8 +4994,7 @@ task.spawn(function()
                     portalLastRefresh = now
                 end
                 local portals = GetOwnedPortals()
-                local preferredCandidates = {}
-                local fallbackCandidates = {}
+                local candidates = {}
                 local hasElementFilter = next(State.SelectedPortalModifiers) ~= nil
                 for _, portal in ipairs(portals) do
                     if State.SelectedPortalTypes[portal.id] then
@@ -5004,8 +5003,7 @@ task.spawn(function()
                                 and not portalOpenedUUIDs[entry.uuid] then
                                 local elementMatch = false
                                 if hasElementFilter and type(entry.elements) == "table" then
-                                    -- OR matching: one selected element is enough.
-                                    -- Other unselected modifiers on the same portal do not disqualify it.
+                                    -- Element is the primary filter: any selected element is enough (OR).
                                     for elementId in pairs(State.SelectedPortalModifiers) do
                                         if entry.elements[elementId] then
                                             elementMatch = true
@@ -5013,35 +5011,27 @@ task.spawn(function()
                                         end
                                     end
                                 end
-                                local candidate = {
-                                    uuid = entry.uuid,
-                                    tier = entry.tier,
-                                    name = portal.name,
-                                    elementMatch = elementMatch,
-                                }
+
+                                -- When an element filter is active, never fall back to a
+                                -- portal with a different element. Tier is considered only
+                                -- after the element requirement has been satisfied.
                                 if not hasElementFilter or elementMatch then
-                                    table.insert(preferredCandidates, candidate)
-                                else
-                                    -- Keep non-matching portals as fallback so Auto Open
-                                    -- does not stall when no selected-element portal is available.
-                                    table.insert(fallbackCandidates, candidate)
+                                    table.insert(candidates, {
+                                        uuid = entry.uuid,
+                                        tier = entry.tier,
+                                        name = portal.name,
+                                    })
                                 end
                             end
                         end
                     end
                 end
-                local function sortPortalCandidates(list)
-                    table.sort(list, function(a, b)
-                        if a.tier ~= b.tier then return a.tier > b.tier end
-                        return a.name < b.name
-                    end)
-                end
-                sortPortalCandidates(preferredCandidates)
-                sortPortalCandidates(fallbackCandidates)
-                local candidates = preferredCandidates
-                if #candidates == 0 then
-                    candidates = fallbackCandidates
-                end
+
+                -- Among element-matching portals, open the highest selected tier first.
+                table.sort(candidates, function(a, b)
+                    if a.tier ~= b.tier then return a.tier > b.tier end
+                    return a.name < b.name
+                end)
                 local opened = false
                 for _, entry in ipairs(candidates) do
                     if not State.AutoOpenPortal then break end
@@ -5055,7 +5045,19 @@ task.spawn(function()
                         break
                     end
                 end
-                if not opened and #portals == 0 then PortalStatus.Text = "No owned portals found." end
+                if not opened then
+                    if #portals == 0 then
+                        PortalStatus.Text = "No owned portals found."
+                    elseif hasElementFilter and #candidates == 0 then
+                        local selectedLabels = {}
+                        for _, def in ipairs(PORTAL_ELEMENT_FILTERS) do
+                            if State.SelectedPortalModifiers[def.id] then
+                                table.insert(selectedLabels, def.label)
+                            end
+                        end
+                        PortalStatus.Text = "Waiting for " .. table.concat(selectedLabels, " / ") .. " portal..."
+                    end
+                end
             end)
             if not ok then warn("[Octoput Hub Auto Portal] " .. tostring(err)) end
             portalOpenBusy = false
