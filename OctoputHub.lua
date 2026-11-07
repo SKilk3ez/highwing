@@ -959,30 +959,82 @@ function SyncReplicatedGameData()
     end)
 end
 
-function GetUnitsData()
+function GetUnitsData(forceRefresh)
     if not IsInLobby() then
         SyncReplicatedGameData()
     end
-    if UnitsDataCache and next(UnitsDataCache) ~= nil then
-        return UnitsDataCache
+
+    -- game.lua's ReplicatedStorage.src.Data.Units module is the canonical
+    -- aggregate: it walks every descendant ModuleScript and merges every unit
+    -- definition. Prefer it over a possibly partial Loader/cache snapshot.
+    local merged = {}
+    local hasData = false
+    local okCanonical, canonicalData = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local dataFolder = src and src:FindFirstChild("Data")
+        local unitsModule = dataFolder and dataFolder:FindFirstChild("Units")
+        if not unitsModule then error("ReplicatedStorage.src.Data.Units not found") end
+        return require(unitsModule)
+    end)
+    if okCanonical and type(canonicalData) == "table" then
+        for id, definition in pairs(canonicalData) do
+            if type(definition) == "table" then
+                merged[id] = definition
+                hasData = true
+            end
+        end
     end
+
+    -- Merge Loader data as a supplement, never replacing a complete canonical
+    -- definition with a partial/stale entry.
     local okLoader, loaderData = pcall(function()
-        local Loader = require(ReplicatedStorage.src.Loader)
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then error("Loader not found") end
+        local Loader = require(loaderModule)
         return Loader.load_data(game, "Units")
     end)
-    if okLoader and type(loaderData) == "table" and next(loaderData) ~= nil then
-        UnitsDataCache = loaderData
+    if okLoader and type(loaderData) == "table" then
+        for id, definition in pairs(loaderData) do
+            if type(definition) == "table" then
+                if type(merged[id]) ~= "table" then
+                    merged[id] = definition
+                else
+                    for field, value in pairs(definition) do
+                        if merged[id][field] == nil and value ~= nil then
+                            merged[id][field] = value
+                        end
+                    end
+                end
+                hasData = true
+            end
+        end
+    end
+
+    if hasData then
+        UnitsDataCache = merged
         return UnitsDataCache
     end
-    local ok, data = pcall(function()
-        return require(ReplicatedStorage.src.Data.Units)
-    end)
-    if ok and type(data) == "table" then
-        UnitsDataCache = data
+
+    -- Keep the last known good snapshot only if both live sources temporarily fail.
+    if type(UnitsDataCache) == "table" and next(UnitsDataCache) ~= nil then
         return UnitsDataCache
     end
-    -- Retry on later lobby refreshes if ReplicatedStorage has not loaded Units yet.
     return {}
+end
+
+function GetUnitUpgradeCount(data)
+    if type(data) ~= "table" or type(data.upgrade) ~= "table" then
+        return 0
+    end
+    local maxIndex = 0
+    for key, value in pairs(data.upgrade) do
+        local index = tonumber(key)
+        if index and index > maxIndex and type(value) == "table" then
+            maxIndex = math.floor(index)
+        end
+    end
+    return maxIndex
 end
 
 function LookupUnitData(unitId)
@@ -1153,11 +1205,16 @@ function EnrichEquipped(list)
             if type(data.name) == "string" and data.name ~= "" then
                 info.name = data.name
             end
-            info.spawnCap = tonumber(data.spawn_cap)
+            -- Match game.lua placement rules: absent spawn_cap means cap 5.
+            -- Units without an upgrade table legitimately have zero upgrades.
+            info.spawnCap = tonumber(data.spawn_cap) or 5
             info.globalSpawnCap = tonumber(data.global_spawn_cap)
-            info.maxUpgrade = type(data.upgrade) == "table" and #data.upgrade or nil
+            info.maxUpgrade = GetUnitUpgradeCount(data)
+            info.dataFound = true
             info.hybrid = data.hybrid_placement == true
             info.hill = data.hill_unit == true
+        else
+            info.dataFound = false
         end
         if info.name and info.name ~= "" and info.name ~= "Unit" then
             State.UnitNames[info.unitId] = info.name
@@ -4339,7 +4396,7 @@ function RefreshUnitConfigUI()
             if info.hybrid then
                 table.insert(hybridNames, info.name)
             end
-            if info.spawnCap == nil or info.maxUpgrade == nil then
+            if info.dataFound ~= true then
                 missingMetadata += 1
             end
         end
@@ -4357,7 +4414,7 @@ function RefreshUnitConfigUI()
     for _, info in ipairs(ordered) do
         table.insert(keyParts, table.concat({
             tostring(info.unitId), tostring(info.uuid), tostring(info.name),
-            tostring(info.spawnCap), tostring(info.maxUpgrade), tostring(info.hybrid), tostring(info.hill)
+            tostring(info.spawnCap), tostring(info.maxUpgrade), tostring(info.dataFound), tostring(info.hybrid), tostring(info.hill)
         }, ":"))
     end
     local key = table.concat(keyParts, "|")
@@ -4414,8 +4471,8 @@ function RefreshUnitConfigUI()
         CardPad.Parent = Card
 
         local kindText = info.hybrid and "Hybrid" or (info.hill and "Hill" or "Ground")
-        local capText = info.spawnCap and ("cap " .. tostring(info.spawnCap)) or "cap ?"
-        local upText = info.maxUpgrade and ("upgrades " .. tostring(info.maxUpgrade)) or "upgrades ?"
+        local capText = info.dataFound and ("cap " .. tostring(info.spawnCap or 5)) or "data missing"
+        local upText = info.dataFound and ("upgrades " .. tostring(info.maxUpgrade or 0)) or "check Unit ID"
 
         local Header = Instance.new("TextButton")
         Header.Size = UDim2.new(1, 0, 0, 28)
@@ -4506,6 +4563,7 @@ UnitRefreshButton.Activated:Connect(function()
         local count, missing = 0, 0
         local refreshError = nil
         for attempt = 1, 4 do
+            if attempt == 1 then UnitsDataCache = nil end
             lastUnitKey = nil
             local ok, a, b = pcall(RefreshUnitConfigUI)
             if ok then
