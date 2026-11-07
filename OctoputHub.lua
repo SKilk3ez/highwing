@@ -4865,37 +4865,44 @@ function GetOwnedPortals()
                     local levels = LoadGameDataModule("Levels")
                     levelData = type(levels) == "table" and levels[levelId] or nil
                 end
-                local elements = {}
-                local function addElementEntries(entries)
+                local increasedDamageElements = {}
+                local function addIncreasedDamageEntries(entries)
                     if type(entries) ~= "table" then return end
                     for _, modifier in pairs(entries) do
-                        -- game.lua modifier records are { damage_type = "...", resistance/amplification = number }.
+                        -- game.lua renders _weak_against with amplification:
+                        -- this is the modifier that makes the selected damage type hit harder.
+                        local amplification = type(modifier) == "table"
+                            and tonumber(modifier.amplification) or nil
                         if type(modifier) == "table"
                             and type(modifier.damage_type) == "string"
-                            and modifier.damage_type ~= "" then
-                            elements[modifier.damage_type] = true
+                            and modifier.damage_type ~= ""
+                            and amplification ~= nil
+                            and amplification > 0 then
+                            increasedDamageElements[modifier.damage_type] = true
                         end
                     end
                 end
-                -- Only actual combat modifiers count. Do not treat daily challenge,
-                -- recommendations, or other UI hints as a portal's secondary damage.
-                -- Unique portal rolls are stored on the owned inventory item's portalData.
-                if type(portalData) == "table" then
-                    addElementEntries(portalData._strong_against)
-                    addElementEntries(portalData._weak_against)
+                -- Match the game's modifier application order:
+                -- portalData._weak_against overrides the level's _weak_against when present.
+                -- _strong_against is deliberately excluded because it is resistance (damage reduced).
+                local increasedDamageEntries = nil
+                if type(portalData) == "table" and type(portalData._weak_against) == "table" then
+                    increasedDamageEntries = portalData._weak_against
+                elseif type(levelData) == "table" then
+                    increasedDamageEntries = levelData._weak_against
                 end
-                -- Fixed/static portal definitions can carry real modifiers on their level data.
-                if type(levelData) == "table" then
-                    addElementEntries(levelData._strong_against)
-                    addElementEntries(levelData._weak_against)
-                end
+                addIncreasedDamageEntries(increasedDamageEntries)
                 local key = owned.item_id
                 if not seen[key] then
                     seen[key] = { id = key, name = tostring(def.name or key), count = 0, entries = {} }
                     table.insert(portals, seen[key])
                 end
                 seen[key].count = seen[key].count + 1
-                table.insert(seen[key].entries, { uuid = owned.uuid, tier = tier, elements = elements })
+                table.insert(seen[key].entries, {
+                    uuid = owned.uuid,
+                    tier = tier,
+                    increasedDamageElements = increasedDamageElements,
+                })
             end
         end
     end
@@ -4997,19 +5004,18 @@ task.spawn(function()
                             if State.SelectedPortalTiers[tostring(entry.tier)]
                                 and not portalOpenedUUIDs[entry.uuid] then
                                 local elementMatch = false
-                                if hasElementFilter and type(entry.elements) == "table" then
-                                    -- Aqua/Fire/etc. are secondary modifiers: use them as a
-                                    -- preference only, not as a requirement to open a portal.
+                                if hasElementFilter and type(entry.increasedDamageElements) == "table" then
+                                    -- Only match selected elements that have positive amplification.
                                     for elementId in pairs(State.SelectedPortalModifiers) do
-                                        if entry.elements[elementId] then
+                                        if entry.increasedDamageElements[elementId] then
                                             elementMatch = true
                                             break
                                         end
                                     end
                                 end
 
-                                -- A selected secondary damage is a hard requirement.
-                                -- Never open an item with a different modifier or no modifier.
+                                -- A selected increased-damage modifier is a hard requirement.
+                                -- Never open a portal that only resists that element or has no amplification.
                                 if not hasElementFilter or elementMatch then
                                     table.insert(candidates, {
                                         uuid = entry.uuid,
@@ -5052,7 +5058,7 @@ task.spawn(function()
                                     table.insert(selectedLabels, def.label)
                                 end
                             end
-                            PortalStatus.Text = "Waiting for portal with secondary damage: " .. table.concat(selectedLabels, " / ")
+                            PortalStatus.Text = "Waiting for portal with increased damage: " .. table.concat(selectedLabels, " / ")
                         else
                             PortalStatus.Text = "No owned portal matches the selected portal type and tier."
                         end
