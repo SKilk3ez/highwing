@@ -3031,7 +3031,7 @@ function BuildFirstCompletionRewardLines(settings)
         table.insert(bonusLines, "• **Trophies:** +" .. FormatNumber(trophies))
     end
     if #bonusLines == 0 then return nil end
-    return "**⭐ First Completion Bonus**\\n" .. table.concat(bonusLines, "\\n")
+    return "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n")
 end
 
 webhookCurrencyBefore = nil
