@@ -6668,21 +6668,44 @@ task.spawn(function()
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
+                local previousFolder = webhookDataFolder
+                local unresolvedMatch = (webhookGameWasActive and not webhookEndDetected)
+                    or (webhookEndDetected and not webhookSent)
+                    or (webhookSending and not webhookSent)
+
                 webhookDataFolder = dataFolder
-                webhookMatchToken = webhookMatchToken + 1
-                webhookGameWasActive = false
-                webhookEndDetected = false
-                webhookSent = false
-                webhookSending = false
-                webhookRetryAt = 0
-                webhookCurrencyBefore = nil
-                webhookSecretRewardBefore = nil
-                webhookSecretRewardBaselineAvailable = false
-                webhookUnitLinesSnapshot = nil
-                webhookResultSettingsAtStart = nil
+                webhookBoundGameFinished = nil
+                webhookBoundResultsGui = nil
                 webhookNextResultReadAt = 0
-                local finishedValue = dataFolder and dataFolder:FindFirstChild("GameFinished")
-                webhookFinishedLastValue = finishedValue ~= nil and finishedValue.Value == true
+
+                if unresolvedMatch then
+                    -- _DATA can be replaced during match teardown/replay. Keep the
+                    -- previous match's baseline, token and pending send state so a
+                    -- folder swap cannot silently discard an unfinished result.
+                    warn("[Octoput Hub Webhook] _DATA changed while a match was unresolved; preserving pending match state.")
+                else
+                    -- Start a clean tracking slot only after the previous match has
+                    -- been sent (or when no match was active).
+                    webhookMatchToken = webhookMatchToken + 1
+                    webhookGameWasActive = false
+                    webhookEndDetected = false
+                    webhookSent = false
+                    webhookSending = false
+                    webhookRetryAt = 0
+                    webhookCurrencyBefore = nil
+                    webhookSecretRewardBefore = nil
+                    webhookSecretRewardBaselineAvailable = false
+                    webhookUnitLinesSnapshot = nil
+                    webhookResultSettingsAtStart = nil
+                end
+
+                -- Never seed this edge from the replacement object: if it is
+                -- already true when first observed, the polling pass must still
+                -- treat it as a completion signal.
+                webhookFinishedLastValue = false
+                print("[Octoput Hub Webhook] _DATA reference changed; previous="
+                    .. tostring(previousFolder) .. " current=" .. tostring(dataFolder)
+                    .. " unresolved=" .. tostring(unresolvedMatch))
             end
 
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
