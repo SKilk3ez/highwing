@@ -3669,8 +3669,6 @@ function SetUnitVisualHidden(inst, hidden)
             if not ok then return end
             unitVisibilityOriginals[inst] = { property = property, value = value }
         end
-        pcall(function() inst[property] = property == "LocalTransparencyModifier" or property == "Transparency" and 1 or false end)
-        -- Parenthesize the transparency choice explicitly; Enabled properties use false.
         pcall(function()
             if property == "LocalTransparencyModifier" or property == "Transparency" then
                 inst[property] = 1
@@ -5479,6 +5477,9 @@ CreateToggle(MiscPage, "Hide Units (Reduce 3D Lag)", "HideUnits", 4, function(is
     ApplyUnitVisibility(isON)
 end)
 CreateHint(MiscPage, "Hides unit models, effects and overhead unit UI locally. It does not remove units or stop their game logic.", 5, 42)
+if State.HideUnits then
+    ApplyUnitVisibility(true)
+end
 CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 6, 34)
 CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 7, 34)
 CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 8, 50, 150, function()
