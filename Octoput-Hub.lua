@@ -4997,13 +4997,16 @@ task.spawn(function()
                 local candidates = {}
                 local hasElementFilter = next(State.SelectedPortalModifiers) ~= nil
                 for _, portal in ipairs(portals) do
+                    -- Portal type is determined by the actual inventory item_id.
+                    -- Secondary damage modifiers must never decide the portal identity.
                     if State.SelectedPortalTypes[portal.id] then
                         for _, entry in ipairs(portal.entries) do
                             if State.SelectedPortalTiers[tostring(entry.tier)]
                                 and not portalOpenedUUIDs[entry.uuid] then
                                 local elementMatch = false
                                 if hasElementFilter and type(entry.elements) == "table" then
-                                    -- Element is the primary filter: any selected element is enough (OR).
+                                    -- Aqua/Fire/etc. are secondary modifiers: use them as a
+                                    -- preference only, not as a requirement to open a portal.
                                     for elementId in pairs(State.SelectedPortalModifiers) do
                                         if entry.elements[elementId] then
                                             elementMatch = true
@@ -5012,23 +5015,23 @@ task.spawn(function()
                                     end
                                 end
 
-                                -- When an element filter is active, never fall back to a
-                                -- portal with a different element. Tier is considered only
-                                -- after the element requirement has been satisfied.
-                                if not hasElementFilter or elementMatch then
-                                    table.insert(candidates, {
-                                        uuid = entry.uuid,
-                                        tier = entry.tier,
-                                        name = portal.name,
-                                    })
-                                end
+                                table.insert(candidates, {
+                                    uuid = entry.uuid,
+                                    tier = entry.tier,
+                                    name = portal.name,
+                                    elementMatch = elementMatch,
+                                })
                             end
                         end
                     end
                 end
 
-                -- Among element-matching portals, open the highest selected tier first.
+                -- Prefer portals with the selected secondary modifier when available.
+                -- If none have it, still open a selected inventory portal; choose highest Tier.
                 table.sort(candidates, function(a, b)
+                    if hasElementFilter and a.elementMatch ~= b.elementMatch then
+                        return a.elementMatch
+                    end
                     if a.tier ~= b.tier then return a.tier > b.tier end
                     return a.name < b.name
                 end)
@@ -5048,14 +5051,8 @@ task.spawn(function()
                 if not opened then
                     if #portals == 0 then
                         PortalStatus.Text = "No owned portals found."
-                    elseif hasElementFilter and #candidates == 0 then
-                        local selectedLabels = {}
-                        for _, def in ipairs(PORTAL_ELEMENT_FILTERS) do
-                            if State.SelectedPortalModifiers[def.id] then
-                                table.insert(selectedLabels, def.label)
-                            end
-                        end
-                        PortalStatus.Text = "Waiting for " .. table.concat(selectedLabels, " / ") .. " portal..."
+                    elseif #candidates == 0 then
+                        PortalStatus.Text = "No owned portal matches the selected portal type and tier."
                     end
                 end
             end)
