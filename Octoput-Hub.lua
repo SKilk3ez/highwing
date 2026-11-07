@@ -4207,7 +4207,7 @@ UnitRefreshBar = Instance.new("Frame")
 UnitRefreshBar.Name = "UnitRefreshBar"
 UnitRefreshBar.Size = UDim2.new(1, -10, 0, 30)
 UnitRefreshBar.BackgroundTransparency = 1
-UnitRefreshBar.LayoutOrder = 28.5
+UnitRefreshBar.LayoutOrder = 29
 UnitRefreshBar.ZIndex = 13
 UnitRefreshBar.Parent = AutoPlayPage
 
@@ -4245,7 +4245,7 @@ UnitConfigHolder.Name = "UnitConfigHolder"
 UnitConfigHolder.Size = UDim2.new(1, -10, 0, 0)
 UnitConfigHolder.AutomaticSize = Enum.AutomaticSize.Y
 UnitConfigHolder.BackgroundTransparency = 1
-UnitConfigHolder.LayoutOrder = 29
+UnitConfigHolder.LayoutOrder = 30
 UnitConfigHolder.ZIndex = 12
 UnitConfigHolder.Parent = AutoPlayPage
 UnitConfigList = Instance.new("UIListLayout")
