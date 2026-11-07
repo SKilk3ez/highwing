@@ -457,6 +457,7 @@ State = {
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
     AutoFindMatch = false,
+    AutoSoloSummerHunt = false,
     AutoEventQuests = false,
     AutoPickCards = false,
     AutoReplay = true,
@@ -587,6 +588,7 @@ function CopyStateForSave()
         AutoBuffRotation = State.AutoBuffRotation,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
+        AutoSoloSummerHunt = State.AutoSoloSummerHunt,
         AutoEventQuests = State.AutoEventQuests,
         AutoPickCards = State.AutoPickCards,
         AutoReplay = State.AutoReplay,
@@ -642,7 +644,7 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoSoloSummerHunt", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -3707,6 +3709,8 @@ function CreateHint(parent, text, layoutOrder, height)
     return Label
 end
 
+ToggleControls = ToggleControls or {}
+
 function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
@@ -3754,6 +3758,7 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local IndicatorCorner = Instance.new("UICorner")
     IndicatorCorner.CornerRadius = UDim.new(1, 0)
     IndicatorCorner.Parent = Indicator
+    ToggleControls[stateKey] = { button = SwitchBtn, indicator = Indicator }
 
     SwitchBtn.MouseButton1Click:Connect(function()
         State[stateKey] = not State[stateKey]
@@ -3775,6 +3780,22 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     end)
 
     return ToggleContainer
+end
+
+function SetToggleState(stateKey, value)
+    value = value == true
+    State[stateKey] = value
+    local controls = ToggleControls[stateKey]
+    if controls and controls.button and controls.indicator then
+        local tweenInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+        TweenService:Create(controls.button, tweenInfo, {
+            BackgroundColor3 = value and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
+        }):Play()
+        TweenService:Create(controls.indicator, tweenInfo, {
+            Position = value and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+        }):Play()
+    end
+    SaveConfig()
 end
 
 function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initialText)
@@ -5187,6 +5208,10 @@ end
 eventAutomationStopped = false
 
 CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
+    -- The two Summer Hunt entry modes are mutually exclusive.
+    if isON then
+        SetToggleState("AutoSoloSummerHunt", false)
+    end
     -- Manually toggling Auto Find Match back on resumes event automation.
     eventAutomationStopped = false
     if isON then
@@ -5202,12 +5227,27 @@ CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, fun
     end
 end)
 
-CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 2)
-CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 3)
-CreateSection(EventPage, "Pick Card", 4)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 5)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, "DebuffAvoid", 8)
-CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 11)
+CreateToggle(EventPage, "Auto Solo (Summer Hunt)", "AutoSoloSummerHunt", 2, function(isON)
+    -- Do not allow public matchmaking and private-party entry to run together.
+    if isON then
+        SetToggleState("AutoFindMatch", false)
+        eventAutomationStopped = false
+        local matchmakingGui = playerGui:FindFirstChild("MatchmakingUI")
+        if IsInLobby() and matchmakingGui and matchmakingGui.Enabled then
+            InvokeEndpoint("leave_matchmaking")
+        end
+        UpdateEventStatus("Preparing private party portal...", Color3.fromRGB(255, 200, 70))
+    else
+        UpdateEventStatus("Auto Solo disabled.", Color3.fromRGB(160, 160, 180))
+    end
+end)
+
+CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 3)
+CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 4)
+CreateSection(EventPage, "Pick Card", 5)
+CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 6)
+CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 9)
+CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 12)
 
 WebhookStatus = nil
 CreateTextBox(WebhookPage, "Discord Webhook URL", "https://discord.com/api/webhooks/...", 1, function(text)
@@ -5621,6 +5661,7 @@ function HandleMatchEnd(gameFinished)
     -- Event Replay is only a fallback when no Main action is selected.
     local nextKind = State.AutoNext and NextActionAvailable() or nil
     local mainActionSelected = State.AutoNext or State.MainAutoReplay or State.AutoLeave
+    local eventAutomationEnabled = State.AutoFindMatch or State.AutoSoloSummerHunt
     local action = nil
 
     if nextKind then
@@ -5629,9 +5670,9 @@ function HandleMatchEnd(gameFinished)
         action = "replay"
     elseif State.AutoLeave then
         action = "leave"
-    elseif not mainActionSelected and State.AutoFindMatch and State.AutoReplay then
+    elseif not mainActionSelected and eventAutomationEnabled and State.AutoReplay then
         action = "replay"
-    elseif not mainActionSelected and State.AutoFindMatch and not State.AutoReplay then
+    elseif not mainActionSelected and eventAutomationEnabled and not State.AutoReplay then
         action = "leave"
     end
     if not action then
@@ -5663,9 +5704,8 @@ function HandleMatchEnd(gameFinished)
                 end
             end
         elseif action == "leave" then
-            -- Leave the finished Event match, but keep Auto Find Match enabled.
-            -- Once the player is back in the lobby, the matchmaking worker below
-            -- will detect the lobby state and queue the next Event automatically.
+            -- Leave the finished Event match, but keep the selected Summer Hunt
+            -- entry mode enabled. Its worker will resume after returning to the lobby.
             eventAutomationStopped = false
             UpdateEventStatus("Leaving Match... (Auto Queue Will Resume In Lobby)", Color3.fromRGB(255, 100, 100))
 
@@ -6872,6 +6912,7 @@ task.spawn(function()
 end)
 
 lastMatchmakingRequest = 0
+lastAutoSoloPortalRequest = 0
 lastQuestClaim = 0
 task.spawn(function()
     while true do
@@ -6884,7 +6925,32 @@ task.spawn(function()
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         HandleMatchEnd(gameFinished)
 
-        if State.AutoFindMatch and not eventAutomationStopped then
+        if State.AutoSoloSummerHunt and not eventAutomationStopped then
+            if IsInLobby() then
+                local alreadyInEventLobby = player:FindFirstChild("AlreadyInLobby")
+                local matchmakingGui = playerGui:FindFirstChild("MatchmakingUI")
+                if matchmakingGui and matchmakingGui.Enabled then
+                    InvokeEndpoint("leave_matchmaking")
+                    UpdateEventStatus("Leaving matchmaking before private entry...", Color3.fromRGB(255, 200, 70))
+                elseif alreadyInEventLobby and alreadyInEventLobby.Value == true then
+                    UpdateEventStatus("Party lobby joined. Waiting for event teleport...", Color3.fromRGB(70, 200, 255))
+                else
+                    UpdateEventStatus("Opening Summer Hunt for you and your party...", Color3.fromRGB(255, 200, 70))
+                    if os.clock() - lastAutoSoloPortalRequest >= 8 then
+                        lastAutoSoloPortalRequest = os.clock()
+                        local result = InvokeEndpoint("open_event_portal", EVENT_LEVEL_ID, {
+                            difficulty = "Hard",
+                            friends_only = true,
+                        })
+                        if result == false then
+                            UpdateEventStatus("Private party portal request rejected. Retrying...", Color3.fromRGB(255, 120, 120))
+                        end
+                    end
+                end
+            else
+                UpdateEventStatus("In Summer Hunt (Solo / Party)", Color3.fromRGB(100, 255, 100))
+            end
+        elseif State.AutoFindMatch and not eventAutomationStopped then
             if IsInLobby() then
                 HandlePopups()
 
