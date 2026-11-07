@@ -4589,12 +4589,14 @@ portalModifierGrid:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(funct
     PortalModifierList.CanvasSize = UDim2.new(0, 0, 0, portalModifierGrid.AbsoluteContentSize.Y + 6)
 end)
 
+-- IDs match DamageTypes.TYPES in game.lua. Display names follow the game's
+-- actual labels (Aqua, Storm and Rose rather than Water, Lightning and Ice).
 PORTAL_ELEMENT_FILTERS = {
     { id = "fire_damage", label = "Fire" },
-    { id = "water_damage", label = "Water" },
-    { id = "lightning_damage", label = "Lightning" },
+    { id = "water_damage", label = "Aqua" },
+    { id = "lightning_damage", label = "Storm" },
     { id = "air_damage", label = "Air" },
-    { id = "ice_damage", label = "Ice" },
+    { id = "ice_damage", label = "Rose" },
     { id = "light_damage", label = "Light" },
     { id = "dark_damage", label = "Dark" },
 }
@@ -4716,20 +4718,34 @@ function GetOwnedPortals()
                 end
                 local elements = {}
                 local function addElement(value)
-                    if type(value) == "string" and value ~= "" then elements[value] = true end
+                    if type(value) == "string" and value ~= "" then
+                        elements[value] = true
+                    end
                 end
                 local function addElementEntries(entries)
                     if type(entries) ~= "table" then return end
-                    for _, entry in pairs(entries) do
-                        if type(entry) == "table" then addElement(entry.damage_type) else addElement(entry) end
+                    for key, entry in pairs(entries) do
+                        if type(entry) == "table" then
+                            addElement(entry.damage_type)
+                        elseif type(entry) == "string" then
+                            addElement(entry)
+                        elseif entry == true and type(key) == "string" then
+                            -- Also support modifier sets stored as { [damage_type] = true }.
+                            addElement(key)
+                        end
                     end
                 end
-                if type(levelData) == "table" then
-                    addElementEntries(levelData._strong_against)
-                    addElementEntries(levelData._weak_against)
-                    addElementEntries(levelData._daily_challenge_weak_against)
-                    addElementEntries(levelData._daily_challenge_strong_against)
-                    addElementEntries(levelData._recommended_damage_types)
+                -- Portal instances carry their rolled modifiers in _unique_portal_data.
+                -- Read those first; level definitions are a fallback for fixed portals.
+                local modifierSources = { portalData, levelData }
+                for _, source in ipairs(modifierSources) do
+                    if type(source) == "table" then
+                        addElementEntries(source._strong_against)
+                        addElementEntries(source._weak_against)
+                        addElementEntries(source._daily_challenge_weak_against)
+                        addElementEntries(source._daily_challenge_strong_against)
+                        addElementEntries(source._recommended_damage_types)
+                    end
                 end
                 local key = owned.item_id
                 if not seen[key] then
