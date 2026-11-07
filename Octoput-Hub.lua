@@ -6669,7 +6669,8 @@ task.spawn(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
                 local previousFolder = webhookDataFolder
-                local unresolvedMatch = webhookGameWasActive or webhookEndDetected
+                local unresolvedMatch = (webhookGameWasActive and not webhookEndDetected)
+                    or (webhookEndDetected and not webhookSent)
                     or (webhookSending and not webhookSent)
 
                 webhookDataFolder = dataFolder
