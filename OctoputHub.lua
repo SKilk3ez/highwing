@@ -6608,6 +6608,7 @@ webhookResultsVisibleLast = initialResultsForWebhook ~= nil and initialResultsFo
 webhookLastSentSettings = nil
 webhookBoundGameFinished = nil
 webhookBoundResultsGui = nil
+webhookBoundResultTitle = nil
 webhookMatchToken = 0
 
 function StartWebhookEndSend(reason)
@@ -6732,7 +6733,48 @@ task.spawn(function()
             end
             if resultsGui ~= webhookBoundResultsGui then
                 webhookBoundResultsGui = resultsGui
+                webhookBoundResultTitle = nil
                 if resultsGui then
+                    -- Anime Adventures game.lua calls ResultsUI.show_results(settings):
+                    -- it assigns controller.settings, then changes Holder.Title.Text,
+                    -- then enables the ScreenGui. Enabled may already be true during
+                    -- replay/rematch, so listen to the actual result title as well.
+                    local holder = resultsGui:FindFirstChild("Holder")
+                    local titleLabel = holder and holder:FindFirstChild("Title")
+                    if titleLabel and titleLabel:IsA("TextLabel") then
+                        webhookBoundResultTitle = titleLabel
+                        titleLabel:GetPropertyChangedSignal("Text"):Connect(function()
+                            if webhookBoundResultsGui ~= resultsGui
+                                or webhookBoundResultTitle ~= titleLabel
+                                or playerGui:FindFirstChild("ResultsUI") ~= resultsGui then
+                                return
+                            end
+                            local title = string.upper(tostring(titleLabel.Text or ""))
+                            if title:find("VICTORY", 1, true) or title:find("DEFEAT", 1, true) then
+                                task.spawn(function()
+                                    task.wait(0.15)
+                                    if webhookBoundResultsGui == resultsGui
+                                        and webhookBoundResultTitle == titleLabel
+                                        and titleLabel.Parent
+                                        and resultsGui:FindFirstChild("Holder") == holder then
+                                        MarkWebhookEnd("ResultsUI.Title.Text")
+                                    end
+                                end)
+                            end
+                        end)
+                        -- Also catch a result screen that was already visible when
+                        -- this monitor attached (e.g. the executor started late).
+                        local initialTitle = string.upper(tostring(titleLabel.Text or ""))
+                        if resultsGui.Enabled and holder.Visible
+                            and (initialTitle:find("VICTORY", 1, true) or initialTitle:find("DEFEAT", 1, true)) then
+                            task.defer(function()
+                                if webhookBoundResultsGui == resultsGui
+                                    and webhookBoundResultTitle == titleLabel then
+                                    MarkWebhookEnd("ResultsUI.InitialTitle")
+                                end
+                            end)
+                        end
+                    end
                     resultsGui:GetPropertyChangedSignal("Enabled"):Connect(function()
                         if webhookBoundResultsGui == resultsGui
                             and playerGui:FindFirstChild("ResultsUI") == resultsGui
@@ -6743,6 +6785,15 @@ task.spawn(function()
                                 local title = string.upper(tostring(details.result or ""))
                                 if title:find("VICTORY", 1, true) or title:find("DEFEAT", 1, true) then
                                     MarkWebhookEnd("ResultsUI.Enabled")
+                                else
+                                    -- Executor getgc access can be unavailable; the UI
+                                    -- title is still written by game.lua before Enabled.
+                                    local currentHolder = resultsGui:FindFirstChild("Holder")
+                                    local currentTitle = currentHolder and currentHolder:FindFirstChild("Title")
+                                    local visibleTitle = string.upper(tostring(currentTitle and currentTitle.Text or ""))
+                                    if currentTitle and (visibleTitle:find("VICTORY", 1, true) or visibleTitle:find("DEFEAT", 1, true)) then
+                                        MarkWebhookEnd("ResultsUI.Enabled.TitleFallback")
+                                    end
                                 end
                             end)
                         end
@@ -6851,4 +6902,4 @@ if State.AutoHideGUIOnExecute then
     MainFrame.Visible = false
 end
 
-print("XT Hub UI Loaded Successfully! Auto Play, Webhook & Misc are ready.")
+print("Octoput Hub UI Loaded Successfully! Auto Play, Webhook & Misc are ready.")
