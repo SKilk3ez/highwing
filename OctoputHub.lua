@@ -4865,18 +4865,32 @@ function GetOwnedPortals()
                 local levelData = type(levelId) == "string"
                     and type(levelsData) == "table" and levelsData[levelId] or nil
                 local increasedDamageElements = {}
+                local function normalizeDamageType(value)
+                    if type(value) ~= "string" then return nil end
+                    local key = string.lower(value):gsub("[%s%-]", "_")
+                    key = key:gsub("_damage$", "")
+                    local aliases = {
+                        fire = "fire_damage", fire_damage = "fire_damage",
+                        water = "water_damage", aqua = "water_damage", water_damage = "water_damage",
+                        lightning = "lightning_damage", storm = "lightning_damage", lightning_damage = "lightning_damage",
+                        air = "air_damage", air_damage = "air_damage",
+                        ice = "ice_damage", rose = "ice_damage", ice_damage = "ice_damage",
+                        light = "light_damage", light_damage = "light_damage",
+                        dark = "dark_damage", dark_damage = "dark_damage",
+                    }
+                    return aliases[key]
+                end
                 local function addIncreasedDamageEntries(entries)
                     if type(entries) ~= "table" then return end
                     local function addModifier(modifier)
                         if type(modifier) ~= "table" then return end
-                        local damageType = modifier.damage_type
+                        local damageType = normalizeDamageType(modifier.damage_type)
                         local amplification = tonumber(modifier.amplification)
-                        if type(damageType) == "string" and damageType ~= ""
-                            and amplification ~= nil and amplification > 0 then
+                        if damageType and amplification ~= nil and amplification > 0 then
                             increasedDamageElements[damageType] = true
                         end
                     end
-                    -- Support both the normal array form and a single modifier record.
+                    -- game.lua uses an array of { damage_type, amplification } records.
                     if entries.damage_type ~= nil then
                         addModifier(entries)
                     else
@@ -4885,19 +4899,27 @@ function GetOwnedPortals()
                         end
                     end
                 end
-                -- The visible "Aqua Weakness x2.6" style modifier is _weak_against
-                -- with a positive amplification value. Read every real source that the
-                -- portal preview can be built from; an empty portalData table must not
-                -- hide a modifier present in the resolved Level data.
-                if type(uniqueData) == "table" then
-                    addIncreasedDamageEntries(uniqueData._weak_against)
+                local function scanWeakAgainstFields(root, depth, visited)
+                    if type(root) ~= "table" or depth > 5 or visited[root] then return end
+                    visited[root] = true
+                    -- Only inspect the game's actual weakness field. Do not read
+                    -- _strong_against, daily challenge hints, or recommended types.
+                    for key, value in pairs(root) do
+                        if key == "_weak_against" then
+                            addIncreasedDamageEntries(value)
+                        elseif type(value) == "table" then
+                            scanWeakAgainstFields(value, depth + 1, visited)
+                        end
+                    end
                 end
-                if type(portalData) == "table" then
-                    addIncreasedDamageEntries(portalData._weak_against)
-                end
-                if type(levelData) == "table" then
-                    addIncreasedDamageEntries(levelData._weak_against)
-                end
+                -- Mirror the portal preview's data sources: resolved Level data,
+                -- static portal copy parameters, and the owned unique-portal data
+                -- that add_portal_level_modifiers_1/2 copies onto the level.
+                local visitedModifierSources = {}
+                scanWeakAgainstFields(uniqueData, 0, visitedModifierSources)
+                scanWeakAgainstFields(portalData, 0, visitedModifierSources)
+                scanWeakAgainstFields(levelData, 0, visitedModifierSources)
+                scanWeakAgainstFields(def.static_portal_copy_to_level_params, 0, visitedModifierSources)
                 local key = owned.item_id
                 if not seen[key] then
                     seen[key] = { id = key, name = tostring(def.name or key), count = 0, entries = {} }
@@ -5011,9 +5033,11 @@ task.spawn(function()
                                 and not portalOpenedUUIDs[entry.uuid] then
                                 local elementMatch = false
                                 if hasElementFilter and type(entry.increasedDamageElements) == "table" then
-                                    -- Only match selected elements that have positive amplification.
-                                    for elementId in pairs(State.SelectedPortalModifiers) do
-                                        if entry.increasedDamageElements[elementId] then
+                                    -- Normalize selected IDs too, so Aqua/water aliases
+                                    -- resolve to the same game damage type.
+                                    for elementId, isSelected in pairs(State.SelectedPortalModifiers) do
+                                        local normalizedId = normalizeDamageType(elementId)
+                                        if isSelected and normalizedId and entry.increasedDamageElements[normalizedId] then
                                             elementMatch = true
                                             break
                                         end
