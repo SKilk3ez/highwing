@@ -4590,16 +4590,13 @@ portalModifierGrid:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(funct
 end)
 
 PORTAL_ELEMENT_FILTERS = {
-    { id = "connection_damage", label = "Connection" },
-    { id = "light_damage", label = "Light" },
-    { id = "dark_damage", label = "Darkness" },
     { id = "fire_damage", label = "Fire" },
-    { id = "earth_damage", label = "Earth" },
     { id = "water_damage", label = "Water" },
-    { id = "energy_damage", label = "Energy" },
-    { id = "time_damage", label = "Time" },
-    { id = "ice_damage", label = "Ice" },
+    { id = "lightning_damage", label = "Lightning" },
     { id = "air_damage", label = "Air" },
+    { id = "ice_damage", label = "Ice" },
+    { id = "light_damage", label = "Light" },
+    { id = "dark_damage", label = "Dark" },
 }
 function RefreshPortalModifierUI()
     for _, child in ipairs(PortalModifierList:GetChildren()) do
