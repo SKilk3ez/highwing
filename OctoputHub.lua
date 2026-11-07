@@ -2756,29 +2756,6 @@ task.spawn(function()
     end
 end)
 
-function BuildRewardText(before, after)
-    local ordered = {"XP", "SummerPearls", "Gold", "Gems", "Trophies"}
-    local labels = {XP = "XP", SummerPearls = "Summer Pearls", Gold = "Gold", Gems = "Gems", Trophies = "Trophies"}
-    local parts, used = {}, {}
-    for _, key in ipairs(ordered) do
-        local delta = (tonumber(after[key]) or 0) - (tonumber(before[key]) or 0)
-        if delta > 0 then
-            table.insert(parts, "+" .. FormatNumber(delta) .. " " .. (labels[key] or key))
-            used[key] = true
-        end
-    end
-    for key, value in pairs(after) do
-        if not used[key] and key ~= "Trait" and key ~= "Trophies" then
-            local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
-            if delta > 0 then
-                table.insert(parts, "+" .. FormatNumber(delta) .. " " .. tostring(key))
-            end
-        end
-    end
-    if #parts == 0 then return "No currency or XP gained detected." end
-    return table.concat(parts, " · ")
-end
-
 function ReadAuthoritativeResultSettings()
     -- game.lua ResultsUI.new() stores the ResultsUI ScreenGui in screenGUI,
     -- and ResultsUI.show_results(settings) stores the exact server result in .settings.
@@ -2845,77 +2822,8 @@ function GetResultDetails()
     return details
 end
 
-function BuildCurrencyLines(before, after)
-    local lines = {}
-    local names = {}
-    for name in pairs(before or {}) do names[name] = true end
-    for name in pairs(after or {}) do names[name] = true end
-
-    local ordered = {"Gold", "Gems", "SummerPearls", "Trophies", "XP"}
-    local used = {}
-    for _, name in ipairs(ordered) do
-        if names[name] then
-            table.insert(lines, string.format("**%s:** %s → %s (%s%s)", name,
-                FormatNumber(before[name] or 0), FormatNumber(after[name] or 0),
-                ((after[name] or 0) - (before[name] or 0)) >= 0 and "+" or "",
-                FormatNumber((after[name] or 0) - (before[name] or 0))))
-            used[name] = true
-        end
-    end
-    for name in pairs(names) do
-        if not used[name] then
-            local delta = (after[name] or 0) - (before[name] or 0)
-            table.insert(lines, string.format("**%s:** %s → %s (%s%s)", name,
-                FormatNumber(before[name] or 0), FormatNumber(after[name] or 0),
-                delta >= 0 and "+" or "", FormatNumber(delta)))
-        end
-    end
-    if #lines == 0 then
-        table.insert(lines, "Currency data unavailable")
-    end
-    return table.concat(lines, "\n")
-end
-
-
 -- ResultsUI is populated directly from ResultsUI.show_results(settings).
 -- ResourceReward frames therefore provide the authoritative per-stage resource amounts.
-function ReadResultResourceRewards()
-    local rewards = {}
-    local results = playerGui:FindFirstChild("ResultsUI")
-    local holder = results and results:FindFirstChild("Holder")
-    local scroll = holder and holder:FindFirstChild("LevelRewards")
-    scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
-    if not scroll then return rewards end
-
-    for _, frame in ipairs(scroll:GetChildren()) do
-        if frame.Name == "ResourceReward" and frame:IsA("GuiObject") and frame.Visible then
-            local amountLabel = frame:FindFirstChild("Main") and frame.Main:FindFirstChild("Amount")
-            local icon = frame:FindFirstChild("ImageLabel")
-            local amount = amountLabel and tostring(amountLabel.Text) or nil
-            local image = icon and icon:IsA("ImageLabel") and icon.Image or nil
-            if amount and amount ~= "" then
-                table.insert(rewards, {
-                    amount = amount,
-                    image = image,
-                })
-            end
-        end
-    end
-    return rewards
-end
-
-function BuildResourceRewardLines(rewards)
-    if not rewards or #rewards == 0 then
-        return "No resource reward frames found in ResultsUI"
-    end
-    local lines = {}
-    for _, reward in ipairs(rewards) do
-        local iconText = (reward.image and reward.image ~= "") and (" [icon " .. reward.image .. "]") or ""
-        table.insert(lines, "• " .. reward.amount .. iconText)
-    end
-    return table.concat(lines, "\n")
-end
-
 -- Snapshot unique Secret rewards at match start so Webhook can report only
 -- Secret Units / Secret Portals newly granted by this match.
 function LoadGameDataModule(moduleName)
@@ -3110,64 +3018,20 @@ function BuildMatchRewardLines(resultDetails)
     return #lines > 0 and table.concat(lines, "\n") or nil
 end
 
--- ResultsUI.show_results() also supplies first-completion bonuses and per-unit XP.
--- Keep these inside the same Match Rewards Discord field as the other rewards.
-function BuildAdditionalResultRewardLines(settings, inventorySnapshot, fallbackInventorySnapshot)
-    if type(settings) ~= "table" then return nil end
-    local sections = {}
-
-    if settings.first_completion then
-        local bonusLines = {}
-        local gems = tonumber(settings.first_completion_gems)
-        local trophies = tonumber(settings.first_completion_trophies)
-        if gems and gems > 0 then
-            table.insert(bonusLines, "• **Gems:** +" .. FormatNumber(gems))
-        end
-        if trophies and trophies > 0 then
-            table.insert(bonusLines, "• **Trophies:** +" .. FormatNumber(trophies))
-        end
-        if #bonusLines > 0 then
-            table.insert(sections, "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n"))
-        end
+-- First-completion bonuses are reported separately from the normal stage rewards.
+function BuildFirstCompletionRewardLines(settings)
+    if type(settings) ~= "table" or not settings.first_completion then return nil end
+    local bonusLines = {}
+    local gems = tonumber(settings.first_completion_gems)
+    local trophies = tonumber(settings.first_completion_trophies)
+    if gems and gems > 0 then
+        table.insert(bonusLines, "• **Gems:** +" .. FormatNumber(gems))
     end
-
-    if type(settings.xp_updates) == "table" then
-        local unitNames = {}
-        for _, snapshot in ipairs({inventorySnapshot or {}, fallbackInventorySnapshot or {}}) do
-            for key, reward in pairs(snapshot) do
-                if type(key) == "string" and key:sub(1, 5) == "unit:" and type(reward) == "table" then
-                    local uuid = key:sub(6)
-                    if not unitNames[uuid] then
-                        unitNames[uuid] = tostring(reward.name or uuid)
-                    end
-                end
-            end
-        end
-
-        local xpLines = {}
-        for uuid, update in pairs(settings.xp_updates) do
-            if type(update) == "table" then
-                local oldXP = tonumber(update.old_xp)
-                local newXP = tonumber(update.new_xp)
-                local gained = oldXP and newXP and (newXP - oldXP) or 0
-                if gained > 0 then
-                    local unitName = unitNames[tostring(uuid)] or ("Unit " .. tostring(uuid):sub(1, 8))
-                    table.insert(xpLines, {
-                        sort = unitName:lower(),
-                        line = "• **" .. unitName .. ":** +" .. FormatNumber(gained) .. " Unit XP",
-                    })
-                end
-            end
-        end
-        table.sort(xpLines, function(a, b) return a.sort < b.sort end)
-        if #xpLines > 0 then
-            local lines = {}
-            for _, entry in ipairs(xpLines) do table.insert(lines, entry.line) end
-            table.insert(sections, "**⚔️ Unit XP**\n" .. table.concat(lines, "\n"))
-        end
+    if trophies and trophies > 0 then
+        table.insert(bonusLines, "• **Trophies:** +" .. FormatNumber(trophies))
     end
-
-    return #sections > 0 and table.concat(sections, "\n\n") or nil
+    if #bonusLines == 0 then return nil end
+    return "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n")
 end
 
 webhookCurrencyBefore = nil
@@ -3304,18 +3168,14 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local playerStatsText = BuildPlayerStatsText(currentCurrencies)
     local playerXP = currentCurrencies.XP or 0
 
-    -- Rewards field combines ResultsUI's authoritative stage rewards, first-clear
-    -- bonuses, unit XP and every inventory delta (units/items/portals/materials).
+    -- Rewards field combines authoritative stage rewards, first-clear bonuses,
+    -- and every inventory delta (units/items/portals/charms/materials).
     local rewardSections = {}
     local resultRewardText = BuildMatchRewardLines(resultDetails)
     if resultRewardText then table.insert(rewardSections, resultRewardText) end
 
-    local additionalRewardText = BuildAdditionalResultRewardLines(
-        resultDetails and resultDetails.settings,
-        inventoryRewardsAvailable and inventoryRewardsAfter or nil,
-        secretBaseline
-    )
-    if additionalRewardText then table.insert(rewardSections, additionalRewardText) end
+    local firstCompletionRewardText = BuildFirstCompletionRewardLines(resultDetails and resultDetails.settings)
+    if firstCompletionRewardText then table.insert(rewardSections, firstCompletionRewardText) end
     if inventoryRewardText then table.insert(rewardSections, inventoryRewardText) end
 
     -- Fallback to currency deltas only for reward types absent from the ResultsUI
