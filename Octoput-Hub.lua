@@ -3018,7 +3018,9 @@ function ReadInventoryRewardSnapshot()
             end
         end
     end
-    return snapshot, inventoryProfile ~= nil or collectionProfile ~= nil
+    -- Inventory availability must specifically mean the inventory profile was read.
+    -- A collection-only session is not sufficient to diff portal/item rewards.
+    return snapshot, inventoryProfile ~= nil
 end
 
 function BuildInventoryRewardLines(before, after)
@@ -3144,6 +3146,13 @@ webhookSecretRewardBaselineAvailable = false
 function CaptureWebhookCurrencyBaseline()
     webhookCurrencyBefore = ReadPlayerCurrencies()
     webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
+    -- Inventory profile data can initialize a moment after the match starts.
+    -- Retry briefly so the end-of-match diff has a real player-owned baseline.
+    for attempt = 1, 6 do
+        if webhookSecretRewardBaselineAvailable then break end
+        task.wait(0.35)
+        webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable = ReadInventoryRewardSnapshot()
+    end
     return table.clone(webhookCurrencyBefore), webhookSecretRewardBefore, webhookSecretRewardBaselineAvailable
 end
 
