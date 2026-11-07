@@ -457,6 +457,7 @@ State = {
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
     AutoFindMatch = false,
+    AutoSoloSummerHunt = false,
     AutoEventQuests = false,
     AutoPickCards = false,
     AutoReplay = true,
@@ -587,6 +588,7 @@ function CopyStateForSave()
         AutoBuffRotation = State.AutoBuffRotation,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
+        AutoSoloSummerHunt = State.AutoSoloSummerHunt,
         AutoEventQuests = State.AutoEventQuests,
         AutoPickCards = State.AutoPickCards,
         AutoReplay = State.AutoReplay,
@@ -642,7 +644,7 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoSoloSummerHunt", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -5202,12 +5204,25 @@ CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, fun
     end
 end)
 
-CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 2)
-CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 3)
-CreateSection(EventPage, "Pick Card", 4)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 5)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, "DebuffAvoid", 8)
-CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 11)
+CreateToggle(EventPage, "Auto Solo (Summer Hunt)", "AutoSoloSummerHunt", 2, function(isON)
+    if isON then
+        eventAutomationStopped = false
+        local matchmakingGui = playerGui:FindFirstChild("MatchmakingUI")
+        if IsInLobby() and matchmakingGui and matchmakingGui.Enabled then
+            InvokeEndpoint("leave_matchmaking")
+        end
+        UpdateEventStatus("Preparing private party portal...", Color3.fromRGB(255, 200, 70))
+    else
+        UpdateEventStatus("Auto Solo disabled.", Color3.fromRGB(160, 160, 180))
+    end
+end)
+
+CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 3)
+CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 4)
+CreateSection(EventPage, "Pick Card", 5)
+CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 6)
+CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 9)
+CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 12)
 
 WebhookStatus = nil
 CreateTextBox(WebhookPage, "Discord Webhook URL", "https://discord.com/api/webhooks/...", 1, function(text)
@@ -6872,6 +6887,7 @@ task.spawn(function()
 end)
 
 lastMatchmakingRequest = 0
+lastAutoSoloPortalRequest = 0
 lastQuestClaim = 0
 task.spawn(function()
     while true do
@@ -6884,7 +6900,32 @@ task.spawn(function()
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         HandleMatchEnd(gameFinished)
 
-        if State.AutoFindMatch and not eventAutomationStopped then
+        if State.AutoSoloSummerHunt and not eventAutomationStopped then
+            if IsInLobby() then
+                local alreadyInEventLobby = player:FindFirstChild("AlreadyInLobby")
+                local matchmakingGui = playerGui:FindFirstChild("MatchmakingUI")
+                if matchmakingGui and matchmakingGui.Enabled then
+                    InvokeEndpoint("leave_matchmaking")
+                    UpdateEventStatus("Leaving matchmaking before private entry...", Color3.fromRGB(255, 200, 70))
+                elseif alreadyInEventLobby and alreadyInEventLobby.Value == true then
+                    UpdateEventStatus("Party lobby joined. Waiting for event teleport...", Color3.fromRGB(70, 200, 255))
+                else
+                    UpdateEventStatus("Opening Summer Hunt for you and your party...", Color3.fromRGB(255, 200, 70))
+                    if os.clock() - lastAutoSoloPortalRequest >= 8 then
+                        lastAutoSoloPortalRequest = os.clock()
+                        local result = InvokeEndpoint("open_event_portal", EVENT_LEVEL_ID, {
+                            difficulty = "Hard",
+                            friends_only = true,
+                        })
+                        if result == false then
+                            UpdateEventStatus("Private party portal request rejected. Retrying...", Color3.fromRGB(255, 120, 120))
+                        end
+                    end
+                end
+            else
+                UpdateEventStatus("In Summer Hunt (Solo / Party)", Color3.fromRGB(100, 255, 100))
+            end
+        elseif State.AutoFindMatch and not eventAutomationStopped then
             if IsInLobby() then
                 HandlePopups()
 
