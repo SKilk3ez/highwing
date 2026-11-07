@@ -480,6 +480,7 @@ State = {
     AutoNextPortal = false,
     SelectedPortalTypes = {},
     SelectedPortalTiers = {},
+    SelectedPortalModifiers = {},
     SnipeBanner = "",
     SnipeTargets = {},
     SnipeGemLimit = 0,
@@ -609,6 +610,7 @@ function CopyStateForSave()
         AutoNextPortal = State.AutoNextPortal,
         SelectedPortalTypes = State.SelectedPortalTypes,
         SelectedPortalTiers = State.SelectedPortalTiers,
+        SelectedPortalModifiers = State.SelectedPortalModifiers,
         SnipeBanner = State.SnipeBanner,
         SnipeTargets = State.SnipeTargets,
         SnipeGemLimit = State.SnipeGemLimit,
@@ -690,6 +692,13 @@ function ApplySavedTable(saved)
             end
         end
         State.SelectedPortalTiers = selected
+    end
+    if type(saved.SelectedPortalModifiers) == "table" then
+        local selected = {}
+        for key, value in pairs(saved.SelectedPortalModifiers) do
+            if type(key) == "string" and value == true then selected[key] = true end
+        end
+        State.SelectedPortalModifiers = selected
     end
     if type(saved.SnipeBanner) == "string" then State.SnipeBanner = saved.SnipeBanner end
     if type(saved.SnipeTargets) == "table" then
@@ -4540,8 +4549,86 @@ function ApplyResponsiveGuiSizing()
 end
 ApplyResponsiveGuiSizing()
 
-PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 2, 30)
-PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 3, function() end)
+-- Optional element filter: matches the damage types shown by the game's level modifier UI.
+PortalModifierColumn = Instance.new("Frame")
+PortalModifierColumn.Name = "PortalLevelModifiersColumn"
+PortalModifierColumn.Size = UDim2.new(1, -10, 0, 150)
+PortalModifierColumn.BackgroundTransparency = 1
+PortalModifierColumn.LayoutOrder = 2
+PortalModifierColumn.ZIndex = 12
+PortalModifierColumn.Parent = PortalPage
+local portalModifierLayout = Instance.new("UIListLayout")
+portalModifierLayout.FillDirection = Enum.FillDirection.Vertical
+portalModifierLayout.SortOrder = Enum.SortOrder.LayoutOrder
+portalModifierLayout.Padding = UDim.new(0, 3)
+portalModifierLayout.Parent = PortalModifierColumn
+local portalModifierHeading = CreateSection(PortalModifierColumn, "Level Modifiers (Element)", 1)
+portalModifierHeading.Size = UDim2.new(1, -4, 0, 20)
+local portalModifierHint = CreateHint(PortalModifierColumn, "เลือกธาตุเพื่อกรอง Portal ที่มีธาตุนั้นใน Strong / Weak modifiers (เลือกหลายธาตุได้)", 2, 28)
+portalModifierHint.Size = UDim2.new(1, -4, 0, 28)
+PortalModifierList = Instance.new("ScrollingFrame")
+PortalModifierList.Name = "PortalModifierList"
+PortalModifierList.Size = UDim2.new(1, -4, 0, 95 / math.max(HubScale.Scale, 0.01))
+PortalModifierList.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+PortalModifierList.BorderSizePixel = 0
+PortalModifierList.ScrollBarThickness = 4
+PortalModifierList.ScrollingDirection = Enum.ScrollingDirection.Y
+PortalModifierList.ScrollingEnabled = true
+PortalModifierList.Active = true
+PortalModifierList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+PortalModifierList.CanvasSize = UDim2.new(0, 0, 0, 0)
+PortalModifierList.ZIndex = 12
+PortalModifierList.LayoutOrder = 3
+PortalModifierList.Parent = PortalModifierColumn
+local portalModifierGrid = Instance.new("UIGridLayout")
+portalModifierGrid.CellSize = UDim2.new(0.2, -4, 0, 26)
+portalModifierGrid.CellPadding = UDim2.new(0, 4, 0, 3)
+portalModifierGrid.SortOrder = Enum.SortOrder.LayoutOrder
+portalModifierGrid.Parent = PortalModifierList
+portalModifierGrid:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    PortalModifierList.CanvasSize = UDim2.new(0, 0, 0, portalModifierGrid.AbsoluteContentSize.Y + 6)
+end)
+
+PORTAL_ELEMENT_FILTERS = {
+    { id = "connection_damage", label = "Connection" },
+    { id = "light_damage", label = "Light" },
+    { id = "dark_damage", label = "Darkness" },
+    { id = "fire_damage", label = "Fire" },
+    { id = "earth_damage", label = "Earth" },
+    { id = "water_damage", label = "Water" },
+    { id = "energy_damage", label = "Energy" },
+    { id = "time_damage", label = "Time" },
+    { id = "ice_damage", label = "Ice" },
+    { id = "air_damage", label = "Air" },
+}
+function RefreshPortalModifierUI()
+    for _, child in ipairs(PortalModifierList:GetChildren()) do
+        if child:IsA("TextButton") then child:Destroy() end
+    end
+    for index, info in ipairs(PORTAL_ELEMENT_FILTERS) do
+        local selected = State.SelectedPortalModifiers[info.id] == true
+        local button = Instance.new("TextButton")
+        button.Size = UDim2.new(0, 0, 0, 26)
+        button.BackgroundColor3 = selected and Color3.fromRGB(0, 120, 190) or Color3.fromRGB(38, 38, 50)
+        button.Text = (selected and "✓ " or "□ ") .. info.label
+        button.TextColor3 = Color3.new(1, 1, 1)
+        button.TextSize = 10
+        button.Font = Enum.Font.Gotham
+        button.LayoutOrder = index
+        button.ZIndex = 13
+        button.Parent = PortalModifierList
+        button.MouseButton1Click:Connect(function()
+            State.SelectedPortalModifiers[info.id] = not State.SelectedPortalModifiers[info.id] and true or nil
+            SaveConfig()
+            RefreshPortalModifierUI()
+            RefreshPortalUI()
+        end)
+    end
+end
+RefreshPortalModifierUI()
+
+PortalStatus = CreateHint(PortalPage, "Portal inventory: waiting for refresh.", 3, 30)
+PortalRefreshButton = CreateButton(PortalPage, "Refresh Portal Inventory", 4, function() end)
 PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
 -- The game Session owns both services; this mirrors the structure in game.lua:
@@ -4618,15 +4705,42 @@ function GetOwnedPortals()
         if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
             local def = itemData and itemData[owned.item_id]
             if def and def.item_group == "Portals" then
-                local portalData = owned._unique_item_data and owned._unique_item_data._unique_portal_data
+                local uniqueData = owned._unique_item_data
+                local portalData = type(uniqueData) == "table" and uniqueData._unique_portal_data or nil
                 local tier = tonumber(portalData and portalData.portal_depth) or 0
+                local levelId = (type(portalData) == "table" and portalData.level_id)
+                    or (type(def.usage) == "table" and def.usage.level_id)
+                local levelData = nil
+                if type(def.static_portal_copy_to_level_params) == "table" then
+                    levelData = def.static_portal_copy_to_level_params
+                elseif type(levelId) == "string" then
+                    local levels = LoadGameDataModule("Levels")
+                    levelData = type(levels) == "table" and levels[levelId] or nil
+                end
+                local elements = {}
+                local function addElement(value)
+                    if type(value) == "string" and value ~= "" then elements[value] = true end
+                end
+                local function addElementEntries(entries)
+                    if type(entries) ~= "table" then return end
+                    for _, entry in pairs(entries) do
+                        if type(entry) == "table" then addElement(entry.damage_type) else addElement(entry) end
+                    end
+                end
+                if type(levelData) == "table" then
+                    addElementEntries(levelData._strong_against)
+                    addElementEntries(levelData._weak_against)
+                    addElementEntries(levelData._daily_challenge_weak_against)
+                    addElementEntries(levelData._daily_challenge_strong_against)
+                    addElementEntries(levelData._recommended_damage_types)
+                end
                 local key = owned.item_id
                 if not seen[key] then
                     seen[key] = { id = key, name = tostring(def.name or key), count = 0, entries = {} }
                     table.insert(portals, seen[key])
                 end
                 seen[key].count = seen[key].count + 1
-                table.insert(seen[key].entries, { uuid = owned.uuid, tier = tier })
+                table.insert(seen[key].entries, { uuid = owned.uuid, tier = tier, elements = elements })
             end
         end
     end
@@ -4719,10 +4833,21 @@ task.spawn(function()
                 end
                 local portals = GetOwnedPortals()
                 local candidates = {}
+                local hasElementFilter = next(State.SelectedPortalModifiers) ~= nil
                 for _, portal in ipairs(portals) do
                     if State.SelectedPortalTypes[portal.id] then
                         for _, entry in ipairs(portal.entries) do
-                            if State.SelectedPortalTiers[tostring(entry.tier)] and not portalOpenedUUIDs[entry.uuid] then
+                            local elementMatch = not hasElementFilter
+                            if hasElementFilter and type(entry.elements) == "table" then
+                                for elementId in pairs(State.SelectedPortalModifiers) do
+                                    if entry.elements[elementId] then
+                                        elementMatch = true
+                                        break
+                                    end
+                                end
+                            end
+                            if elementMatch and State.SelectedPortalTiers[tostring(entry.tier)]
+                                and not portalOpenedUUIDs[entry.uuid] then
                                 table.insert(candidates, { uuid = entry.uuid, tier = entry.tier, name = portal.name })
                             end
                         end
