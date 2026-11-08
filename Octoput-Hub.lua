@@ -463,7 +463,6 @@ State = {
     WebhookURL = "",
     WebhookOnEnd = false,
     BlackScreen = false,
-    HideUnits = false,
     AutoHideGUIOnExecute = false,
     UIScale = 1,
     PlaceHybridGround = true,
@@ -594,7 +593,6 @@ function CopyStateForSave()
         WebhookURL = State.WebhookURL,
         WebhookOnEnd = State.WebhookOnEnd,
         BlackScreen = State.BlackScreen,
-        HideUnits = State.HideUnits,
         AutoHideGUIOnExecute = State.AutoHideGUIOnExecute,
         UIScale = State.UIScale,
         PlaceHybridGround = State.PlaceHybridGround,
@@ -644,7 +642,7 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "HideUnits", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -3643,94 +3641,6 @@ function ApplyBlackScreen(enabled)
     end
 end
 
--- Local-only unit visibility toggle. Keep the original visual properties so the
--- game simulation and server-side units remain untouched and visuals can be restored.
-unitVisibilityOriginals = setmetatable({}, { __mode = "k" })
-unitVisibilityFolderConn = nil
-unitVisibilityWorkspaceConn = nil
-
-function SetUnitVisualHidden(inst, hidden)
-    if not inst then return end
-    local property = nil
-    if inst:IsA("BasePart") then
-        property = "LocalTransparencyModifier"
-    elseif inst:IsA("Decal") or inst:IsA("Texture") then
-        property = "Transparency"
-    elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam")
-        or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles")
-        or inst:IsA("Highlight") or inst:IsA("BillboardGui") or inst:IsA("SurfaceGui") then
-        property = "Enabled"
-    end
-    if not property then return end
-
-    if hidden then
-        if unitVisibilityOriginals[inst] == nil then
-            local ok, value = pcall(function() return inst[property] end)
-            if not ok then return end
-            unitVisibilityOriginals[inst] = { property = property, value = value }
-        end
-        pcall(function()
-            if property == "LocalTransparencyModifier" or property == "Transparency" then
-                inst[property] = 1
-            else
-                inst[property] = false
-            end
-        end)
-    else
-        local saved = unitVisibilityOriginals[inst]
-        if saved then
-            pcall(function() inst[saved.property] = saved.value end)
-            unitVisibilityOriginals[inst] = nil
-        end
-    end
-end
-
-function BindUnitVisibilityFolder(folder)
-    if unitVisibilityFolderConn then
-        unitVisibilityFolderConn:Disconnect()
-        unitVisibilityFolderConn = nil
-    end
-    if not State.HideUnits or not folder then return end
-    for _, descendant in ipairs(folder:GetDescendants()) do
-        SetUnitVisualHidden(descendant, true)
-    end
-    unitVisibilityFolderConn = folder.DescendantAdded:Connect(function(descendant)
-        if State.HideUnits then
-            SetUnitVisualHidden(descendant, true)
-        end
-    end)
-end
-
-function ApplyUnitVisibility(enabled)
-    State.HideUnits = enabled == true
-    if unitVisibilityFolderConn then
-        unitVisibilityFolderConn:Disconnect()
-        unitVisibilityFolderConn = nil
-    end
-    if unitVisibilityWorkspaceConn then
-        unitVisibilityWorkspaceConn:Disconnect()
-        unitVisibilityWorkspaceConn = nil
-    end
-
-    if enabled then
-        BindUnitVisibilityFolder(workspace:FindFirstChild("_UNITS"))
-        unitVisibilityWorkspaceConn = workspace.ChildAdded:Connect(function(child)
-            if child.Name == "_UNITS" and State.HideUnits then
-                task.defer(function()
-                    if State.HideUnits and child.Parent == workspace then
-                        BindUnitVisibilityFolder(child)
-                    end
-                end)
-            end
-        end)
-    else
-        for inst in pairs(unitVisibilityOriginals) do
-            SetUnitVisualHidden(inst, false)
-        end
-    end
-    SaveConfig()
-end
-
 function SuppressErrorNotifications()
     -- Do not clear MessageGui or NotificationWindows.List.
     -- Anime Adventures uses these containers for legitimate item-drop messages;
@@ -5473,15 +5383,8 @@ CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, fu
     -- This setting is saved and takes effect on the next script execution.
 end)
 CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
-CreateToggle(MiscPage, "Hide Units (Reduce 3D Lag)", "HideUnits", 4, function(isON)
-    ApplyUnitVisibility(isON)
-end)
-CreateHint(MiscPage, "Hides unit models, effects and overhead unit UI locally. It does not remove units or stop their game logic.", 5, 42)
-if State.HideUnits then
-    ApplyUnitVisibility(true)
-end
-CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 6, 34)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 7, 34)
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 4, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 5, 34)
 CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 8, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
