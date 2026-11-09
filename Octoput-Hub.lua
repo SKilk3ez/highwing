@@ -3081,8 +3081,8 @@ function BuildTrackedSkyPortalRewardLines(trackedPortals)
         table.insert(normalLines, line)
         table.insert(secretLines, line)
     end
-    return #normalLines > 0 and table.concat(normalLines, "\\n") or nil,
-        #secretLines > 0 and table.concat(secretLines, "\\n") or nil
+    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+        #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
 
 function BuildMatchRewardLines(resultDetails)
@@ -3302,10 +3302,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     -- inventory profile disappears during defeat / result-screen teardown.
     local trackedPortalNormal, trackedPortalSecret = BuildTrackedSkyPortalRewardLines(trackedPortalSnapshot)
     if trackedPortalNormal then
-        inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\\n" .. trackedPortalNormal) or trackedPortalNormal
+        inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. trackedPortalNormal) or trackedPortalNormal
     end
     if trackedPortalSecret then
-        secretRewardText = secretRewardText and (secretRewardText .. "\\n" .. trackedPortalSecret) or trackedPortalSecret
+        secretRewardText = secretRewardText and (secretRewardText .. "\n" .. trackedPortalSecret) or trackedPortalSecret
     end
 
     local currentCurrencies = ReadPlayerCurrencies()
