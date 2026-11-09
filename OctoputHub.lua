@@ -3023,7 +3023,7 @@ function ReadInventoryRewardSnapshot()
     return snapshot, inventoryProfile ~= nil
 end
 
-function BuildInventoryRewardLines(before, after)
+function BuildInventoryRewardLines(before, after, skipTrackedPortals)
     local normalEntries, secretEntries = {}, {}
     for key, reward in pairs(after or {}) do
         local old = before and before[key]
@@ -3035,7 +3035,10 @@ function BuildInventoryRewardLines(before, after)
             gained = 0
         end
 
-        if gained > 0 then
+        local isTrackedPortal = skipTrackedPortals and skipTrackedPortals[key] == true
+            and key:sub(1, 5) == "item:"
+            and (tostring(reward.itemId or "") == "portal_item__skypiea" or tostring(reward.itemId or "") == "portal_item__enel")
+        if gained > 0 and not isTrackedPortal then
             local category = tostring(reward.category or "Item")
             local name = tostring(reward.name or "Unknown")
             local rarity = tostring(reward.rarity or "")
@@ -3059,6 +3062,25 @@ function BuildInventoryRewardLines(before, after)
     end
     local normalLines = SortLines(normalEntries)
     local secretLines = SortLines(secretEntries)
+    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+        #secretLines > 0 and table.concat(secretLines, "\n") or nil
+end
+
+function BuildTrackedSkyPortalRewardLines(trackedPortals)
+    local counts = { portal_item__skypiea = 0, portal_item__enel = 0 }
+    for _, reward in pairs(trackedPortals or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if counts[itemId] ~= nil then counts[itemId] = counts[itemId] + 1 end
+    end
+    local normalLines, secretLines = {}, {}
+    if counts.portal_item__skypiea > 0 then
+        table.insert(normalLines, string.format("• **Sky Portal ×%s** — Portals · Mythic", FormatNumber(counts.portal_item__skypiea)))
+    end
+    if counts.portal_item__enel > 0 then
+        local line = string.format("🌟 • **Sky God's Portal ×%s** — Portals · Secret", FormatNumber(counts.portal_item__enel))
+        table.insert(normalLines, line)
+        table.insert(secretLines, line)
+    end
     return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
         #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
@@ -3234,7 +3256,7 @@ function ResolveWebhookOutcome(resultDetails)
     return "Unknown"
 end
 
-function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable, unitLinesSnapshot)
+function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable, unitLinesSnapshot, trackedPortalSnapshot)
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
@@ -3268,12 +3290,22 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
             task.wait(0.5)
         end
         if inventoryRewardsAvailable then
-            inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
+            inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter, trackedPortalSnapshot)
         else
             warn("[Octoput Hub Webhook] Inventory snapshot unavailable after retries.")
         end
     else
         warn("[Octoput Hub Webhook] Inventory baseline unavailable; inventory drops cannot be diffed.")
+    end
+
+    -- Portal UUIDs observed during the live match are authoritative even if the
+    -- inventory profile disappears during defeat / result-screen teardown.
+    local trackedPortalNormal, trackedPortalSecret = BuildTrackedSkyPortalRewardLines(trackedPortalSnapshot)
+    if trackedPortalNormal then
+        inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. trackedPortalNormal) or trackedPortalNormal
+    end
+    if trackedPortalSecret then
+        secretRewardText = secretRewardText and (secretRewardText .. "\n" .. trackedPortalSecret) or trackedPortalSecret
     end
 
     local currentCurrencies = ReadPlayerCurrencies()
@@ -4875,6 +4907,7 @@ end
 -- current LocalPlayer inventory against it and reports either Sky Portal item ID.
 local skyPortalMonitorKnown = nil
 local skyPortalMonitorWasInMatch = false
+skyPortalMatchDrops = {}
 
 function NotifySkyPortalDrop(reward)
     local itemId = tostring(reward and reward.itemId or "")
@@ -4933,6 +4966,10 @@ task.spawn(function()
                 if key:sub(1, 5) == "item:"
                     and (itemId == "portal_item__skypiea" or itemId == "portal_item__enel")
                     and not known[key] then
+                    -- Record the UUID as soon as it appears in the live inventory.
+                    -- The webhook can still report it if the post-match snapshot fails.
+                    skyPortalMatchDrops = skyPortalMatchDrops or {}
+                    skyPortalMatchDrops[key] = table.clone(reward)
                     NotifySkyPortalDrop(reward)
                 end
             end
@@ -7103,10 +7140,11 @@ function StartWebhookEndSend(reason)
     local secretBaseline = webhookSecretRewardBefore
     local secretAvailable = webhookSecretRewardBaselineAvailable
     local unitLinesSnapshot = webhookUnitLinesSnapshot
+    local trackedPortalSnapshot = table.clone(skyPortalMatchDrops or {})
 
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
     task.spawn(function()
-        local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot, trackedPortalSnapshot)
         -- A previous match's HTTP request may finish after a new match has begun.
         -- Never let that old task mutate the new match's send/retry state.
         if webhookMatchToken ~= sendToken then
@@ -7178,6 +7216,7 @@ task.spawn(function()
                     webhookSecretRewardBefore = nil
                     webhookSecretRewardBaselineAvailable = false
                     webhookUnitLinesSnapshot = nil
+                    skyPortalMatchDrops = {}
                     webhookResultSettingsAtStart = nil
                 end
 
@@ -7349,6 +7388,7 @@ task.spawn(function()
                 webhookSent = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
+                skyPortalMatchDrops = {}
                 webhookResultTitleAtStart = resultTitle
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
