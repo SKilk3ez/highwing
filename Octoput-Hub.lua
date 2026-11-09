@@ -3077,7 +3077,9 @@ function BuildTrackedSkyPortalRewardLines(trackedPortals)
         table.insert(normalLines, string.format("• **Sky Portal ×%s** — Portals · Mythic", FormatNumber(counts.portal_item__skypiea)))
     end
     if counts.portal_item__enel > 0 then
-        table.insert(secretLines, string.format("🌟 • **Sky God's Portal ×%s** — Portals · Secret", FormatNumber(counts.portal_item__enel)))
+        local line = string.format("🌟 • **Sky God's Portal ×%s** — Portals · Secret", FormatNumber(counts.portal_item__enel))
+        table.insert(normalLines, line)
+        table.insert(secretLines, line)
     end
     return #normalLines > 0 and table.concat(normalLines, "\\n") or nil,
         #secretLines > 0 and table.concat(secretLines, "\\n") or nil
