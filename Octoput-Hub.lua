@@ -3023,33 +3023,72 @@ function ReadInventoryRewardSnapshot()
     return snapshot, inventoryProfile ~= nil
 end
 
+local WEBHOOK_PORTAL_ITEMS = {
+    portal_item__skypiea = { name = "Sky Portal", rarity = "Mythic" },
+    portal_item__enel = { name = "Sky God's Portal", rarity = "Secret" },
+}
+
+function GetWebhookPortalCounts(snapshot)
+    local counts = { portal_item__skypiea = 0, portal_item__enel = 0 }
+    for key, reward in pairs(snapshot or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if counts[itemId] ~= nil then
+            if key:sub(1, 7) == "normal:" then
+                counts[itemId] = counts[itemId] + math.max(0, tonumber(reward.amount) or 1)
+            else
+                counts[itemId] = counts[itemId] + 1
+            end
+        end
+    end
+    return counts
+end
+
 function BuildInventoryRewardLines(before, after, skipTrackedPortals)
     local normalEntries, secretEntries = {}, {}
-    for key, reward in pairs(after or {}) do
-        local old = before and before[key]
-        local amount = tonumber(reward.amount) or 1
-        local gained = amount
-        if key:sub(1, 7) == "normal:" then
-            gained = math.max(0, amount - (old and tonumber(old.amount) or 0))
-        elseif old then
-            gained = 0
-        end
+    local beforePortals = GetWebhookPortalCounts(before)
+    local afterPortals = GetWebhookPortalCounts(after)
 
-        local isTrackedPortal = skipTrackedPortals and skipTrackedPortals[key] == true
-            and key:sub(1, 5) == "item:"
-            and (tostring(reward.itemId or "") == "portal_item__skypiea" or tostring(reward.itemId or "") == "portal_item__enel")
-        if gained > 0 and not isTrackedPortal then
-            local category = tostring(reward.category or "Item")
-            local name = tostring(reward.name or "Unknown")
-            local rarity = tostring(reward.rarity or "")
-            local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
-            local rarityText = rarity ~= "" and rarity ~= "Unknown" and (" · " .. rarity) or ""
-            local line = string.format("• **%s ×%s** — %s%s%s",
-                name, FormatNumber(gained), category, rarityText, tierText)
-            if tostring(reward.rarity or ""):lower() == "secret" or reward.secret == true then
-                table.insert(secretEntries, { sort = name:lower(), line = "🌟 " .. line })
+    -- Aggregate stackable normal_items and UUID-based unique_items into one
+    -- Portal delta, with the final owned quantity in square brackets.
+    for itemId, portal in pairs(WEBHOOK_PORTAL_ITEMS) do
+        local gained = math.max(0, (afterPortals[itemId] or 0) - (beforePortals[itemId] or 0))
+        if gained > 0 then
+            local line = string.format("• **+%s %s [%s]** — Portals · %s",
+                FormatNumber(gained), portal.name, FormatNumber(afterPortals[itemId] or 0), portal.rarity)
+            local entry = { sort = portal.name:lower(), line = line }
+            if portal.rarity == "Secret" then
+                table.insert(secretEntries, { sort = entry.sort, line = "🌟 " .. entry.line })
             else
-                table.insert(normalEntries, { sort = name:lower(), line = line })
+                table.insert(normalEntries, entry)
+            end
+        end
+    end
+
+    for key, reward in pairs(after or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if not WEBHOOK_PORTAL_ITEMS[itemId] then
+            local old = before and before[key]
+            local amount = tonumber(reward.amount) or 1
+            local gained = amount
+            if key:sub(1, 7) == "normal:" then
+                gained = math.max(0, amount - (old and tonumber(old.amount) or 0))
+            elseif old then
+                gained = 0
+            end
+
+            if gained > 0 then
+                local category = tostring(reward.category or "Item")
+                local name = tostring(reward.name or "Unknown")
+                local rarity = tostring(reward.rarity or "")
+                local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
+                local rarityText = rarity ~= "" and rarity ~= "Unknown" and (" · " .. rarity) or ""
+                local line = string.format("• **%s ×%s** — %s%s%s",
+                    name, FormatNumber(gained), category, rarityText, tierText)
+                if tostring(reward.rarity or ""):lower() == "secret" or reward.secret == true then
+                    table.insert(secretEntries, { sort = name:lower(), line = "🌟 " .. line })
+                else
+                    table.insert(normalEntries, { sort = name:lower(), line = line })
+                end
             end
         end
     end
@@ -3284,9 +3323,26 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        for attempt = 1, 10 do
-            inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
-            if inventoryRewardsAvailable then break end
+        -- Allow delayed server inventory grants to settle after ResultsUI appears.
+        local previousPortalSignature = nil
+        local stablePortalReads = 0
+        for attempt = 1, 12 do
+            local sampledSnapshot, sampledAvailable = ReadInventoryRewardSnapshot()
+            if sampledAvailable then
+                inventoryRewardsAfter = sampledSnapshot
+                inventoryRewardsAvailable = true
+                local portalCounts = GetWebhookPortalCounts(sampledSnapshot)
+                local signature = string.format("%d|%d",
+                    portalCounts.portal_item__skypiea or 0,
+                    portalCounts.portal_item__enel or 0)
+                if signature == previousPortalSignature then
+                    stablePortalReads = stablePortalReads + 1
+                else
+                    stablePortalReads = 0
+                    previousPortalSignature = signature
+                end
+                if stablePortalReads >= 2 and attempt >= 5 then break end
+            end
             task.wait(0.5)
         end
         if inventoryRewardsAvailable then
@@ -3300,12 +3356,17 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
 
     -- Portal UUIDs observed during the live match are authoritative even if the
     -- inventory profile disappears during defeat / result-screen teardown.
-    local trackedPortalNormal, trackedPortalSecret = BuildTrackedSkyPortalRewardLines(trackedPortalSnapshot)
-    if trackedPortalNormal then
-        inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. trackedPortalNormal) or trackedPortalNormal
-    end
-    if trackedPortalSecret then
-        secretRewardText = secretRewardText and (secretRewardText .. "\n" .. trackedPortalSecret) or trackedPortalSecret
+    -- Only use live UUID tracking as a fallback when the final inventory read
+    -- failed. When the final read succeeds, its before/after diff already includes
+    -- both normal stack amounts and unique Portal UUIDs.
+    if not inventoryRewardsAvailable then
+        local trackedPortalNormal, trackedPortalSecret = BuildTrackedSkyPortalRewardLines(trackedPortalSnapshot)
+        if trackedPortalNormal then
+            inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. trackedPortalNormal) or trackedPortalNormal
+        end
+        if trackedPortalSecret then
+            secretRewardText = secretRewardText and (secretRewardText .. "\n" .. trackedPortalSecret) or trackedPortalSecret
+        end
     end
 
     local currentCurrencies = ReadPlayerCurrencies()
@@ -4909,12 +4970,11 @@ local skyPortalMonitorKnown = nil
 local skyPortalMonitorWasInMatch = false
 skyPortalMatchDrops = {}
 
-function NotifySkyPortalDrop(reward)
-    local itemId = tostring(reward and reward.itemId or "")
-    local rewardName = itemId == "portal_item__enel" and "Sky God's Portal"
-        or (itemId == "portal_item__skypiea" and "Sky Portal" or tostring(reward and reward.name or "Sky Portal"))
-    local title = "☁️ SKY PORTAL OBTAINED!"
-    local message = rewardName .. " has been added to your inventory."
+function NotifySkyPortalDrop(itemId, gained, total)
+    local portal = WEBHOOK_PORTAL_ITEMS[itemId]
+    if not portal or gained <= 0 then return end
+    local title = "☁️ PORTAL OBTAINED!"
+    local message = string.format("+%s %s [%s]", FormatNumber(gained), portal.name, FormatNumber(total))
 
     print("[Octoput Hub] " .. title .. " " .. message)
     pcall(function()
@@ -4961,16 +5021,23 @@ task.spawn(function()
             end
 
             local known = skyPortalMonitorKnown or {}
-            for key, reward in pairs(current) do
-                local itemId = tostring(reward and reward.itemId or "")
-                if key:sub(1, 5) == "item:"
-                    and (itemId == "portal_item__skypiea" or itemId == "portal_item__enel")
-                    and not known[key] then
-                    -- Record the UUID as soon as it appears in the live inventory.
-                    -- The webhook can still report it if the post-match snapshot fails.
-                    skyPortalMatchDrops = skyPortalMatchDrops or {}
-                    skyPortalMatchDrops[key] = table.clone(reward)
-                    NotifySkyPortalDrop(reward)
+            local knownCounts = GetWebhookPortalCounts(known)
+            local currentCounts = GetWebhookPortalCounts(current)
+            for itemId in pairs(WEBHOOK_PORTAL_ITEMS) do
+                local previousTotal = knownCounts[itemId] or 0
+                local currentTotal = currentCounts[itemId] or 0
+                local gained = math.max(0, currentTotal - previousTotal)
+                if gained > 0 then
+                    -- Preserve newly seen UUIDs for end-screen fallback if the
+                    -- inventory profile disappears during match teardown.
+                    for key, reward in pairs(current) do
+                        if key:sub(1, 5) == "item:" and tostring(reward.itemId or "") == itemId
+                            and not known[key] then
+                            skyPortalMatchDrops = skyPortalMatchDrops or {}
+                            skyPortalMatchDrops[key] = table.clone(reward)
+                        end
+                    end
+                    NotifySkyPortalDrop(itemId, gained, currentTotal)
                 end
             end
             skyPortalMonitorKnown = table.clone(current)
