@@ -3291,24 +3291,13 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     if firstCompletionRewardText then table.insert(rewardSections, firstCompletionRewardText) end
     if inventoryRewardText then table.insert(rewardSections, inventoryRewardText) end
 
-    -- Fallback to currency deltas only for reward types absent from the ResultsUI
-    -- payload, preventing the same reward from being reported twice.
+    -- Do not infer XP / Gold / Gems / Trophies from wallet balance changes.
+    -- Those values are balances, not authoritative match rewards; ResultsUI's
+    -- reward payload (or its visible reward-card fallback above) is the source
+    -- of truth. Keep delta fallback only for additional event currencies.
     local settings = resultDetails and resultDetails.settings
     local before = currencyBaseline or {}
     local fallbackLines = {}
-    local fallbackKeys = {
-        { key = "XP", setting = "xp_reward", label = "Player XP" },
-        { key = "Gold", setting = "gold_reward", label = "Gold" },
-        { key = "Gems", setting = "gem_reward", label = "Gems" },
-        { key = "Trophies", setting = "trophy_reward", label = "Trophies" },
-    }
-    for _, entry in ipairs(fallbackKeys) do
-        local settingValue = type(settings) == "table" and tonumber(settings[entry.setting]) or nil
-        local delta = (tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)
-        if (not settingValue or settingValue <= 0) and delta > 0 then
-            table.insert(fallbackLines, string.format("• **%s:** +%s", entry.label, FormatNumber(delta)))
-        end
-    end
     local function NormalizeRewardKey(value)
         return tostring(value or ""):lower():gsub("[^%w]", "")
     end
@@ -3318,17 +3307,21 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
             reportedResourceKeys[NormalizeRewardKey(resourceName)] = true
         end
     end
+    local standardCurrencyAliases = {
+        xp = true, playerxp = true,
+        gold = true, goldamount = true,
+        gem = true, gems = true, gemamount = true,
+        trophy = true, trophies = true,
+    }
     local seenCurrencyAliases = {}
     for key, value in pairs(currentCurrencies) do
-        if not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
-            local normalizedKey = NormalizeRewardKey(key)
-            if not seenCurrencyAliases[normalizedKey] then
-                seenCurrencyAliases[normalizedKey] = true
-                local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
-                if delta > 0 and not reportedResourceKeys[normalizedKey] then
-                    local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
-                    table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
-                end
+        local normalizedKey = NormalizeRewardKey(key)
+        if not standardCurrencyAliases[normalizedKey] and not seenCurrencyAliases[normalizedKey] then
+            seenCurrencyAliases[normalizedKey] = true
+            local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
+            if delta > 0 and not reportedResourceKeys[normalizedKey] then
+                local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
+                table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
             end
         end
     end
@@ -7062,6 +7055,23 @@ task.spawn(function()
     end
 end)
 
+-- A script re-execution destroys the old GUI, but executor tasks and signal
+-- connections do not automatically stop with it. Use a shared generation token
+-- so only the newest Octoput execution can monitor/trigger match-end webhooks.
+local _webhookRuntimeKey = "__OCTOPUT_HUB_WEBHOOK_RUNTIME"
+local _webhookRuntime = _octoputBaseEnv[_webhookRuntimeKey]
+if type(_webhookRuntime) ~= "table" then
+    _webhookRuntime = {}
+    _octoputBaseEnv[_webhookRuntimeKey] = _webhookRuntime
+end
+_webhookRuntime.generation = (tonumber(_webhookRuntime.generation) or 0) + 1
+local _webhookRuntimeGeneration = _webhookRuntime.generation
+
+local function IsCurrentWebhookRuntime()
+    return _octoputBaseEnv[_webhookRuntimeKey] == _webhookRuntime
+        and _webhookRuntime.generation == _webhookRuntimeGeneration
+end
+
 -- Webhook end detection: follow Anime Adventures' actual ResultsUI lifecycle.
 -- game.lua assigns ResultsUI.settings = p22 before enabling ResultsUI, while the
 -- game_finished endpoint calls ResultsUI.show_results(p22). GameFinished is an
@@ -7093,11 +7103,28 @@ webhookBoundResultTitle = nil
 webhookMatchToken = 0
 
 function StartWebhookEndSend(reason)
-    if not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
+    if not IsCurrentWebhookRuntime()
+        or not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
+        return false
+    end
+
+    -- A previous script execution may still be completing its HTTP request.
+    -- Share the send lock so two script generations cannot post concurrently.
+    if _webhookRuntime.sending then
+        return false
+    end
+
+    local currentResult = GetResultDetails()
+    if currentResult and currentResult.settings
+        and _webhookRuntime.lastSentSettings == currentResult.settings then
+        webhookSent = true
+        print("[Octoput Hub Webhook] This match result was already sent by an earlier script execution.")
         return false
     end
 
     webhookSending = true
+    _webhookRuntime.sending = true
+    _webhookRuntime.sendingGeneration = _webhookRuntimeGeneration
     local sendToken = webhookMatchToken
     local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
     local secretBaseline = webhookSecretRewardBefore
@@ -7107,17 +7134,39 @@ function StartWebhookEndSend(reason)
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
     task.spawn(function()
         local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
+        local completedSettings
+        if callOk and sendResult == true then
+            local detailsOk, finalDetails = pcall(GetResultDetails)
+            if detailsOk and type(finalDetails) == "table" then
+                completedSettings = finalDetails.settings
+                if completedSettings then
+                    -- Persist the successful result even if this execution was
+                    -- superseded while its HTTP request was in flight.
+                    _webhookRuntime.lastSentSettings = completedSettings
+                end
+            end
+        end
+        if _webhookRuntime.sendingGeneration == _webhookRuntimeGeneration then
+            _webhookRuntime.sending = false
+            _webhookRuntime.sendingGeneration = nil
+        end
         -- A previous match's HTTP request may finish after a new match has begun.
-        -- Never let that old task mutate the new match's send/retry state.
-        if webhookMatchToken ~= sendToken then
-            print("[Octoput Hub Webhook] Ignoring completion from an older match.")
+        -- Never let an old execution mutate the current execution's local state.
+        if not IsCurrentWebhookRuntime() or webhookMatchToken ~= sendToken then
+            print("[Octoput Hub Webhook] Ignoring completion from an older match/script execution.")
             return
         end
         webhookSending = false
         if callOk and sendResult == true then
             webhookSent = true
-            local finalDetails = GetResultDetails()
-            webhookLastSentSettings = finalDetails and finalDetails.settings or nil
+            webhookLastSentSettings = completedSettings
+            if not webhookLastSentSettings then
+                local finalDetails = GetResultDetails()
+                webhookLastSentSettings = finalDetails and finalDetails.settings or nil
+            end
+            if webhookLastSentSettings then
+                _webhookRuntime.lastSentSettings = webhookLastSentSettings
+            end
             print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
         else
             local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
@@ -7129,6 +7178,9 @@ function StartWebhookEndSend(reason)
 end
 
 function MarkWebhookEnd(reason)
+    if not IsCurrentWebhookRuntime() then
+        return
+    end
     if not webhookEndDetected then
         -- Commit the end state first. Optional snapshot readers must never block
         -- the webhook trigger if a folder/module disappears during match teardown.
@@ -7145,8 +7197,9 @@ function MarkWebhookEnd(reason)
 end
 
 task.spawn(function()
-    while true do
+    while IsCurrentWebhookRuntime() do
         task.wait(0.2)
+        if not IsCurrentWebhookRuntime() then break end
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
@@ -7201,6 +7254,7 @@ task.spawn(function()
                 webhookBoundGameFinished = gameFinished
                 if gameFinished then
                     gameFinished.Changed:Connect(function()
+                        if not IsCurrentWebhookRuntime() then return end
                         if webhookBoundGameFinished == gameFinished
                             and workspace:FindFirstChild("_DATA") == webhookDataFolder
                             and gameFinished.Value == true then
@@ -7225,6 +7279,7 @@ task.spawn(function()
                     if titleLabel and titleLabel:IsA("TextLabel") then
                         webhookBoundResultTitle = titleLabel
                         titleLabel:GetPropertyChangedSignal("Text"):Connect(function()
+                            if not IsCurrentWebhookRuntime() then return end
                             if webhookBoundResultsGui ~= resultsGui
                                 or webhookBoundResultTitle ~= titleLabel
                                 or playerGui:FindFirstChild("ResultsUI") ~= resultsGui then
@@ -7257,6 +7312,7 @@ task.spawn(function()
                         end
                     end
                     resultsGui:GetPropertyChangedSignal("Enabled"):Connect(function()
+                        if not IsCurrentWebhookRuntime() then return end
                         if webhookBoundResultsGui == resultsGui
                             and playerGui:FindFirstChild("ResultsUI") == resultsGui
                             and resultsGui.Enabled == true then
