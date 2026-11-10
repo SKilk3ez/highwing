@@ -3023,30 +3023,72 @@ function ReadInventoryRewardSnapshot()
     return snapshot, inventoryProfile ~= nil
 end
 
-function BuildInventoryRewardLines(before, after)
-    local normalEntries, secretEntries = {}, {}
-    for key, reward in pairs(after or {}) do
-        local old = before and before[key]
-        local amount = tonumber(reward.amount) or 1
-        local gained = amount
-        if key:sub(1, 7) == "normal:" then
-            gained = math.max(0, amount - (old and tonumber(old.amount) or 0))
-        elseif old then
-            gained = 0
-        end
+local WEBHOOK_PORTAL_ITEMS = {
+    portal_item__skypiea = { name = "Sky Portal", rarity = "Mythic" },
+    portal_item__enel = { name = "Sky God's Portal", rarity = "Secret" },
+}
 
-        if gained > 0 then
-            local category = tostring(reward.category or "Item")
-            local name = tostring(reward.name or "Unknown")
-            local rarity = tostring(reward.rarity or "")
-            local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
-            local rarityText = rarity ~= "" and rarity ~= "Unknown" and (" · " .. rarity) or ""
-            local line = string.format("• **%s ×%s** — %s%s%s",
-                name, FormatNumber(gained), category, rarityText, tierText)
-            if tostring(reward.rarity or ""):lower() == "secret" or reward.secret == true then
-                table.insert(secretEntries, { sort = name:lower(), line = "🌟 " .. line })
+function GetWebhookPortalCounts(snapshot)
+    local counts = { portal_item__skypiea = 0, portal_item__enel = 0 }
+    for key, reward in pairs(snapshot or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if counts[itemId] ~= nil then
+            if key:sub(1, 7) == "normal:" then
+                counts[itemId] = counts[itemId] + math.max(0, tonumber(reward.amount) or 1)
             else
-                table.insert(normalEntries, { sort = name:lower(), line = line })
+                counts[itemId] = counts[itemId] + 1
+            end
+        end
+    end
+    return counts
+end
+
+function BuildInventoryRewardLines(before, after, skipTrackedPortals)
+    local normalEntries, secretEntries = {}, {}
+    local beforePortals = GetWebhookPortalCounts(before)
+    local afterPortals = GetWebhookPortalCounts(after)
+
+    -- Aggregate stackable normal_items and UUID-based unique_items into one
+    -- Portal delta, with the final owned quantity in square brackets.
+    for itemId, portal in pairs(WEBHOOK_PORTAL_ITEMS) do
+        local gained = math.max(0, (afterPortals[itemId] or 0) - (beforePortals[itemId] or 0))
+        if gained > 0 then
+            local line = string.format("• **+%s %s [%s]** — Portals · %s",
+                FormatNumber(gained), portal.name, FormatNumber(afterPortals[itemId] or 0), portal.rarity)
+            local entry = { sort = portal.name:lower(), line = line }
+            if portal.rarity == "Secret" then
+                table.insert(secretEntries, { sort = entry.sort, line = "🌟 " .. entry.line })
+            else
+                table.insert(normalEntries, entry)
+            end
+        end
+    end
+
+    for key, reward in pairs(after or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if not WEBHOOK_PORTAL_ITEMS[itemId] then
+            local old = before and before[key]
+            local amount = tonumber(reward.amount) or 1
+            local gained = amount
+            if key:sub(1, 7) == "normal:" then
+                gained = math.max(0, amount - (old and tonumber(old.amount) or 0))
+            elseif old then
+                gained = 0
+            end
+
+            if gained > 0 then
+                local category = tostring(reward.category or "Item")
+                local name = tostring(reward.name or "Unknown")
+                local rarity = tostring(reward.rarity or "")
+                local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
+                local rarityText = rarity ~= "" and rarity ~= "Unknown" and (" · " .. rarity) or ""
+                local line = string.format("• **%s ×%s** — %s%s%s",
+                    name, FormatNumber(gained), category, rarityText, tierText)
+                if tostring(reward.rarity or ""):lower() == "secret" or reward.secret == true then
+                    table.insert(secretEntries, { sort = name:lower(), line = "🌟 " .. line })
+                else
+                    table.insert(normalEntries, { sort = name:lower(), line = line })
+                end
             end
         end
     end
@@ -3059,6 +3101,25 @@ function BuildInventoryRewardLines(before, after)
     end
     local normalLines = SortLines(normalEntries)
     local secretLines = SortLines(secretEntries)
+    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+        #secretLines > 0 and table.concat(secretLines, "\n") or nil
+end
+
+function BuildTrackedSkyPortalRewardLines(trackedPortals)
+    local counts = { portal_item__skypiea = 0, portal_item__enel = 0 }
+    for _, reward in pairs(trackedPortals or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if counts[itemId] ~= nil then counts[itemId] = counts[itemId] + 1 end
+    end
+    local normalLines, secretLines = {}, {}
+    if counts.portal_item__skypiea > 0 then
+        table.insert(normalLines, string.format("• **Sky Portal ×%s** — Portals · Mythic", FormatNumber(counts.portal_item__skypiea)))
+    end
+    if counts.portal_item__enel > 0 then
+        local line = string.format("🌟 • **Sky God's Portal ×%s** — Portals · Secret", FormatNumber(counts.portal_item__enel))
+        table.insert(normalLines, line)
+        table.insert(secretLines, line)
+    end
     return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
         #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
@@ -3234,7 +3295,7 @@ function ResolveWebhookOutcome(resultDetails)
     return "Unknown"
 end
 
-function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable, unitLinesSnapshot)
+function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailable, unitLinesSnapshot, trackedPortalSnapshot)
     local url = NormalizeWebhookUrl(State.WebhookURL)
     local problem = WebhookProblem(url)
     if problem then
@@ -3262,18 +3323,50 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        for attempt = 1, 10 do
-            inventoryRewardsAfter, inventoryRewardsAvailable = ReadInventoryRewardSnapshot()
-            if inventoryRewardsAvailable then break end
+        -- Allow delayed server inventory grants to settle after ResultsUI appears.
+        local previousPortalSignature = nil
+        local stablePortalReads = 0
+        for attempt = 1, 12 do
+            local sampledSnapshot, sampledAvailable = ReadInventoryRewardSnapshot()
+            if sampledAvailable then
+                inventoryRewardsAfter = sampledSnapshot
+                inventoryRewardsAvailable = true
+                local portalCounts = GetWebhookPortalCounts(sampledSnapshot)
+                local signature = string.format("%d|%d",
+                    portalCounts.portal_item__skypiea or 0,
+                    portalCounts.portal_item__enel or 0)
+                if signature == previousPortalSignature then
+                    stablePortalReads = stablePortalReads + 1
+                else
+                    stablePortalReads = 0
+                    previousPortalSignature = signature
+                end
+                if stablePortalReads >= 2 and attempt >= 5 then break end
+            end
             task.wait(0.5)
         end
         if inventoryRewardsAvailable then
-            inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter)
+            inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter, trackedPortalSnapshot)
         else
             warn("[Octoput Hub Webhook] Inventory snapshot unavailable after retries.")
         end
     else
         warn("[Octoput Hub Webhook] Inventory baseline unavailable; inventory drops cannot be diffed.")
+    end
+
+    -- Portal UUIDs observed during the live match are authoritative even if the
+    -- inventory profile disappears during defeat / result-screen teardown.
+    -- Only use live UUID tracking as a fallback when the final inventory read
+    -- failed. When the final read succeeds, its before/after diff already includes
+    -- both normal stack amounts and unique Portal UUIDs.
+    if not inventoryRewardsAvailable then
+        local trackedPortalNormal, trackedPortalSecret = BuildTrackedSkyPortalRewardLines(trackedPortalSnapshot)
+        if trackedPortalNormal then
+            inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. trackedPortalNormal) or trackedPortalNormal
+        end
+        if trackedPortalSecret then
+            secretRewardText = secretRewardText and (secretRewardText .. "\n" .. trackedPortalSecret) or trackedPortalSecret
+        end
     end
 
     local currentCurrencies = ReadPlayerCurrencies()
@@ -3291,13 +3384,24 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     if firstCompletionRewardText then table.insert(rewardSections, firstCompletionRewardText) end
     if inventoryRewardText then table.insert(rewardSections, inventoryRewardText) end
 
-    -- Do not infer XP / Gold / Gems / Trophies from wallet balance changes.
-    -- Those values are balances, not authoritative match rewards; ResultsUI's
-    -- reward payload (or its visible reward-card fallback above) is the source
-    -- of truth. Keep delta fallback only for additional event currencies.
+    -- Fallback to currency deltas only for reward types absent from the ResultsUI
+    -- payload, preventing the same reward from being reported twice.
     local settings = resultDetails and resultDetails.settings
     local before = currencyBaseline or {}
     local fallbackLines = {}
+    local fallbackKeys = {
+        { key = "XP", setting = "xp_reward", label = "Player XP" },
+        { key = "Gold", setting = "gold_reward", label = "Gold" },
+        { key = "Gems", setting = "gem_reward", label = "Gems" },
+        { key = "Trophies", setting = "trophy_reward", label = "Trophies" },
+    }
+    for _, entry in ipairs(fallbackKeys) do
+        local settingValue = type(settings) == "table" and tonumber(settings[entry.setting]) or nil
+        local delta = (tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)
+        if (not settingValue or settingValue <= 0) and delta > 0 then
+            table.insert(fallbackLines, string.format("• **%s:** +%s", entry.label, FormatNumber(delta)))
+        end
+    end
     local function NormalizeRewardKey(value)
         return tostring(value or ""):lower():gsub("[^%w]", "")
     end
@@ -3307,21 +3411,17 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
             reportedResourceKeys[NormalizeRewardKey(resourceName)] = true
         end
     end
-    local standardCurrencyAliases = {
-        xp = true, playerxp = true,
-        gold = true, goldamount = true,
-        gem = true, gems = true, gemamount = true,
-        trophy = true, trophies = true,
-    }
     local seenCurrencyAliases = {}
     for key, value in pairs(currentCurrencies) do
-        local normalizedKey = NormalizeRewardKey(key)
-        if not standardCurrencyAliases[normalizedKey] and not seenCurrencyAliases[normalizedKey] then
-            seenCurrencyAliases[normalizedKey] = true
-            local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
-            if delta > 0 and not reportedResourceKeys[normalizedKey] then
-                local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
-                table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
+        if not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
+            local normalizedKey = NormalizeRewardKey(key)
+            if not seenCurrencyAliases[normalizedKey] then
+                seenCurrencyAliases[normalizedKey] = true
+                local delta = (tonumber(value) or 0) - (tonumber(before[key]) or 0)
+                if delta > 0 and not reportedResourceKeys[normalizedKey] then
+                    local label = tostring(key):gsub("_", " "):gsub("(%l)(%u)", "%1 %2")
+                    table.insert(fallbackLines, "• **" .. label .. ":** +" .. FormatNumber(delta))
+                end
             end
         end
     end
@@ -4868,13 +4968,13 @@ end
 -- current LocalPlayer inventory against it and reports either Sky Portal item ID.
 local skyPortalMonitorKnown = nil
 local skyPortalMonitorWasInMatch = false
+skyPortalMatchDrops = {}
 
-function NotifySkyPortalDrop(reward)
-    local itemId = tostring(reward and reward.itemId or "")
-    local rewardName = itemId == "portal_item__enel" and "Sky God's Portal"
-        or (itemId == "portal_item__skypiea" and "Sky Portal" or tostring(reward and reward.name or "Sky Portal"))
-    local title = "☁️ SKY PORTAL OBTAINED!"
-    local message = rewardName .. " has been added to your inventory."
+function NotifySkyPortalDrop(itemId, gained, total)
+    local portal = WEBHOOK_PORTAL_ITEMS[itemId]
+    if not portal or gained <= 0 then return end
+    local title = "☁️ PORTAL OBTAINED!"
+    local message = string.format("+%s %s [%s]", FormatNumber(gained), portal.name, FormatNumber(total))
 
     print("[Octoput Hub] " .. title .. " " .. message)
     pcall(function()
@@ -4921,12 +5021,23 @@ task.spawn(function()
             end
 
             local known = skyPortalMonitorKnown or {}
-            for key, reward in pairs(current) do
-                local itemId = tostring(reward and reward.itemId or "")
-                if key:sub(1, 5) == "item:"
-                    and (itemId == "portal_item__skypiea" or itemId == "portal_item__enel")
-                    and not known[key] then
-                    NotifySkyPortalDrop(reward)
+            local knownCounts = GetWebhookPortalCounts(known)
+            local currentCounts = GetWebhookPortalCounts(current)
+            for itemId in pairs(WEBHOOK_PORTAL_ITEMS) do
+                local previousTotal = knownCounts[itemId] or 0
+                local currentTotal = currentCounts[itemId] or 0
+                local gained = math.max(0, currentTotal - previousTotal)
+                if gained > 0 then
+                    -- Preserve newly seen UUIDs for end-screen fallback if the
+                    -- inventory profile disappears during match teardown.
+                    for key, reward in pairs(current) do
+                        if key:sub(1, 5) == "item:" and tostring(reward.itemId or "") == itemId
+                            and not known[key] then
+                            skyPortalMatchDrops = skyPortalMatchDrops or {}
+                            skyPortalMatchDrops[key] = table.clone(reward)
+                        end
+                    end
+                    NotifySkyPortalDrop(itemId, gained, currentTotal)
                 end
             end
             skyPortalMonitorKnown = table.clone(current)
@@ -7055,23 +7166,6 @@ task.spawn(function()
     end
 end)
 
--- A script re-execution destroys the old GUI, but executor tasks and signal
--- connections do not automatically stop with it. Use a shared generation token
--- so only the newest Octoput execution can monitor/trigger match-end webhooks.
-local _webhookRuntimeKey = "__OCTOPUT_HUB_WEBHOOK_RUNTIME"
-local _webhookRuntime = _octoputBaseEnv[_webhookRuntimeKey]
-if type(_webhookRuntime) ~= "table" then
-    _webhookRuntime = {}
-    _octoputBaseEnv[_webhookRuntimeKey] = _webhookRuntime
-end
-_webhookRuntime.generation = (tonumber(_webhookRuntime.generation) or 0) + 1
-local _webhookRuntimeGeneration = _webhookRuntime.generation
-
-local function IsCurrentWebhookRuntime()
-    return _octoputBaseEnv[_webhookRuntimeKey] == _webhookRuntime
-        and _webhookRuntime.generation == _webhookRuntimeGeneration
-end
-
 -- Webhook end detection: follow Anime Adventures' actual ResultsUI lifecycle.
 -- game.lua assigns ResultsUI.settings = p22 before enabling ResultsUI, while the
 -- game_finished endpoint calls ResultsUI.show_results(p22). GameFinished is an
@@ -7103,70 +7197,32 @@ webhookBoundResultTitle = nil
 webhookMatchToken = 0
 
 function StartWebhookEndSend(reason)
-    if not IsCurrentWebhookRuntime()
-        or not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
-        return false
-    end
-
-    -- A previous script execution may still be completing its HTTP request.
-    -- Share the send lock so two script generations cannot post concurrently.
-    if _webhookRuntime.sending then
-        return false
-    end
-
-    local currentResult = GetResultDetails()
-    if currentResult and currentResult.settings
-        and _webhookRuntime.lastSentSettings == currentResult.settings then
-        webhookSent = true
-        print("[Octoput Hub Webhook] This match result was already sent by an earlier script execution.")
+    if not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
         return false
     end
 
     webhookSending = true
-    _webhookRuntime.sending = true
-    _webhookRuntime.sendingGeneration = _webhookRuntimeGeneration
     local sendToken = webhookMatchToken
     local currencyBaseline = webhookCurrencyBefore and table.clone(webhookCurrencyBefore) or nil
     local secretBaseline = webhookSecretRewardBefore
     local secretAvailable = webhookSecretRewardBaselineAvailable
     local unitLinesSnapshot = webhookUnitLinesSnapshot
+    local trackedPortalSnapshot = table.clone(skyPortalMatchDrops or {})
 
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
     task.spawn(function()
-        local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot)
-        local completedSettings
-        if callOk and sendResult == true then
-            local detailsOk, finalDetails = pcall(GetResultDetails)
-            if detailsOk and type(finalDetails) == "table" then
-                completedSettings = finalDetails.settings
-                if completedSettings then
-                    -- Persist the successful result even if this execution was
-                    -- superseded while its HTTP request was in flight.
-                    _webhookRuntime.lastSentSettings = completedSettings
-                end
-            end
-        end
-        if _webhookRuntime.sendingGeneration == _webhookRuntimeGeneration then
-            _webhookRuntime.sending = false
-            _webhookRuntime.sendingGeneration = nil
-        end
+        local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot, trackedPortalSnapshot)
         -- A previous match's HTTP request may finish after a new match has begun.
-        -- Never let an old execution mutate the current execution's local state.
-        if not IsCurrentWebhookRuntime() or webhookMatchToken ~= sendToken then
-            print("[Octoput Hub Webhook] Ignoring completion from an older match/script execution.")
+        -- Never let that old task mutate the new match's send/retry state.
+        if webhookMatchToken ~= sendToken then
+            print("[Octoput Hub Webhook] Ignoring completion from an older match.")
             return
         end
         webhookSending = false
         if callOk and sendResult == true then
             webhookSent = true
-            webhookLastSentSettings = completedSettings
-            if not webhookLastSentSettings then
-                local finalDetails = GetResultDetails()
-                webhookLastSentSettings = finalDetails and finalDetails.settings or nil
-            end
-            if webhookLastSentSettings then
-                _webhookRuntime.lastSentSettings = webhookLastSentSettings
-            end
+            local finalDetails = GetResultDetails()
+            webhookLastSentSettings = finalDetails and finalDetails.settings or nil
             print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
         else
             local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
@@ -7178,9 +7234,6 @@ function StartWebhookEndSend(reason)
 end
 
 function MarkWebhookEnd(reason)
-    if not IsCurrentWebhookRuntime() then
-        return
-    end
     if not webhookEndDetected then
         -- Commit the end state first. Optional snapshot readers must never block
         -- the webhook trigger if a folder/module disappears during match teardown.
@@ -7197,9 +7250,8 @@ function MarkWebhookEnd(reason)
 end
 
 task.spawn(function()
-    while IsCurrentWebhookRuntime() do
+    while true do
         task.wait(0.2)
-        if not IsCurrentWebhookRuntime() then break end
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
@@ -7231,6 +7283,7 @@ task.spawn(function()
                     webhookSecretRewardBefore = nil
                     webhookSecretRewardBaselineAvailable = false
                     webhookUnitLinesSnapshot = nil
+                    skyPortalMatchDrops = {}
                     webhookResultSettingsAtStart = nil
                 end
 
@@ -7254,7 +7307,6 @@ task.spawn(function()
                 webhookBoundGameFinished = gameFinished
                 if gameFinished then
                     gameFinished.Changed:Connect(function()
-                        if not IsCurrentWebhookRuntime() then return end
                         if webhookBoundGameFinished == gameFinished
                             and workspace:FindFirstChild("_DATA") == webhookDataFolder
                             and gameFinished.Value == true then
@@ -7279,7 +7331,6 @@ task.spawn(function()
                     if titleLabel and titleLabel:IsA("TextLabel") then
                         webhookBoundResultTitle = titleLabel
                         titleLabel:GetPropertyChangedSignal("Text"):Connect(function()
-                            if not IsCurrentWebhookRuntime() then return end
                             if webhookBoundResultsGui ~= resultsGui
                                 or webhookBoundResultTitle ~= titleLabel
                                 or playerGui:FindFirstChild("ResultsUI") ~= resultsGui then
@@ -7312,7 +7363,6 @@ task.spawn(function()
                         end
                     end
                     resultsGui:GetPropertyChangedSignal("Enabled"):Connect(function()
-                        if not IsCurrentWebhookRuntime() then return end
                         if webhookBoundResultsGui == resultsGui
                             and playerGui:FindFirstChild("ResultsUI") == resultsGui
                             and resultsGui.Enabled == true then
@@ -7405,6 +7455,7 @@ task.spawn(function()
                 webhookSent = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
+                skyPortalMatchDrops = {}
                 webhookResultTitleAtStart = resultTitle
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
