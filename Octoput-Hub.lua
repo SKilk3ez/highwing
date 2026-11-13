@@ -2701,8 +2701,12 @@ function BuildPlayerStatsText(currencies)
     local goldEmoji = "<:GoldAA:1566642394412220508>"
     local summerEmoji = "<:SummerAA:1566642524636840128>"
     local traitEmoji = "<:TraitAA:1566642609479360642>"
-    table.insert(lines, gemEmoji .. " **Gem:** " .. FormatNumber(currencies.Gems or 0))
-    table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold or 0))
+    if currencies.Gems ~= nil then
+        table.insert(lines, gemEmoji .. " **Gems:** " .. FormatNumber(currencies.Gems))
+    end
+    if currencies.Gold ~= nil then
+        table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold))
+    end
     local summer = currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls
     if summer == nil then
         for key, value in pairs(currencies) do
@@ -3160,29 +3164,8 @@ function BuildMatchRewardLines(resultDetails)
         end
     end
 
-    -- Fallback: read the exact visible reward amounts rendered by ResultsUI.
-    if #lines == 0 then
-        local results = playerGui:FindFirstChild("ResultsUI")
-        local holder = results and results:FindFirstChild("Holder")
-        local scroll = holder and holder:FindFirstChild("LevelRewards")
-        scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
-        if scroll then
-            local labels = {
-                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "Player XP",
-            }
-            for _, frame in ipairs(scroll:GetChildren()) do
-                if frame:IsA("GuiObject") and frame.Visible then
-                    local main = frame:FindFirstChild("Main")
-                    local amount = main and main:FindFirstChild("Amount")
-                    if amount and amount:IsA("TextLabel") and amount.Text ~= "" then
-                        local label = labels[frame.Name]
-                        if frame.Name == "ResourceReward" then label = "Resource" end
-                        if label then table.insert(lines, "• **" .. label .. ":** " .. amount.Text) end
-                    end
-                end
-            end
-        end
-    end
+    -- Do not scrape ResultsUI as a fallback: some layouts expose owned balances
+    -- or stale labels rather than a guaranteed per-match reward payload.
 
     return #lines > 0 and table.concat(lines, "\n") or nil
 end
@@ -3247,8 +3230,8 @@ function ReadPlayerLevel()
 end
 
 function ReadMatchUnitLines()
-    -- Aggregate every placed copy of the same unit type. Anime Adventures exposes
-    -- these exact per-instance values through unit._stats.total_damage/takedown_count.
+    -- Aggregate every placed copy of the same unit type. Capture this continuously
+    -- during play because the game may destroy _UNITS before ResultsUI is rendered.
     local units = GetPlayerUnits()
     local grouped = {}
     for _, unit in ipairs(units) do
@@ -3389,7 +3372,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     -- Fallback to currency deltas only for reward types absent from the ResultsUI
     -- payload, preventing the same reward from being reported twice.
     local settings = resultDetails and resultDetails.settings
-    local before = currencyBaseline or {}
+    local before = type(currencyBaseline) == "table" and currencyBaseline or nil
     local fallbackLines = {}
     local fallbackKeys = {
         { key = "XP", setting = "xp_reward", label = "Player XP" },
@@ -3399,8 +3382,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     }
     for _, entry in ipairs(fallbackKeys) do
         local settingValue = type(settings) == "table" and tonumber(settings[entry.setting]) or nil
-        local delta = (tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)
-        if (not settingValue or settingValue <= 0) and delta > 0 then
+        local hasReliableBaseline = before ~= nil and before[entry.key] ~= nil
+        local delta = hasReliableBaseline
+            and ((tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)) or nil
+        if (not settingValue or settingValue <= 0) and delta and delta > 0 then
             table.insert(fallbackLines, string.format("• **%s:** +%s", entry.label, FormatNumber(delta)))
         end
     end
@@ -3415,7 +3400,8 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     end
     local seenCurrencyAliases = {}
     for key, value in pairs(currentCurrencies) do
-        if not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
+        if before and before[key] ~= nil
+            and not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
             local normalizedKey = NormalizeRewardKey(key)
             if not seenCurrencyAliases[normalizedKey] then
                 seenCurrencyAliases[normalizedKey] = true
@@ -7283,6 +7269,7 @@ webhookCurrencyBefore = nil
 webhookSecretRewardBefore = nil
 webhookSecretRewardBaselineAvailable = false
 webhookUnitLinesSnapshot = nil
+webhookLastUnitCaptureAt = 0
 webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
@@ -7338,12 +7325,15 @@ end
 
 function MarkWebhookEnd(reason)
     if not webhookEndDetected then
-        -- Commit the end state first. Optional snapshot readers must never block
-        -- the webhook trigger if a folder/module disappears during match teardown.
+        -- Preserve the last valid in-match snapshot; teardown can remove units first.
+        local snapshotOk, snapshot = pcall(ReadMatchUnitLines)
+        if snapshotOk and snapshot and snapshot ~= "No placed unit stats captured." then
+            webhookUnitLinesSnapshot = snapshot
+        elseif not webhookUnitLinesSnapshot then
+            webhookUnitLinesSnapshot = "No placed unit stats captured."
+        end
         webhookEndDetected = true
         webhookGameWasActive = false
-        local snapshotOk, snapshot = pcall(ReadMatchUnitLines)
-        webhookUnitLinesSnapshot = snapshotOk and snapshot or nil
         if not snapshotOk then
             warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
         end
@@ -7558,11 +7548,24 @@ task.spawn(function()
                 webhookSent = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
+                webhookLastUnitCaptureAt = 0
                 skyPortalMatchDrops = {}
                 webhookResultTitleAtStart = resultTitle
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
                 print("[Octoput Hub Webhook] Match start detected; reward baseline captured.")
+            end
+
+            -- Sample unit stats while the match is alive, before the game tears down _UNITS.
+            if webhookGameWasActive and not webhookEndDetected
+                and os.clock() - (webhookLastUnitCaptureAt or 0) >= 0.5 then
+                webhookLastUnitCaptureAt = os.clock()
+                local unitOk, unitSnapshot = pcall(ReadMatchUnitLines)
+                if unitOk and unitSnapshot and unitSnapshot ~= "No placed unit stats captured." then
+                    webhookUnitLinesSnapshot = unitSnapshot
+                elseif not unitOk then
+                    warn("[Octoput Hub Webhook] Periodic unit capture failed: " .. tostring(unitSnapshot))
+                end
             end
 
             local hasEnded = finishedRising or (finished and webhookGameWasActive) or resultScreenConfirmed
