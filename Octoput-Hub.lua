@@ -2713,7 +2713,9 @@ function BuildPlayerStatsText(currencies)
             if tostring(key):lower():find("summerpearls", 1, true) then summer = value break end
         end
     end
-    table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer or 0))
+    if summer ~= nil then
+        table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer))
+    end
     if traitCount ~= nil then
         table.insert(lines, traitEmoji .. " **Trait:** " .. FormatNumber(traitCount))
     end
