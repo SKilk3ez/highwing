@@ -765,6 +765,8 @@ end
 LoadConfig()
 -- Auto Open Portal is intentionally session-only and always starts disabled.
 State.AutoOpenPortal = false
+-- Free Cam is also session-only; never restore a Scriptable camera automatically.
+State.FreeCam = false
 
 -- Keep the hub inside the available screen area at large UI scales.
 -- The user's selected scale remains saved; only the effective display scale is clamped.
@@ -5480,6 +5482,108 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
 end)
 WebhookStatus = CreateHint(WebhookPage, "Test result appears here.", 5, 48)
 
+-- Free Cam: camera-only movement. The character remains at its real position.
+local freeCamActive = false
+local freeCamPosition = nil
+local freeCamYaw = 0
+local freeCamPitch = 0
+local freeCamPreviousType = nil
+local freeCamPreviousSubject = nil
+local freeCamPreviousMouseBehavior = nil
+local freeCamPreviousMouseIcon = nil
+local FREECAM_RENDER_BIND = "OctoputHub_FreeCam"
+local FREECAM_SPEED = 42
+local FREECAM_SENSITIVITY = 0.0025
+
+function SetFreeCam(enabled)
+    enabled = enabled == true
+    if enabled == freeCamActive then return end
+
+    local camera = workspace.CurrentCamera
+    if not camera then
+        State.FreeCam = false
+        return
+    end
+
+    if enabled then
+        freeCamActive = true
+        freeCamPreviousType = camera.CameraType
+        freeCamPreviousSubject = camera.CameraSubject
+        freeCamPreviousMouseBehavior = UserInputService.MouseBehavior
+        freeCamPreviousMouseIcon = UserInputService.MouseIconEnabled
+
+        local current = camera.CFrame
+        freeCamPosition = current.Position
+        local look = current.LookVector
+        freeCamYaw = math.atan2(-look.X, -look.Z)
+        freeCamPitch = math.asin(math.clamp(look.Y, -0.999, 0.999))
+
+        camera.CameraType = Enum.CameraType.Scriptable
+        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+        UserInputService.MouseIconEnabled = false
+
+        RunService:BindToRenderStep(FREECAM_RENDER_BIND, Enum.RenderPriority.Camera.Value + 1, function(dt)
+            if not freeCamActive then return end
+            local activeCamera = workspace.CurrentCamera
+            if not activeCamera then return end
+
+            local delta = UserInputService:GetMouseDelta()
+            freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
+            freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
+
+            local rotation = CFrame.fromOrientation(freeCamPitch, freeCamYaw, 0)
+            local move = Vector3.zero
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then move += rotation.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then move -= rotation.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then move += rotation.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then move -= rotation.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.yAxis end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then
+                move -= Vector3.yAxis
+            end
+
+            if move.Magnitude > 0 then
+                local speed = FREECAM_SPEED
+                if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift) then
+                    speed = speed * 3
+                end
+                freeCamPosition += move.Unit * speed * math.max(0, dt)
+            end
+
+            activeCamera.CameraType = Enum.CameraType.Scriptable
+            activeCamera.CFrame = CFrame.new(freeCamPosition) * rotation
+        end)
+    else
+        freeCamActive = false
+        RunService:UnbindFromRenderStep(FREECAM_RENDER_BIND)
+
+        local activeCamera = workspace.CurrentCamera
+        if activeCamera then
+            activeCamera.CameraType = freeCamPreviousType or Enum.CameraType.Custom
+            local character = player.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            activeCamera.CameraSubject = (freeCamPreviousSubject and freeCamPreviousSubject.Parent)
+                and freeCamPreviousSubject or humanoid
+            if activeCamera.CameraType == Enum.CameraType.Scriptable then
+                activeCamera.CameraType = Enum.CameraType.Custom
+            end
+        end
+
+        UserInputService.MouseBehavior = freeCamPreviousMouseBehavior or Enum.MouseBehavior.Default
+        if freeCamPreviousMouseIcon ~= nil then
+            UserInputService.MouseIconEnabled = freeCamPreviousMouseIcon
+        end
+        freeCamPosition = nil
+    end
+end
+
+-- Always release the camera if the character respawns or the hub is removed.
+player.CharacterAdded:Connect(function()
+    if freeCamActive then
+        task.defer(function() SetFreeCam(false) end)
+    end
+end)
+
 CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
     ApplyBlackScreen(isON)
 end)
@@ -5487,6 +5591,11 @@ CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, fu
     -- This setting is saved and takes effect on the next script execution.
 end)
 CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
+CreateToggle(MiscPage, "Free Cam", "FreeCam", 4, function(isON)
+    SetFreeCam(isON)
+end)
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 5, 48)
+
 CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 4, 34)
 CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 5, 34)
 CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 8, 50, 150, function()
