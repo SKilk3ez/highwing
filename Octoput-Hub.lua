@@ -5577,13 +5577,7 @@ function SetFreeCam(enabled)
     end
 end
 
--- Always release the camera if the character respawns or the hub is removed.
-player.CharacterAdded:Connect(function()
-    if freeCamActive then
-        task.defer(function() SetFreeCam(false) end)
-    end
-end)
-
+-- Free Cam remains active across character respawns; it only ends when toggled off.
 CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
     ApplyBlackScreen(isON)
 end)
