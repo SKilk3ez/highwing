@@ -765,6 +765,8 @@ end
 LoadConfig()
 -- Auto Open Portal is intentionally session-only and always starts disabled.
 State.AutoOpenPortal = false
+-- Free Cam is also session-only; never restore a Scriptable camera automatically.
+State.FreeCam = false
 
 -- Keep the hub inside the available screen area at large UI scales.
 -- The user's selected scale remains saved; only the effective display scale is clamped.
@@ -2699,15 +2701,21 @@ function BuildPlayerStatsText(currencies)
     local goldEmoji = "<:GoldAA:1566642394412220508>"
     local summerEmoji = "<:SummerAA:1566642524636840128>"
     local traitEmoji = "<:TraitAA:1566642609479360642>"
-    table.insert(lines, gemEmoji .. " **Gem:** " .. FormatNumber(currencies.Gems or 0))
-    table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold or 0))
+    if currencies.Gems ~= nil then
+        table.insert(lines, gemEmoji .. " **Gems:** " .. FormatNumber(currencies.Gems))
+    end
+    if currencies.Gold ~= nil then
+        table.insert(lines, goldEmoji .. " **Gold:** " .. FormatNumber(currencies.Gold))
+    end
     local summer = currencies.SummerPearls or currencies.summer_pearls or currencies.Summerpearls
     if summer == nil then
         for key, value in pairs(currencies) do
             if tostring(key):lower():find("summerpearls", 1, true) then summer = value break end
         end
     end
-    table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer or 0))
+    if summer ~= nil then
+        table.insert(lines, summerEmoji .. " **Summer Pearls:** " .. FormatNumber(summer))
+    end
     if traitCount ~= nil then
         table.insert(lines, traitEmoji .. " **Trait:** " .. FormatNumber(traitCount))
     end
@@ -3158,29 +3166,8 @@ function BuildMatchRewardLines(resultDetails)
         end
     end
 
-    -- Fallback: read the exact visible reward amounts rendered by ResultsUI.
-    if #lines == 0 then
-        local results = playerGui:FindFirstChild("ResultsUI")
-        local holder = results and results:FindFirstChild("Holder")
-        local scroll = holder and holder:FindFirstChild("LevelRewards")
-        scroll = scroll and scroll:FindFirstChild("ScrollingFrame")
-        if scroll then
-            local labels = {
-                GoldReward = "Gold", GemReward = "Gems", TrophyReward = "Trophies", XPReward = "Player XP",
-            }
-            for _, frame in ipairs(scroll:GetChildren()) do
-                if frame:IsA("GuiObject") and frame.Visible then
-                    local main = frame:FindFirstChild("Main")
-                    local amount = main and main:FindFirstChild("Amount")
-                    if amount and amount:IsA("TextLabel") and amount.Text ~= "" then
-                        local label = labels[frame.Name]
-                        if frame.Name == "ResourceReward" then label = "Resource" end
-                        if label then table.insert(lines, "• **" .. label .. ":** " .. amount.Text) end
-                    end
-                end
-            end
-        end
-    end
+    -- Do not scrape ResultsUI as a fallback: some layouts expose owned balances
+    -- or stale labels rather than a guaranteed per-match reward payload.
 
     return #lines > 0 and table.concat(lines, "\n") or nil
 end
@@ -3245,8 +3232,8 @@ function ReadPlayerLevel()
 end
 
 function ReadMatchUnitLines()
-    -- Aggregate every placed copy of the same unit type. Anime Adventures exposes
-    -- these exact per-instance values through unit._stats.total_damage/takedown_count.
+    -- Aggregate every placed copy of the same unit type. Capture this continuously
+    -- during play because the game may destroy _UNITS before ResultsUI is rendered.
     local units = GetPlayerUnits()
     local grouped = {}
     for _, unit in ipairs(units) do
@@ -3387,7 +3374,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     -- Fallback to currency deltas only for reward types absent from the ResultsUI
     -- payload, preventing the same reward from being reported twice.
     local settings = resultDetails and resultDetails.settings
-    local before = currencyBaseline or {}
+    local before = type(currencyBaseline) == "table" and currencyBaseline or nil
     local fallbackLines = {}
     local fallbackKeys = {
         { key = "XP", setting = "xp_reward", label = "Player XP" },
@@ -3397,8 +3384,10 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     }
     for _, entry in ipairs(fallbackKeys) do
         local settingValue = type(settings) == "table" and tonumber(settings[entry.setting]) or nil
-        local delta = (tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)
-        if (not settingValue or settingValue <= 0) and delta > 0 then
+        local hasReliableBaseline = before ~= nil and before[entry.key] ~= nil
+        local delta = hasReliableBaseline
+            and ((tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)) or nil
+        if (not settingValue or settingValue <= 0) and delta and delta > 0 then
             table.insert(fallbackLines, string.format("• **%s:** +%s", entry.label, FormatNumber(delta)))
         end
     end
@@ -3413,7 +3402,8 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     end
     local seenCurrencyAliases = {}
     for key, value in pairs(currentCurrencies) do
-        if not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
+        if before and before[key] ~= nil
+            and not ({ XP = true, Gold = true, Gems = true, Trophies = true })[key] then
             local normalizedKey = NormalizeRewardKey(key)
             if not seenCurrencyAliases[normalizedKey] then
                 seenCurrencyAliases[normalizedKey] = true
@@ -5480,6 +5470,102 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
 end)
 WebhookStatus = CreateHint(WebhookPage, "Test result appears here.", 5, 48)
 
+-- Free Cam: camera-only movement. The character remains at its real position.
+local freeCamActive = false
+local freeCamPosition = nil
+local freeCamYaw = 0
+local freeCamPitch = 0
+local freeCamPreviousType = nil
+local freeCamPreviousSubject = nil
+local freeCamPreviousMouseBehavior = nil
+local freeCamPreviousMouseIcon = nil
+local FREECAM_RENDER_BIND = "OctoputHub_FreeCam"
+local FREECAM_SPEED = 42
+local FREECAM_SENSITIVITY = 0.0025
+
+function SetFreeCam(enabled)
+    enabled = enabled == true
+    if enabled == freeCamActive then return end
+
+    local camera = workspace.CurrentCamera
+    if not camera then
+        State.FreeCam = false
+        return
+    end
+
+    if enabled then
+        freeCamActive = true
+        freeCamPreviousType = camera.CameraType
+        freeCamPreviousSubject = camera.CameraSubject
+        freeCamPreviousMouseBehavior = UserInputService.MouseBehavior
+        freeCamPreviousMouseIcon = UserInputService.MouseIconEnabled
+
+        local current = camera.CFrame
+        freeCamPosition = current.Position
+        local look = current.LookVector
+        freeCamYaw = math.atan2(-look.X, -look.Z)
+        freeCamPitch = math.asin(math.clamp(look.Y, -0.999, 0.999))
+
+        camera.CameraType = Enum.CameraType.Scriptable
+        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+        UserInputService.MouseIconEnabled = false
+
+        RunService:BindToRenderStep(FREECAM_RENDER_BIND, Enum.RenderPriority.Camera.Value + 1, function(dt)
+            if not freeCamActive then return end
+            local activeCamera = workspace.CurrentCamera
+            if not activeCamera then return end
+
+            local delta = UserInputService:GetMouseDelta()
+            freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
+            freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
+
+            local rotation = CFrame.fromOrientation(freeCamPitch, freeCamYaw, 0)
+            local move = Vector3.zero
+            if UserInputService:IsKeyDown(Enum.KeyCode.W) then move += rotation.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.S) then move -= rotation.LookVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.D) then move += rotation.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.A) then move -= rotation.RightVector end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move += Vector3.yAxis end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then
+                move -= Vector3.yAxis
+            end
+
+            if move.Magnitude > 0 then
+                local speed = FREECAM_SPEED
+                if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift) then
+                    speed = speed * 3
+                end
+                freeCamPosition += move.Unit * speed * math.max(0, dt)
+            end
+
+            activeCamera.CameraType = Enum.CameraType.Scriptable
+            activeCamera.CFrame = CFrame.new(freeCamPosition) * rotation
+        end)
+    else
+        freeCamActive = false
+        RunService:UnbindFromRenderStep(FREECAM_RENDER_BIND)
+
+        local activeCamera = workspace.CurrentCamera
+        if activeCamera then
+            activeCamera.CameraType = freeCamPreviousType or Enum.CameraType.Custom
+            local character = player.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            activeCamera.CameraSubject = (freeCamPreviousSubject and freeCamPreviousSubject.Parent)
+                and freeCamPreviousSubject or humanoid
+            if activeCamera.CameraType == Enum.CameraType.Scriptable then
+                activeCamera.CameraType = Enum.CameraType.Custom
+            end
+        end
+
+        UserInputService.MouseBehavior = freeCamPreviousMouseBehavior or Enum.MouseBehavior.Default
+        if freeCamPreviousMouseIcon ~= nil then
+            UserInputService.MouseIconEnabled = freeCamPreviousMouseIcon
+        end
+        freeCamPosition = nil
+    end
+end
+
+-- Free Cam remains active across character respawns; it only ends when toggled off.
 CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
     ApplyBlackScreen(isON)
 end)
@@ -5487,6 +5573,11 @@ CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, fu
     -- This setting is saved and takes effect on the next script execution.
 end)
 CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
+CreateToggle(MiscPage, "Free Cam", "FreeCam", 4, function(isON)
+    SetFreeCam(isON)
+end)
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 5, 48)
+
 CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 4, 34)
 CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 5, 34)
 CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 8, 50, 150, function()
@@ -7180,6 +7271,7 @@ webhookCurrencyBefore = nil
 webhookSecretRewardBefore = nil
 webhookSecretRewardBaselineAvailable = false
 webhookUnitLinesSnapshot = nil
+webhookLastUnitCaptureAt = 0
 webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
@@ -7235,12 +7327,15 @@ end
 
 function MarkWebhookEnd(reason)
     if not webhookEndDetected then
-        -- Commit the end state first. Optional snapshot readers must never block
-        -- the webhook trigger if a folder/module disappears during match teardown.
+        -- Preserve the last valid in-match snapshot; teardown can remove units first.
+        local snapshotOk, snapshot = pcall(ReadMatchUnitLines)
+        if snapshotOk and snapshot and snapshot ~= "No placed unit stats captured." then
+            webhookUnitLinesSnapshot = snapshot
+        elseif not webhookUnitLinesSnapshot then
+            webhookUnitLinesSnapshot = "No placed unit stats captured."
+        end
         webhookEndDetected = true
         webhookGameWasActive = false
-        local snapshotOk, snapshot = pcall(ReadMatchUnitLines)
-        webhookUnitLinesSnapshot = snapshotOk and snapshot or nil
         if not snapshotOk then
             warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
         end
@@ -7455,11 +7550,24 @@ task.spawn(function()
                 webhookSent = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
+                webhookLastUnitCaptureAt = 0
                 skyPortalMatchDrops = {}
                 webhookResultTitleAtStart = resultTitle
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
                 print("[Octoput Hub Webhook] Match start detected; reward baseline captured.")
+            end
+
+            -- Sample unit stats while the match is alive, before the game tears down _UNITS.
+            if webhookGameWasActive and not webhookEndDetected
+                and os.clock() - (webhookLastUnitCaptureAt or 0) >= 0.5 then
+                webhookLastUnitCaptureAt = os.clock()
+                local unitOk, unitSnapshot = pcall(ReadMatchUnitLines)
+                if unitOk and unitSnapshot and unitSnapshot ~= "No placed unit stats captured." then
+                    webhookUnitLinesSnapshot = unitSnapshot
+                elseif not unitOk then
+                    warn("[Octoput Hub Webhook] Periodic unit capture failed: " .. tostring(unitSnapshot))
+                end
             end
 
             local hasEnded = finishedRising or (finished and webhookGameWasActive) or resultScreenConfirmed
