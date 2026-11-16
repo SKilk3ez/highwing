@@ -3132,18 +3132,26 @@ function BuildTrackedSkyPortalRewardLines(trackedPortals)
         #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
 
-function BuildMatchRewardLines(resultDetails)
+function BuildMatchRewardLines(resultDetails, currentCurrencies)
     local settings = resultDetails and resultDetails.settings
     local lines = {}
     if type(settings) == "table" then
         local rewardFields = {
             { key = "xp_reward", label = "Player XP" },
-            { key = "gold_reward", label = "Gold" },
-            { key = "gem_reward", label = "Gems" },
-            { key = "trophy_reward", label = "Trophies" },
+            { key = "gold_reward", label = "Gold", currencyKey = "Gold" },
+            { key = "gem_reward", label = "Gems", currencyKey = "Gems" },
+            { key = "trophy_reward", label = "Trophies", currencyKey = "Trophies" },
         }
         for _, entry in ipairs(rewardFields) do
             local amount = tonumber(settings[entry.key])
+            -- Some result payloads can contain the owned balance rather than
+            -- the amount earned in this match. Never label an exact balance as
+            -- a reward; the before/after currency delta below is the safe fallback.
+            local currentBalance = entry.currencyKey and type(currentCurrencies) == "table"
+                and tonumber(currentCurrencies[entry.currencyKey]) or nil
+            if amount and currentBalance and amount == currentBalance then
+                amount = nil
+            end
             if amount and amount > 0 then
                 table.insert(lines, string.format("• **%s:** +%s", entry.label, FormatNumber(amount)))
             end
@@ -3364,7 +3372,7 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     -- Rewards field combines authoritative stage rewards, first-clear bonuses,
     -- and every inventory delta (units/items/portals/charms/materials).
     local rewardSections = {}
-    local resultRewardText = BuildMatchRewardLines(resultDetails)
+    local resultRewardText = BuildMatchRewardLines(resultDetails, currentCurrencies)
     if resultRewardText then table.insert(rewardSections, resultRewardText) end
 
     local firstCompletionRewardText = BuildFirstCompletionRewardLines(resultDetails and resultDetails.settings)
@@ -3384,6 +3392,12 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     }
     for _, entry in ipairs(fallbackKeys) do
         local settingValue = type(settings) == "table" and tonumber(settings[entry.setting]) or nil
+        -- Treat a result field equal to the current owned balance as a balance,
+        -- not as an earned amount, so the measured match delta can replace it.
+        if settingValue and currentCurrencies[entry.key] ~= nil
+            and settingValue == tonumber(currentCurrencies[entry.key]) then
+            settingValue = nil
+        end
         local hasReliableBaseline = before ~= nil and before[entry.key] ~= nil
         local delta = hasReliableBaseline
             and ((tonumber(currentCurrencies[entry.key]) or 0) - (tonumber(before[entry.key]) or 0)) or nil
@@ -5481,7 +5495,10 @@ local freeCamPreviousMouseBehavior = nil
 local freeCamPreviousMouseIcon = nil
 local freeCamControls = nil
 local freeCamMouseConnection = nil
+local freeCamMouseEndedConnection = nil
+local freeCamMovementConnection = nil
 local freeCamMouseDelta = Vector2.zero
+local freeCamRightMouseDown = false
 local freeCamHumanoidState = nil
 local FREECAM_RENDER_BIND = "OctoputHub_FreeCam"
 local FREECAM_SPEED = 42
@@ -5561,13 +5578,34 @@ function SetFreeCam(enabled)
 
         SetFreeCamCharacterControls(true)
         camera.CameraType = Enum.CameraType.Scriptable
-        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
-        UserInputService.MouseIconEnabled = false
+        -- Free Cam behaves like Roblox's normal camera: rotate only while
+        -- holding the right mouse button; otherwise leave the cursor available.
+        freeCamRightMouseDown = false
+        UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+        UserInputService.MouseIconEnabled = true
 
-        -- InputChanged is more reliable than GetMouseDelta in some executor contexts.
         if freeCamMouseConnection then freeCamMouseConnection:Disconnect() end
-        freeCamMouseConnection = UserInputService.InputChanged:Connect(function(input)
-            if freeCamActive and input.UserInputType == Enum.UserInputType.MouseMovement then
+        freeCamMouseConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+            if freeCamActive and input.UserInputType == Enum.UserInputType.MouseButton2 then
+                freeCamRightMouseDown = true
+                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                UserInputService.MouseIconEnabled = false
+                freeCamMouseDelta = Vector2.zero
+            end
+        end)
+        if freeCamMouseEndedConnection then freeCamMouseEndedConnection:Disconnect() end
+        freeCamMouseEndedConnection = UserInputService.InputEnded:Connect(function(input)
+            if freeCamActive and input.UserInputType == Enum.UserInputType.MouseButton2 then
+                freeCamRightMouseDown = false
+                UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                UserInputService.MouseIconEnabled = true
+                freeCamMouseDelta = Vector2.zero
+            end
+        end)
+        if freeCamMovementConnection then freeCamMovementConnection:Disconnect() end
+        freeCamMovementConnection = UserInputService.InputChanged:Connect(function(input)
+            if freeCamActive and freeCamRightMouseDown
+                and input.UserInputType == Enum.UserInputType.MouseMovement then
                 freeCamMouseDelta += input.Delta
             end
         end)
@@ -5577,16 +5615,19 @@ function SetFreeCam(enabled)
             local activeCamera = workspace.CurrentCamera
             if not activeCamera then return end
 
-            local delta = freeCamMouseDelta
-            freeCamMouseDelta = Vector2.zero
-            if delta.Magnitude == 0 then
-                local ok, fallbackDelta = pcall(function()
-                    return UserInputService:GetMouseDelta()
-                end)
-                if ok and fallbackDelta then delta = fallbackDelta end
+            local delta = Vector2.zero
+            if freeCamRightMouseDown then
+                delta = freeCamMouseDelta
+                freeCamMouseDelta = Vector2.zero
+                if delta.Magnitude == 0 then
+                    local ok, fallbackDelta = pcall(function()
+                        return UserInputService:GetMouseDelta()
+                    end)
+                    if ok and fallbackDelta then delta = fallbackDelta end
+                end
+                freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
+                freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
             end
-            freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
-            freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
 
             local rotation = CFrame.fromOrientation(freeCamPitch, freeCamYaw, 0)
             local move = Vector3.zero
@@ -5617,6 +5658,15 @@ function SetFreeCam(enabled)
             freeCamMouseConnection:Disconnect()
             freeCamMouseConnection = nil
         end
+        if freeCamMouseEndedConnection then
+            freeCamMouseEndedConnection:Disconnect()
+            freeCamMouseEndedConnection = nil
+        end
+        if freeCamMovementConnection then
+            freeCamMovementConnection:Disconnect()
+            freeCamMovementConnection = nil
+        end
+        freeCamRightMouseDown = false
 
         local activeCamera = workspace.CurrentCamera
         if activeCamera then
