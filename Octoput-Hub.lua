@@ -5495,6 +5495,8 @@ local freeCamPreviousMouseBehavior = nil
 local freeCamPreviousMouseIcon = nil
 local freeCamControls = nil
 local freeCamMouseConnection = nil
+local freeCamMouseEndedConnection = nil
+local freeCamMovementConnection = nil
 local freeCamMouseDelta = Vector2.zero
 local freeCamRightMouseDown = false
 local freeCamHumanoidState = nil
@@ -5591,7 +5593,7 @@ function SetFreeCam(enabled)
                 freeCamMouseDelta = Vector2.zero
             end
         end)
-        local freeCamMouseEndedConnection
+        if freeCamMouseEndedConnection then freeCamMouseEndedConnection:Disconnect() end
         freeCamMouseEndedConnection = UserInputService.InputEnded:Connect(function(input)
             if freeCamActive and input.UserInputType == Enum.UserInputType.MouseButton2 then
                 freeCamRightMouseDown = false
@@ -5600,7 +5602,8 @@ function SetFreeCam(enabled)
                 freeCamMouseDelta = Vector2.zero
             end
         end)
-        local freeCamMovementConnection = UserInputService.InputChanged:Connect(function(input)
+        if freeCamMovementConnection then freeCamMovementConnection:Disconnect() end
+        freeCamMovementConnection = UserInputService.InputChanged:Connect(function(input)
             if freeCamActive and freeCamRightMouseDown
                 and input.UserInputType == Enum.UserInputType.MouseMovement then
                 freeCamMouseDelta += input.Delta
