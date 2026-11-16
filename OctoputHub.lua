@@ -5470,7 +5470,7 @@ CreateButton(WebhookPage, "Test Webhook", 4, function()
 end)
 WebhookStatus = CreateHint(WebhookPage, "Test result appears here.", 5, 48)
 
--- Free Cam: camera-only movement. The character remains at its real position.
+-- Free Cam: independent camera movement; disable default character controls while active.
 local freeCamActive = false
 local freeCamPosition = nil
 local freeCamYaw = 0
@@ -5479,9 +5479,61 @@ local freeCamPreviousType = nil
 local freeCamPreviousSubject = nil
 local freeCamPreviousMouseBehavior = nil
 local freeCamPreviousMouseIcon = nil
+local freeCamControls = nil
+local freeCamMouseConnection = nil
+local freeCamMouseDelta = Vector2.zero
+local freeCamHumanoidState = nil
 local FREECAM_RENDER_BIND = "OctoputHub_FreeCam"
 local FREECAM_SPEED = 42
 local FREECAM_SENSITIVITY = 0.0025
+
+local function SetFreeCamCharacterControls(disabled)
+    if disabled then
+        -- PlayerModule controls are what normally turn WASD into character movement.
+        pcall(function()
+            local playerScripts = player:FindFirstChild("PlayerScripts")
+            local playerModule = playerScripts and playerScripts:FindFirstChild("PlayerModule")
+            if playerModule then
+                local module = require(playerModule)
+                freeCamControls = module:GetControls()
+                if freeCamControls then freeCamControls:Disable() end
+            end
+        end)
+
+        -- Additional guard for executors where PlayerModule cannot be required.
+        local character = player.Character
+        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            freeCamHumanoidState = {
+                humanoid = humanoid,
+                WalkSpeed = humanoid.WalkSpeed,
+                JumpPower = humanoid.JumpPower,
+                JumpHeight = humanoid.JumpHeight,
+                AutoRotate = humanoid.AutoRotate,
+            }
+            humanoid:Move(Vector3.zero, true)
+            humanoid.WalkSpeed = 0
+            humanoid.JumpPower = 0
+            humanoid.JumpHeight = 0
+            humanoid.AutoRotate = false
+        end
+    else
+        if freeCamControls then
+            pcall(function() freeCamControls:Enable() end)
+            freeCamControls = nil
+        end
+        local saved = freeCamHumanoidState
+        if saved and saved.humanoid and saved.humanoid.Parent then
+            pcall(function()
+                saved.humanoid.WalkSpeed = saved.WalkSpeed
+                saved.humanoid.JumpPower = saved.JumpPower
+                saved.humanoid.JumpHeight = saved.JumpHeight
+                saved.humanoid.AutoRotate = saved.AutoRotate
+            end)
+        end
+        freeCamHumanoidState = nil
+    end
+end
 
 function SetFreeCam(enabled)
     enabled = enabled == true
@@ -5499,6 +5551,7 @@ function SetFreeCam(enabled)
         freeCamPreviousSubject = camera.CameraSubject
         freeCamPreviousMouseBehavior = UserInputService.MouseBehavior
         freeCamPreviousMouseIcon = UserInputService.MouseIconEnabled
+        freeCamMouseDelta = Vector2.zero
 
         local current = camera.CFrame
         freeCamPosition = current.Position
@@ -5506,16 +5559,32 @@ function SetFreeCam(enabled)
         freeCamYaw = math.atan2(-look.X, -look.Z)
         freeCamPitch = math.asin(math.clamp(look.Y, -0.999, 0.999))
 
+        SetFreeCamCharacterControls(true)
         camera.CameraType = Enum.CameraType.Scriptable
         UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
         UserInputService.MouseIconEnabled = false
+
+        -- InputChanged is more reliable than GetMouseDelta in some executor contexts.
+        if freeCamMouseConnection then freeCamMouseConnection:Disconnect() end
+        freeCamMouseConnection = UserInputService.InputChanged:Connect(function(input)
+            if freeCamActive and input.UserInputType == Enum.UserInputType.MouseMovement then
+                freeCamMouseDelta += input.Delta
+            end
+        end)
 
         RunService:BindToRenderStep(FREECAM_RENDER_BIND, Enum.RenderPriority.Camera.Value + 1, function(dt)
             if not freeCamActive then return end
             local activeCamera = workspace.CurrentCamera
             if not activeCamera then return end
 
-            local delta = UserInputService:GetMouseDelta()
+            local delta = freeCamMouseDelta
+            freeCamMouseDelta = Vector2.zero
+            if delta.Magnitude == 0 then
+                local ok, fallbackDelta = pcall(function()
+                    return UserInputService:GetMouseDelta()
+                end)
+                if ok and fallbackDelta then delta = fallbackDelta end
+            end
             freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
             freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
 
@@ -5544,6 +5613,10 @@ function SetFreeCam(enabled)
     else
         freeCamActive = false
         RunService:UnbindFromRenderStep(FREECAM_RENDER_BIND)
+        if freeCamMouseConnection then
+            freeCamMouseConnection:Disconnect()
+            freeCamMouseConnection = nil
+        end
 
         local activeCamera = workspace.CurrentCamera
         if activeCamera then
@@ -5557,11 +5630,13 @@ function SetFreeCam(enabled)
             end
         end
 
+        SetFreeCamCharacterControls(false)
         UserInputService.MouseBehavior = freeCamPreviousMouseBehavior or Enum.MouseBehavior.Default
         if freeCamPreviousMouseIcon ~= nil then
             UserInputService.MouseIconEnabled = freeCamPreviousMouseIcon
         end
         freeCamPosition = nil
+        freeCamMouseDelta = Vector2.zero
     end
 end
 
