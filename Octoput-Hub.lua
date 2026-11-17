@@ -860,21 +860,6 @@ function NormalizeName(text)
     return (tostring(text or ""):lower():gsub("[%.%s_%-]", ""))
 end
 
-function IsFarmName(text)
-    local id = NormalizeName(text)
-    if id == "" then
-        return false
-    end
-    return (id:find("speedwagon", 1, true)
-        or id:find("ceo", 1, true)
-        or id:find("bulma", 1, true)
-        or id:find("bulby", 1, true)
-        or id:find("bulmy", 1, true)
-        or id:find("nami", 1, true)
-        or id:find("weathergirl", 1, true)
-        or id:find("weathering", 1, true)
-        or id:find("weather", 1, true)) ~= nil
-end
 
 ReplicatedGameDataSyncedJobId = nil
 ReplicatedGameDataSyncing = false
@@ -1850,16 +1835,6 @@ function GetUnitConfig(unitId)
     return nil
 end
 
-function CountPlacedUnit(unitId)
-    local want = NormalizeName(unitId)
-    local n = 0
-    for _, unit in ipairs(GetPlayerUnits()) do
-        if GetUnitId(unit) == want or NormalizeName(GetRawUnitId(unit)) == want then
-            n = n + 1
-        end
-    end
-    return n
-end
 
 -- Match equipped units against the actual placed model using both internal IDs
 -- and display names. Some units (notably farm units with renamed/evolved IDs)
@@ -2535,15 +2510,6 @@ function GetPlacementCFrameForInfo(index, info)
     return nil, primary
 end
 
-function CountCategory(myUnits, pred)
-    local n = 0
-    for _, u in ipairs(myUnits) do
-        if pred(u) then
-            n = n + 1
-        end
-    end
-    return n
-end
 
 function HttpPost(url, body)
     local payload = {
@@ -5884,26 +5850,6 @@ matchEndHandled = false
 
 -- Farm-first keeps the next Farm upgrade affordable before Auto Place spends
 -- remaining cash on other equipped units.
-function HasPendingFarmUpgrade(myUnits)
-    for _, unit in ipairs(myUnits or {}) do
-        if IsFarmUnit(unit) and unit:FindFirstChild("_stats") then
-            local stats = unit._stats
-            local current = stats:FindFirstChild("upgrade")
-            local maximum = stats:FindFirstChild("max_upgrade")
-            if current and maximum then
-                local target = tonumber(maximum.Value) or 0
-                local cfg = GetUnitConfig(GetRawUnitId(unit))
-                if cfg and tonumber(cfg.upgradeTarget) then
-                    target = math.min(target, math.max(0, math.floor(cfg.upgradeTarget)))
-                end
-                if current.Value < target then
-                    return true
-                end
-            end
-        end
-    end
-    return false
-end
 votedStart = false
 lastVoteAttempt = 0
 lobbyStartSent = false
@@ -5946,18 +5892,6 @@ function NextActionAvailable()
     return nil
 end
 
-function FireGuiButton(button)
-    if not button then
-        return
-    end
-    if typeof(firesignal) == "function" then
-        firesignal(button.MouseButton1Click)
-    elseif typeof(getconnections) == "function" then
-        for _, connection in ipairs(getconnections(button.MouseButton1Click)) do
-            connection:Fire()
-        end
-    end
-end
 
 function GetCurrentLobbyId()
     local lobbyId = nil
