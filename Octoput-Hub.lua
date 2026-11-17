@@ -4414,11 +4414,18 @@ AutoPlayStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 AutoPlayStatusLabel.ZIndex = 13
 AutoPlayStatusLabel.Parent = AutoPlayStatusCard
 
+AdminLastAutoPlayStatus = nil
 function UpdateAutoPlayStatus(text, color)
     if AutoPlayStatusLabel then
         AutoPlayStatusLabel.Text = "Auto Play: " .. text
         if color then
             AutoPlayStatusLabel.TextColor3 = color
+        end
+    end
+    if AdminLastAutoPlayStatus ~= tostring(text) then
+        AdminLastAutoPlayStatus = tostring(text)
+        if type(AddAdminActivity) == "function" then
+            AddAdminActivity("Auto Play: " .. tostring(text), color == Color3.fromRGB(255, 100, 100) and "ERROR" or "INFO")
         end
     end
 end
@@ -7862,9 +7869,10 @@ function RefreshAdminDiagnostics()
     SetAdminDiagnostic("Match State", webhookGameWasActive and "In Match"
         or (webhookEndDetected and "Result detected" or "Idle"), true)
 
-    local inventoryOk, inventorySnapshot, inventoryAvailable = pcall(ReadInventoryRewardSnapshot)
-    local inventoryReady = inventoryOk and inventoryAvailable == true
-    SetAdminDiagnostic("Inventory Reader", inventoryReady and "Available" or (inventoryOk and "No profile data" or "Read error"), inventoryReady)
+    -- Avoid running the expensive executor/session scan on the 5-second UI refresh.
+    -- Actual profile availability is checked by the match-end reward reader.
+    local inventoryReaderLoaded = type(ReadInventoryRewardSnapshot) == "function"
+    SetAdminDiagnostic("Inventory Reader", inventoryReaderLoaded and "Loaded · checked at match end" or "Unavailable", inventoryReaderLoaded)
 
     local unitCount = 0
     for _ in pairs(webhookUnitStatsByInstance or {}) do unitCount = unitCount + 1 end
