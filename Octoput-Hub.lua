@@ -3003,13 +3003,17 @@ function ReadInventoryRewardSnapshot()
 
         -- Unique drops have their own UUID; use it to avoid confusing duplicates.
         for _, owned in pairs(inventoryProfile.unique_items or {}) do
-            if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
+            -- Game inventory entries are { uuid, item_id, _unique_item_data }.
+            -- Do not reject a valid unique item solely because an executor exposes
+            -- UUID/item_id in a non-string scalar representation.
+            if type(owned) == "table" and owned.uuid ~= nil and owned.item_id ~= nil then
                 local id = tostring(owned.item_id)
+                local uuid = tostring(owned.uuid)
                 local def = itemData[id] or {}
                 local charmDef = summerCharmData[id] or {}
                 local rarity = tostring(def.rarity or charmDef.rarity or portalRarities[id] or "Unknown")
-                snapshot["item:" .. owned.uuid] = {
-                    uuid = owned.uuid,
+                snapshot["item:" .. uuid] = {
+                    uuid = uuid,
                     itemId = id,
                     category = tostring(def.item_group or (charmDef.rarity and "Charms") or (portalNames[id] and "Portals") or "Item"),
                     name = tostring(portalNames[id] or charmDef.name or def.name or id),
@@ -3250,12 +3254,13 @@ function ReadPlayerLevel()
     return ok and tonumber(level) or nil
 end
 
+webhookUnitStatsByInstance = webhookUnitStatsByInstance or {}
+
 function ReadMatchUnitLines()
-    -- Aggregate every placed copy of the same unit type. Capture this continuously
-    -- during play because the game may destroy _UNITS before ResultsUI is rendered.
-    local units = GetPlayerUnits()
-    local grouped = {}
-    for _, unit in ipairs(units) do
+    -- Keep a per-instance high-water snapshot for the entire match. Units can be
+    -- sold, despawned, or removed during teardown; replacing the whole snapshot
+    -- with only the currently visible _UNITS caused earlier units to disappear.
+    for _, unit in ipairs(GetPlayerUnits()) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
             local idValue = stats:FindFirstChild("id")
@@ -3266,16 +3271,32 @@ function ReadMatchUnitLines()
             local takedownValue = stats:FindFirstChild("takedown_count")
             local damage = damageValue and tonumber(damageValue.Value) or 0
             local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
-            local key = NormalizeName(unitId)
-            local entry = grouped[key]
-            if not entry then
-                entry = { name = displayName, damage = 0, takedowns = 0, copies = 0 }
-                grouped[key] = entry
+            local previous = webhookUnitStatsByInstance[unit]
+            if not previous then
+                webhookUnitStatsByInstance[unit] = {
+                    unitId = unitId, name = displayName,
+                    damage = damage, takedowns = takedowns,
+                }
+            else
+                previous.unitId = unitId
+                previous.name = displayName
+                previous.damage = math.max(previous.damage or 0, damage)
+                previous.takedowns = math.max(previous.takedowns or 0, takedowns)
             end
-            entry.damage = entry.damage + damage
-            entry.takedowns = entry.takedowns + takedowns
-            entry.copies = entry.copies + 1
         end
+    end
+
+    local grouped = {}
+    for _, unitRecord in pairs(webhookUnitStatsByInstance) do
+        local key = NormalizeName(unitRecord.unitId)
+        local entry = grouped[key]
+        if not entry then
+            entry = { name = unitRecord.name, damage = 0, takedowns = 0, copies = 0 }
+            grouped[key] = entry
+        end
+        entry.damage = entry.damage + (unitRecord.damage or 0)
+        entry.takedowns = entry.takedowns + (unitRecord.takedowns or 0)
+        entry.copies = entry.copies + 1
     end
 
     local entries = {}
@@ -3332,13 +3353,13 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         -- Keep sampling the COMPLETE inventory for a fixed window. The old
         -- early-exit watched only Portal counts, so a delayed Charm grant could
         -- arrive after the loop had already stopped.
-        for attempt = 1, 16 do
+        for attempt = 1, 40 do
             local sampledSnapshot, sampledAvailable = ReadInventoryRewardSnapshot()
             if sampledAvailable then
                 inventoryRewardsAfter = sampledSnapshot
                 inventoryRewardsAvailable = true
             end
-            if attempt < 16 then task.wait(0.5) end
+            if attempt < 40 then task.wait(0.5) end
         end
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter, trackedPortalSnapshot)
@@ -7675,6 +7696,7 @@ task.spawn(function()
                 webhookSent = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
+                webhookUnitStatsByInstance = {}
                 webhookLastUnitCaptureAt = 0
                 skyPortalMatchDrops = {}
                 webhookResultTitleAtStart = resultTitle
