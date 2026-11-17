@@ -3350,14 +3350,35 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        -- Keep sampling the COMPLETE inventory for a fixed window. The old
-        -- early-exit watched only Portal counts, so a delayed Charm grant could
-        -- arrive after the loop had already stopped.
+        -- Wait for the COMPLETE inventory to stabilize, not just Portal counts.
+        -- This catches late Charm grants without forcing a full 20-second delay
+        -- when the inventory has already stopped changing.
+        local previousInventorySignature = nil
+        local stableInventoryReads = 0
         for attempt = 1, 40 do
             local sampledSnapshot, sampledAvailable = ReadInventoryRewardSnapshot()
             if sampledAvailable then
                 inventoryRewardsAfter = sampledSnapshot
                 inventoryRewardsAvailable = true
+                local signatureParts = {}
+                for key, reward in pairs(sampledSnapshot) do
+                    table.insert(signatureParts, table.concat({
+                        tostring(key),
+                        tostring(reward.itemId or ""),
+                        tostring(reward.amount or 1),
+                        tostring(reward.rarity or ""),
+                        tostring(reward.tier or ""),
+                    }, "|"))
+                end
+                table.sort(signatureParts)
+                local signature = table.concat(signatureParts, ";")
+                if signature == previousInventorySignature then
+                    stableInventoryReads = stableInventoryReads + 1
+                else
+                    previousInventorySignature = signature
+                    stableInventoryReads = 0
+                end
+                if attempt >= 5 and stableInventoryReads >= 3 then break end
             end
             if attempt < 40 then task.wait(0.5) end
         end
