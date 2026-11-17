@@ -2971,6 +2971,14 @@ function ReadInventoryRewardSnapshot()
         portal_item__skypiea = "Mythic",
         portal_item__enel = "Secret",
     }
+    -- Keep Summer Charm classification reliable even if an executor resolves
+    -- a different ModuleScript named "Items" before the game's data module.
+    local summerCharmData = {
+        summer_charm_1 = { name = "Summer Charm", rarity = "Legendary", tier = 1 },
+        summer_charm_2 = { name = "Summer Charm", rarity = "Legendary", tier = 2 },
+        summer_charm_3 = { name = "Summer Charm", rarity = "Mythic", tier = 3 },
+        summer_charm_4 = { name = "Summer Charm", rarity = "Secret", tier = 4 },
+    }
 
     if inventoryProfile then
         -- Stackable drops are stored as item_id -> quantity.
@@ -2979,14 +2987,16 @@ function ReadInventoryRewardSnapshot()
             if count > 0 then
                 local id = tostring(itemId)
                 local def = itemData[id] or {}
+                local charmDef = summerCharmData[id] or {}
+                local rarity = tostring(def.rarity or charmDef.rarity or portalRarities[id] or "Unknown")
                 snapshot["normal:" .. id] = {
                     itemId = id,
-                    category = tostring(def.item_group or (portalNames[id] and "Portals") or "Item"),
-                    name = tostring(portalNames[id] or def.name or id),
-                    rarity = tostring(def.rarity or portalRarities[id] or "Unknown"),
-                    tier = tonumber(def.tier),
+                    category = tostring(def.item_group or (charmDef.rarity and "Charms") or (portalNames[id] and "Portals") or "Item"),
+                    name = tostring(portalNames[id] or charmDef.name or def.name or id),
+                    rarity = rarity,
+                    tier = tonumber(def.tier or charmDef.tier),
                     amount = count,
-                    secret = tostring(def.rarity or portalRarities[id] or ""):lower() == "secret",
+                    secret = rarity:lower() == "secret",
                 }
             end
         end
@@ -2996,14 +3006,15 @@ function ReadInventoryRewardSnapshot()
             if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
                 local id = tostring(owned.item_id)
                 local def = itemData[id] or {}
-                local rarity = tostring(def.rarity or portalRarities[id] or "Unknown")
+                local charmDef = summerCharmData[id] or {}
+                local rarity = tostring(def.rarity or charmDef.rarity or portalRarities[id] or "Unknown")
                 snapshot["item:" .. owned.uuid] = {
                     uuid = owned.uuid,
                     itemId = id,
-                    category = tostring(def.item_group or (portalNames[id] and "Portals") or "Item"),
-                    name = tostring(portalNames[id] or def.name or id),
+                    category = tostring(def.item_group or (charmDef.rarity and "Charms") or (portalNames[id] and "Portals") or "Item"),
+                    name = tostring(portalNames[id] or charmDef.name or def.name or id),
                     rarity = rarity,
-                    tier = tonumber(def.tier),
+                    tier = tonumber(def.tier or charmDef.tier),
                     amount = 1,
                     secret = rarity:lower() == "secret",
                 }
@@ -3318,27 +3329,16 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        -- Allow delayed server inventory grants to settle after ResultsUI appears.
-        local previousPortalSignature = nil
-        local stablePortalReads = 0
-        for attempt = 1, 12 do
+        -- Keep sampling the COMPLETE inventory for a fixed window. The old
+        -- early-exit watched only Portal counts, so a delayed Charm grant could
+        -- arrive after the loop had already stopped.
+        for attempt = 1, 16 do
             local sampledSnapshot, sampledAvailable = ReadInventoryRewardSnapshot()
             if sampledAvailable then
                 inventoryRewardsAfter = sampledSnapshot
                 inventoryRewardsAvailable = true
-                local portalCounts = GetWebhookPortalCounts(sampledSnapshot)
-                local signature = string.format("%d|%d",
-                    portalCounts.portal_item__skypiea or 0,
-                    portalCounts.portal_item__enel or 0)
-                if signature == previousPortalSignature then
-                    stablePortalReads = stablePortalReads + 1
-                else
-                    stablePortalReads = 0
-                    previousPortalSignature = signature
-                end
-                if stablePortalReads >= 2 and attempt >= 5 then break end
             end
-            task.wait(0.5)
+            if attempt < 16 then task.wait(0.5) end
         end
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter, trackedPortalSnapshot)
