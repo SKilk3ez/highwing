@@ -3003,13 +3003,17 @@ function ReadInventoryRewardSnapshot()
 
         -- Unique drops have their own UUID; use it to avoid confusing duplicates.
         for _, owned in pairs(inventoryProfile.unique_items or {}) do
-            if type(owned) == "table" and type(owned.uuid) == "string" and type(owned.item_id) == "string" then
+            -- Game inventory entries are { uuid, item_id, _unique_item_data }.
+            -- Do not reject a valid unique item solely because an executor exposes
+            -- UUID/item_id in a non-string scalar representation.
+            if type(owned) == "table" and owned.uuid ~= nil and owned.item_id ~= nil then
                 local id = tostring(owned.item_id)
+                local uuid = tostring(owned.uuid)
                 local def = itemData[id] or {}
                 local charmDef = summerCharmData[id] or {}
                 local rarity = tostring(def.rarity or charmDef.rarity or portalRarities[id] or "Unknown")
-                snapshot["item:" .. owned.uuid] = {
-                    uuid = owned.uuid,
+                snapshot["item:" .. uuid] = {
+                    uuid = uuid,
                     itemId = id,
                     category = tostring(def.item_group or (charmDef.rarity and "Charms") or (portalNames[id] and "Portals") or "Item"),
                     name = tostring(portalNames[id] or charmDef.name or def.name or id),
@@ -3250,12 +3254,13 @@ function ReadPlayerLevel()
     return ok and tonumber(level) or nil
 end
 
+webhookUnitStatsByInstance = webhookUnitStatsByInstance or {}
+
 function ReadMatchUnitLines()
-    -- Aggregate every placed copy of the same unit type. Capture this continuously
-    -- during play because the game may destroy _UNITS before ResultsUI is rendered.
-    local units = GetPlayerUnits()
-    local grouped = {}
-    for _, unit in ipairs(units) do
+    -- Keep a per-instance high-water snapshot for the entire match. Units can be
+    -- sold, despawned, or removed during teardown; replacing the whole snapshot
+    -- with only the currently visible _UNITS caused earlier units to disappear.
+    for _, unit in ipairs(GetPlayerUnits()) do
         local stats = unit:FindFirstChild("_stats")
         if stats then
             local idValue = stats:FindFirstChild("id")
@@ -3266,16 +3271,32 @@ function ReadMatchUnitLines()
             local takedownValue = stats:FindFirstChild("takedown_count")
             local damage = damageValue and tonumber(damageValue.Value) or 0
             local takedowns = takedownValue and tonumber(takedownValue.Value) or 0
-            local key = NormalizeName(unitId)
-            local entry = grouped[key]
-            if not entry then
-                entry = { name = displayName, damage = 0, takedowns = 0, copies = 0 }
-                grouped[key] = entry
+            local previous = webhookUnitStatsByInstance[unit]
+            if not previous then
+                webhookUnitStatsByInstance[unit] = {
+                    unitId = unitId, name = displayName,
+                    damage = damage, takedowns = takedowns,
+                }
+            else
+                previous.unitId = unitId
+                previous.name = displayName
+                previous.damage = math.max(previous.damage or 0, damage)
+                previous.takedowns = math.max(previous.takedowns or 0, takedowns)
             end
-            entry.damage = entry.damage + damage
-            entry.takedowns = entry.takedowns + takedowns
-            entry.copies = entry.copies + 1
         end
+    end
+
+    local grouped = {}
+    for _, unitRecord in pairs(webhookUnitStatsByInstance) do
+        local key = NormalizeName(unitRecord.unitId)
+        local entry = grouped[key]
+        if not entry then
+            entry = { name = unitRecord.name, damage = 0, takedowns = 0, copies = 0 }
+            grouped[key] = entry
+        end
+        entry.damage = entry.damage + (unitRecord.damage or 0)
+        entry.takedowns = entry.takedowns + (unitRecord.takedowns or 0)
+        entry.copies = entry.copies + 1
     end
 
     local entries = {}
@@ -3329,16 +3350,37 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local inventoryRewardsAfter, inventoryRewardsAvailable = nil, false
     local inventoryRewardText, secretRewardText
     if secretBaselineAvailable then
-        -- Keep sampling the COMPLETE inventory for a fixed window. The old
-        -- early-exit watched only Portal counts, so a delayed Charm grant could
-        -- arrive after the loop had already stopped.
-        for attempt = 1, 16 do
+        -- Wait for the COMPLETE inventory to stabilize, not just Portal counts.
+        -- This catches late Charm grants without forcing a full 20-second delay
+        -- when the inventory has already stopped changing.
+        local previousInventorySignature = nil
+        local stableInventoryReads = 0
+        for attempt = 1, 40 do
             local sampledSnapshot, sampledAvailable = ReadInventoryRewardSnapshot()
             if sampledAvailable then
                 inventoryRewardsAfter = sampledSnapshot
                 inventoryRewardsAvailable = true
+                local signatureParts = {}
+                for key, reward in pairs(sampledSnapshot) do
+                    table.insert(signatureParts, table.concat({
+                        tostring(key),
+                        tostring(reward.itemId or ""),
+                        tostring(reward.amount or 1),
+                        tostring(reward.rarity or ""),
+                        tostring(reward.tier or ""),
+                    }, "|"))
+                end
+                table.sort(signatureParts)
+                local signature = table.concat(signatureParts, ";")
+                if signature == previousInventorySignature then
+                    stableInventoryReads = stableInventoryReads + 1
+                else
+                    previousInventorySignature = signature
+                    stableInventoryReads = 0
+                end
+                if attempt >= 5 and stableInventoryReads >= 3 then break end
             end
-            if attempt < 16 then task.wait(0.5) end
+            if attempt < 40 then task.wait(0.5) end
         end
         if inventoryRewardsAvailable then
             inventoryRewardText, secretRewardText = BuildInventoryRewardLines(secretBaseline, inventoryRewardsAfter, trackedPortalSnapshot)
@@ -3832,6 +3874,29 @@ function CreateHint(parent, text, layoutOrder, height)
     return Label
 end
 
+AdminActivityEntries = AdminActivityEntries or {}
+AdminActivityLabel = nil
+AdminDiagnosticsRows = {}
+
+function AddAdminActivity(message, level)
+    local entry = {
+        time = os.date("%H:%M:%S"),
+        level = tostring(level or "INFO"),
+        message = tostring(message or ""),
+    }
+    table.insert(AdminActivityEntries, 1, entry)
+    while #AdminActivityEntries > 40 do
+        table.remove(AdminActivityEntries)
+    end
+    if AdminActivityLabel then
+        local lines = {}
+        for index, item in ipairs(AdminActivityEntries) do
+            table.insert(lines, string.format("[%s] [%s] %s", item.time, item.level, item.message))
+        end
+        AdminActivityLabel.Text = #lines > 0 and table.concat(lines, "\n") or "No activity yet."
+    end
+end
+
 function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
@@ -3894,6 +3959,9 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
         end
 
         SaveConfig()
+        if type(AddAdminActivity) == "function" then
+            AddAdminActivity(title .. (isON and " enabled" or " disabled"), isON and "INFO" or "WARN")
+        end
         if callback then
             task.spawn(callback, isON)
         end
@@ -4276,6 +4344,7 @@ EventPage = CreateTab("Event", 4)
 WebhookPage = CreateTab("Webhook", 5)
 MiscPage = CreateTab("Misc", 6)
 SummonPage = CreateTab("Summon", 7)
+AdminPage = CreateTab("Admin", 8)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -4345,11 +4414,18 @@ AutoPlayStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 AutoPlayStatusLabel.ZIndex = 13
 AutoPlayStatusLabel.Parent = AutoPlayStatusCard
 
+AdminLastAutoPlayStatus = nil
 function UpdateAutoPlayStatus(text, color)
     if AutoPlayStatusLabel then
         AutoPlayStatusLabel.Text = "Auto Play: " .. text
         if color then
             AutoPlayStatusLabel.TextColor3 = color
+        end
+    end
+    if AdminLastAutoPlayStatus ~= tostring(text) then
+        AdminLastAutoPlayStatus = tostring(text)
+        if type(AddAdminActivity) == "function" then
+            AddAdminActivity("Auto Play: " .. tostring(text), color == Color3.fromRGB(255, 100, 100) and "ERROR" or "INFO")
         end
     end
 end
@@ -5588,7 +5664,7 @@ function SetFreeCam(enabled)
         freeCamMouseConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
             if freeCamActive and input.UserInputType == Enum.UserInputType.MouseButton2 then
                 freeCamRightMouseDown = true
-                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition end)
                 UserInputService.MouseIconEnabled = false
                 freeCamMouseDelta = Vector2.zero
             end
@@ -5615,15 +5691,47 @@ function SetFreeCam(enabled)
             local activeCamera = workspace.CurrentCamera
             if not activeCamera then return end
 
+            -- Delta Executor may suppress or mark InputBegan as game-processed.
+            -- Poll the physical mouse button every frame as the authoritative state.
+            local rightHeld = false
+            local pollOk, pollValue = pcall(function()
+                return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+            end)
+            if pollOk then
+                rightHeld = pollValue == true
+            else
+                rightHeld = freeCamRightMouseDown
+            end
+
+            if rightHeld ~= freeCamRightMouseDown then
+                freeCamRightMouseDown = rightHeld
+                freeCamMouseDelta = Vector2.zero
+                if rightHeld then
+                    -- LockCurrentPosition matches Roblox's normal right-drag camera.
+                    local lockOk = pcall(function()
+                        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+                    end)
+                    if not lockOk then
+                        pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+                    end
+                    UserInputService.MouseIconEnabled = false
+                else
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                    UserInputService.MouseIconEnabled = true
+                end
+            end
+
             local delta = Vector2.zero
             if freeCamRightMouseDown then
+                -- Prefer accumulated movement events; GetMouseDelta is the fallback
+                -- for executors that do not forward MouseMovement InputChanged.
                 delta = freeCamMouseDelta
                 freeCamMouseDelta = Vector2.zero
-                if delta.Magnitude == 0 then
-                    local ok, fallbackDelta = pcall(function()
-                        return UserInputService:GetMouseDelta()
-                    end)
-                    if ok and fallbackDelta then delta = fallbackDelta end
+                local ok, fallbackDelta = pcall(function()
+                    return UserInputService:GetMouseDelta()
+                end)
+                if ok and fallbackDelta and fallbackDelta.Magnitude > 0 then
+                    delta += fallbackDelta
                 end
                 freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
                 freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
@@ -7412,6 +7520,7 @@ webhookBoundGameFinished = nil
 webhookBoundResultsGui = nil
 webhookBoundResultTitle = nil
 webhookMatchToken = 0
+webhookMonitorStarted = true
 
 function StartWebhookEndSend(reason)
     if not webhookEndDetected or not State.WebhookOnEnd or webhookSent or webhookSending then
@@ -7427,6 +7536,7 @@ function StartWebhookEndSend(reason)
     local trackedPortalSnapshot = table.clone(skyPortalMatchDrops or {})
 
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
+    AddAdminActivity("Webhook send started (" .. tostring(reason or "result") .. ")", "INFO")
     task.spawn(function()
         local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot, trackedPortalSnapshot)
         -- A previous match's HTTP request may finish after a new match has begun.
@@ -7441,9 +7551,11 @@ function StartWebhookEndSend(reason)
             local finalDetails = GetResultDetails()
             webhookLastSentSettings = finalDetails and finalDetails.settings or nil
             print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
+            AddAdminActivity("Match-end webhook sent successfully", "SUCCESS")
         else
             local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
             warn("[Octoput Hub Webhook] Send failed: " .. failure)
+            AddAdminActivity("Webhook send failed: " .. failure, "ERROR")
             webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 8, 3, 120)
         end
     end)
@@ -7465,6 +7577,7 @@ function MarkWebhookEnd(reason)
             warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
         end
         print("[Octoput Hub Webhook] END DETECTED by " .. tostring(reason or "game result") .. ".")
+        AddAdminActivity("Match end detected (" .. tostring(reason or "game result") .. ")", "INFO")
     end
     StartWebhookEndSend(reason)
 end
@@ -7675,12 +7788,14 @@ task.spawn(function()
                 webhookSent = false
                 webhookRetryAt = 0
                 webhookUnitLinesSnapshot = nil
+                webhookUnitStatsByInstance = {}
                 webhookLastUnitCaptureAt = 0
                 skyPortalMatchDrops = {}
                 webhookResultTitleAtStart = resultTitle
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
                 print("[Octoput Hub Webhook] Match start detected; reward baseline captured.")
+                AddAdminActivity("Match started · reward baseline captured", "INFO")
             end
 
             -- Sample unit stats while the match is alive, before the game tears down _UNITS.
@@ -7714,6 +7829,145 @@ end)
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
         MainFrame.Visible = not MainFrame.Visible
+    end
+end)
+
+-- Admin page: live diagnostics and a bounded in-memory activity log.
+CreateSection(AdminPage, "SYSTEM DIAGNOSTICS", 1)
+CreateHint(AdminPage, "Live status checks for the Hub, automation, inventory reader and webhook monitor.", 2, 30)
+
+local function CreateAdminStatusRow(parent, title, layoutOrder)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -10, 0, 34)
+    row.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+    row.LayoutOrder = layoutOrder
+    row.ZIndex = 12
+    row.Parent = parent
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = row
+    local name = Instance.new("TextLabel")
+    name.Size = UDim2.new(0.62, -8, 1, 0)
+    name.Position = UDim2.new(0, 10, 0, 0)
+    name.BackgroundTransparency = 1
+    name.Text = title
+    name.TextColor3 = Color3.fromRGB(210, 215, 230)
+    name.TextSize = 12
+    name.Font = Enum.Font.Gotham
+    name.TextXAlignment = Enum.TextXAlignment.Left
+    name.ZIndex = 13
+    name.Parent = row
+    local value = Instance.new("TextLabel")
+    value.Size = UDim2.new(0.38, -10, 1, 0)
+    value.Position = UDim2.new(0.62, 0, 0, 0)
+    value.BackgroundTransparency = 1
+    value.Text = "Checking..."
+    value.TextColor3 = Color3.fromRGB(160, 160, 180)
+    value.TextSize = 12
+    value.Font = Enum.Font.GothamBold
+    value.TextXAlignment = Enum.TextXAlignment.Right
+    value.ZIndex = 13
+    value.Parent = row
+    AdminDiagnosticsRows[title] = value
+    return row
+end
+
+CreateAdminStatusRow(AdminPage, "Hub UI", 3)
+CreateAdminStatusRow(AdminPage, "Webhook", 4)
+CreateAdminStatusRow(AdminPage, "Webhook Monitor", 5)
+CreateAdminStatusRow(AdminPage, "Match State", 6)
+CreateAdminStatusRow(AdminPage, "Inventory Reader", 7)
+CreateAdminStatusRow(AdminPage, "Unit Stats Capture", 8)
+CreateAdminStatusRow(AdminPage, "Auto Play", 9)
+CreateAdminStatusRow(AdminPage, "Free Cam", 10)
+
+local function SetAdminDiagnostic(name, value, good)
+    local label = AdminDiagnosticsRows[name]
+    if label then
+        label.Text = tostring(value)
+        label.TextColor3 = good and Color3.fromRGB(90, 225, 145)
+            or Color3.fromRGB(255, 185, 85)
+    end
+end
+
+function RefreshAdminDiagnostics()
+    SetAdminDiagnostic("Hub UI", ScreenGui and ScreenGui.Parent and "Running" or "Unavailable", ScreenGui and ScreenGui.Parent ~= nil)
+    local webhookUrl = NormalizeWebhookUrl(State.WebhookURL)
+    local webhookProblem = WebhookProblem(webhookUrl)
+    local webhookReady = webhookProblem == nil
+    SetAdminDiagnostic("Webhook", not webhookReady and (State.WebhookOnEnd and "Enabled · URL invalid" or "URL not configured")
+        or (State.WebhookOnEnd and "Enabled · Ready" or "Ready · Sending off"), webhookReady)
+    SetAdminDiagnostic("Webhook Monitor", webhookMonitorStarted and "Running" or "Not started", webhookMonitorStarted == true)
+    SetAdminDiagnostic("Match State", webhookGameWasActive and "In Match"
+        or (webhookEndDetected and "Result detected" or "Idle"), true)
+
+    -- Avoid running the expensive executor/session scan on the 5-second UI refresh.
+    -- Actual profile availability is checked by the match-end reward reader.
+    local inventoryReaderLoaded = type(ReadInventoryRewardSnapshot) == "function"
+    SetAdminDiagnostic("Inventory Reader", inventoryReaderLoaded and "Loaded · checked at match end" or "Unavailable", inventoryReaderLoaded)
+
+    local unitCount = 0
+    for _ in pairs(webhookUnitStatsByInstance or {}) do unitCount = unitCount + 1 end
+    SetAdminDiagnostic("Unit Stats Capture", tostring(unitCount) .. " unit(s) tracked", unitCount > 0 or not webhookGameWasActive)
+
+    local autoCount = 0
+    for _, key in ipairs({"AutoPlace", "AutoUpgrade", "AutoBuffRotation", "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoOpenPortal", "AutoNextPortal"}) do
+        if State[key] == true then autoCount = autoCount + 1 end
+    end
+    SetAdminDiagnostic("Auto Play", tostring(autoCount) .. " task(s) enabled", true)
+    SetAdminDiagnostic("Free Cam", freeCamActive and "Active" or "Inactive", true)
+end
+
+CreateButton(AdminPage, "↻ Refresh Diagnostics", 11, RefreshAdminDiagnostics)
+CreateSection(AdminPage, "LIVE ACTIVITY LOG", 12)
+CreateHint(AdminPage, "Recent Hub events. The log is kept in memory and resets when the script is re-executed.", 13, 28)
+CreateButton(AdminPage, "Clear Activity Log", 14, function()
+    table.clear(AdminActivityEntries)
+    if AdminActivityLabel then AdminActivityLabel.Text = "No activity yet." end
+    AddAdminActivity("Activity log cleared", "INFO")
+end)
+
+local AdminLogFrame = Instance.new("Frame")
+AdminLogFrame.Size = UDim2.new(1, -10, 0, 220)
+AdminLogFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+AdminLogFrame.BorderSizePixel = 0
+AdminLogFrame.LayoutOrder = 15
+AdminLogFrame.ZIndex = 12
+AdminLogFrame.Parent = AdminPage
+local AdminLogCorner = Instance.new("UICorner")
+AdminLogCorner.CornerRadius = UDim.new(0, 6)
+AdminLogCorner.Parent = AdminLogFrame
+local AdminLogScroll = Instance.new("ScrollingFrame")
+AdminLogScroll.Size = UDim2.new(1, -12, 1, -12)
+AdminLogScroll.Position = UDim2.new(0, 6, 0, 6)
+AdminLogScroll.BackgroundTransparency = 1
+AdminLogScroll.BorderSizePixel = 0
+AdminLogScroll.ScrollBarThickness = 4
+AdminLogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+AdminLogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+AdminLogScroll.ZIndex = 13
+AdminLogScroll.Parent = AdminLogFrame
+AdminActivityLabel = Instance.new("TextLabel")
+AdminActivityLabel.Size = UDim2.new(1, -8, 0, 0)
+AdminActivityLabel.AutomaticSize = Enum.AutomaticSize.Y
+AdminActivityLabel.BackgroundTransparency = 1
+AdminActivityLabel.Text = "No activity yet."
+AdminActivityLabel.TextColor3 = Color3.fromRGB(190, 195, 210)
+AdminActivityLabel.TextSize = 11
+AdminActivityLabel.Font = Enum.Font.Code
+AdminActivityLabel.TextXAlignment = Enum.TextXAlignment.Left
+AdminActivityLabel.TextYAlignment = Enum.TextYAlignment.Top
+AdminActivityLabel.TextWrapped = true
+AdminActivityLabel.ZIndex = 14
+AdminActivityLabel.Parent = AdminLogScroll
+
+AddAdminActivity("Admin diagnostics initialized", "INFO")
+RefreshAdminDiagnostics()
+
+task.spawn(function()
+    while ScreenGui and ScreenGui.Parent do
+        task.wait(5)
+        pcall(RefreshAdminDiagnostics)
     end
 end)
 
