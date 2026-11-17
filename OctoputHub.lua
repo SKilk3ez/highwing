@@ -2741,7 +2741,7 @@ end
 
 task.spawn(function()
     while ScreenGui.Parent do
-        task.wait(0.25)
+        task.wait(0.5)
 
         if State.BlackScreen then
             local highestDisplayOrder = 9999
@@ -5034,7 +5034,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(1)
+        task.wait(1.5)
         local ok, err = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
@@ -5265,7 +5265,7 @@ portalOpenBusy = false
 portalLastRefresh = 0
 portalOpenedUUIDs = {}
 task.spawn(function()
-    while task.wait(1) do
+    while task.wait(1.5) do
         if State.AutoOpenPortal and not portalOpenBusy and IsInLobby() then
             portalOpenBusy = true
             local ok, err = pcall(function()
@@ -6877,7 +6877,7 @@ end
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(0.75)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             SyncReplicatedGameData()
@@ -7097,7 +7097,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(0.1)
+        task.wait(State.AutoBuffRotation and 0.2 or 1)
         local rotationOk, rotationErr = pcall(function()
             if not State.AutoBuffRotation then
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
@@ -7269,21 +7269,20 @@ end)
 
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(0.75)
         local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
-        unitRefreshClock = unitRefreshClock + 0.5
-        if unitRefreshClock >= 1 then
+        unitRefreshClock = unitRefreshClock + 0.75
+        if unitRefreshClock >= 2.25 then
             unitRefreshClock = 0
             pcall(RefreshUnitConfigUI)
         end
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
-            SyncReplicatedGameData()
-            local myUnits = GetPlayerUnits()
-            local wave = GetCurrentWave()
-
             if State.AutoPlace then
+                SyncReplicatedGameData()
+                local myUnits = GetPlayerUnits()
+                local wave = GetCurrentWave()
                 local equipped = EnrichEquipped(GetEquippedUnitList())
                 if #equipped > 0 then
                     -- Farm First prioritizes Farm placement first, then Farm upgrades.
@@ -7577,7 +7576,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(0.2)
+        task.wait(0.35)
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
