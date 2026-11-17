@@ -5809,11 +5809,31 @@ CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK"
 CreateToggle(MiscPage, "Free Cam", "FreeCam", 4, function(isON)
     SetFreeCam(isON)
 end)
-CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 5, 48)
+HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 5, function(isON)
+    -- Hide the complete Hub ScreenGui, including the floating launcher and overlays.
+    -- Right Shift restores the Hub while all automation continues in the background.
+    if ScreenGui then ScreenGui.Enabled = not isON end
+    if type(AddAdminActivity) == "function" then
+        AddAdminActivity(isON and "Screenshot mode enabled · GUI hidden" or "Screenshot mode disabled · GUI restored", "INFO")
+    end
+end)
+local function RefreshHideScreenshotToggleVisual()
+    if not HideScreenshotGUIToggle then return end
+    local switchButton = HideScreenshotGUIToggle:FindFirstChildWhichIsA("TextButton")
+    local indicator = switchButton and switchButton:FindFirstChild("Indicator")
+    local isON = State.HideGUIForScreenshots == true
+    if switchButton then
+        switchButton.BackgroundColor3 = isON and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
+    end
+    if indicator then
+        indicator.Position = isON and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+    end
+end
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 6, 48)
 
-CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 4, 34)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 5, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 8, 50, 150, function()
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 7, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 8, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 9, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
@@ -7828,7 +7848,17 @@ end)
 
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
-        MainFrame.Visible = not MainFrame.Visible
+        if State.HideGUIForScreenshots == true then
+            State.HideGUIForScreenshots = false
+            if ScreenGui then ScreenGui.Enabled = true end
+            SaveConfig()
+            RefreshHideScreenshotToggleVisual()
+            if type(AddAdminActivity) == "function" then
+                AddAdminActivity("Screenshot mode disabled · GUI restored with Right Shift", "INFO")
+            end
+        else
+            MainFrame.Visible = not MainFrame.Visible
+        end
     end
 end)
 
@@ -7971,9 +8001,12 @@ task.spawn(function()
     end
 end)
 
--- Hide only the hub window after every feature, connection and hotkey is initialized.
--- Automation continues running in the background; Right Shift reopens the GUI.
-if State.AutoHideGUIOnExecute then
+-- Apply screenshot mode after controls and hotkeys are initialized.
+-- Right Shift can restore the ScreenGui even while it is disabled.
+if State.HideGUIForScreenshots then
+    ScreenGui.Enabled = false
+    RefreshHideScreenshotToggleVisual()
+elseif State.AutoHideGUIOnExecute then
     MainFrame.Visible = false
 end
 
