@@ -5809,9 +5809,48 @@ CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK"
 CreateToggle(MiscPage, "Free Cam", "FreeCam", 4, function(isON)
     SetFreeCam(isON)
 end)
+-- Screenshot mode: suppress every game-owned ScreenGui under PlayerGui.
+-- Keep original Enabled states so restoring the mode never opens windows that were closed.
+local screenshotHiddenGameGuis = {}
+local screenshotGameGuiAddedConnection = nil
+local function HideOneGameScreenGui(gui)
+    if not gui or not gui:IsA("ScreenGui") or gui == ScreenGui or gui.Name == "XT_Hub_UI" then return end
+    if screenshotHiddenGameGuis[gui] == nil then
+        screenshotHiddenGameGuis[gui] = gui.Enabled
+    end
+    gui.Enabled = false
+end
+function SetGameUIScreenshotHidden(hidden)
+    if hidden then
+        for _, child in ipairs(playerGui:GetChildren()) do
+            if child:IsA("ScreenGui") then HideOneGameScreenGui(child) end
+        end
+        if screenshotGameGuiAddedConnection then screenshotGameGuiAddedConnection:Disconnect() end
+        screenshotGameGuiAddedConnection = playerGui.ChildAdded:Connect(function(child)
+            if State.HideGUIForScreenshots == true and child:IsA("ScreenGui") then
+                task.defer(function()
+                    if State.HideGUIForScreenshots == true then HideOneGameScreenGui(child) end
+                end)
+            end
+        end)
+    else
+        if screenshotGameGuiAddedConnection then
+            screenshotGameGuiAddedConnection:Disconnect()
+            screenshotGameGuiAddedConnection = nil
+        end
+        for gui, wasEnabled in pairs(screenshotHiddenGameGuis) do
+            if gui and gui.Parent then
+                pcall(function() gui.Enabled = wasEnabled end)
+            end
+        end
+        table.clear(screenshotHiddenGameGuis)
+    end
+end
+
 HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 5, function(isON)
-    -- Hide the complete Hub ScreenGui, including the floating launcher and overlays.
-    -- Right Shift restores the Hub while all automation continues in the background.
+    -- Hide all game ScreenGuis (Inventory, Summon, unit info, event windows, etc.)
+    -- and the complete Hub. Preserve each game's original Enabled state for restoration.
+    SetGameUIScreenshotHidden(isON)
     if ScreenGui then ScreenGui.Enabled = not isON end
     if type(AddAdminActivity) == "function" then
         AddAdminActivity(isON and "Screenshot mode enabled · GUI hidden" or "Screenshot mode disabled · GUI restored", "INFO")
@@ -7850,6 +7889,7 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
         if State.HideGUIForScreenshots == true then
             State.HideGUIForScreenshots = false
+            SetGameUIScreenshotHidden(false)
             if ScreenGui then ScreenGui.Enabled = true end
             SaveConfig()
             RefreshHideScreenshotToggleVisual()
@@ -8004,6 +8044,7 @@ end)
 -- Apply screenshot mode after controls and hotkeys are initialized.
 -- Right Shift can restore the ScreenGui even while it is disabled.
 if State.HideGUIForScreenshots then
+    SetGameUIScreenshotHidden(true)
     ScreenGui.Enabled = false
     RefreshHideScreenshotToggleVisual()
 elseif State.AutoHideGUIOnExecute then
