@@ -5664,7 +5664,7 @@ function SetFreeCam(enabled)
         freeCamMouseConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
             if freeCamActive and input.UserInputType == Enum.UserInputType.MouseButton2 then
                 freeCamRightMouseDown = true
-                UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+                pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition end)
                 UserInputService.MouseIconEnabled = false
                 freeCamMouseDelta = Vector2.zero
             end
@@ -5691,15 +5691,47 @@ function SetFreeCam(enabled)
             local activeCamera = workspace.CurrentCamera
             if not activeCamera then return end
 
+            -- Delta Executor may suppress or mark InputBegan as game-processed.
+            -- Poll the physical mouse button every frame as the authoritative state.
+            local rightHeld = false
+            local pollOk, pollValue = pcall(function()
+                return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+            end)
+            if pollOk then
+                rightHeld = pollValue == true
+            else
+                rightHeld = freeCamRightMouseDown
+            end
+
+            if rightHeld ~= freeCamRightMouseDown then
+                freeCamRightMouseDown = rightHeld
+                freeCamMouseDelta = Vector2.zero
+                if rightHeld then
+                    -- LockCurrentPosition matches Roblox's normal right-drag camera.
+                    local lockOk = pcall(function()
+                        UserInputService.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+                    end)
+                    if not lockOk then
+                        pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+                    end
+                    UserInputService.MouseIconEnabled = false
+                else
+                    UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+                    UserInputService.MouseIconEnabled = true
+                end
+            end
+
             local delta = Vector2.zero
             if freeCamRightMouseDown then
+                -- Prefer accumulated movement events; GetMouseDelta is the fallback
+                -- for executors that do not forward MouseMovement InputChanged.
                 delta = freeCamMouseDelta
                 freeCamMouseDelta = Vector2.zero
-                if delta.Magnitude == 0 then
-                    local ok, fallbackDelta = pcall(function()
-                        return UserInputService:GetMouseDelta()
-                    end)
-                    if ok and fallbackDelta then delta = fallbackDelta end
+                local ok, fallbackDelta = pcall(function()
+                    return UserInputService:GetMouseDelta()
+                end)
+                if ok and fallbackDelta and fallbackDelta.Magnitude > 0 then
+                    delta += fallbackDelta
                 end
                 freeCamYaw = freeCamYaw - delta.X * FREECAM_SENSITIVITY
                 freeCamPitch = math.clamp(freeCamPitch - delta.Y * FREECAM_SENSITIVITY, math.rad(-89), math.rad(89))
