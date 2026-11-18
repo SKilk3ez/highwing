@@ -20,6 +20,7 @@ UserInputService = game:GetService("UserInputService")
 ReplicatedStorage = game:GetService("ReplicatedStorage")
 RunService = game:GetService("RunService")
 HttpService = game:GetService("HttpService")
+Lighting = game:GetService("Lighting")
 
 player = Players.LocalPlayer
 playerGui = player:WaitForChild("PlayerGui")
@@ -453,6 +454,7 @@ State = {
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
     AutoBuffRotation = false,
+    PerformanceMode = false,
     PlacePercent = 0,
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
@@ -585,6 +587,7 @@ function CopyStateForSave()
         AutoUpgrade = State.AutoUpgrade,
         AutoUpgradeFarmFirst = State.AutoUpgradeFarmFirst,
         AutoBuffRotation = State.AutoBuffRotation,
+        PerformanceMode = State.PerformanceMode,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
         AutoEventQuests = State.AutoEventQuests,
@@ -641,7 +644,7 @@ function ApplySavedTable(saved)
         return
     end
     local boolKeys = {
-        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
+        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation", "PerformanceMode",
         "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
@@ -5786,15 +5789,109 @@ function SetFreeCam(enabled)
     end
 end
 
+-- Performance Mode stores original values so effects/shadows can be restored exactly.
+performanceModeSaved = {}
+performanceModeConnections = {}
+performanceLightingState = nil
+
+function ReducePerformanceInstance(instance)
+    if not instance then return end
+    local saved = performanceModeSaved[instance]
+    local function setReduced(property)
+        if not saved then
+            saved = {}
+            performanceModeSaved[instance] = saved
+        end
+        if saved[property] == nil then
+            local ok, value = pcall(function() return instance[property] end)
+            if ok then saved[property] = value end
+        end
+        pcall(function() instance[property] = false end)
+    end
+
+    if instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")
+        or instance:IsA("Fire") or instance:IsA("Smoke") or instance:IsA("Sparkles")
+        or instance:IsA("PostEffect") then
+        setReduced("Enabled")
+    end
+    if instance:IsA("BasePart") then
+        setReduced("CastShadow")
+    end
+end
+
+function SetPerformanceMode(enabled)
+    enabled = enabled == true
+    if enabled then
+        for instance, connection in pairs(performanceModeConnections) do
+            if connection then connection:Disconnect() end
+            performanceModeConnections[instance] = nil
+        end
+        performanceModeSaved = {}
+        performanceLightingState = {
+            globalShadows = Lighting.GlobalShadows,
+        }
+        pcall(function()
+            local terrain = workspace.Terrain
+            performanceLightingState.terrain = terrain
+            performanceLightingState.terrainDecoration = terrain.Decoration
+            terrain.Decoration = false
+        end)
+        pcall(function() Lighting.GlobalShadows = false end)
+
+        for _, root in ipairs({workspace, Lighting}) do
+            for _, descendant in ipairs(root:GetDescendants()) do
+                ReducePerformanceInstance(descendant)
+            end
+            performanceModeConnections[root] = root.DescendantAdded:Connect(function(descendant)
+                if State.PerformanceMode == true then
+                    ReducePerformanceInstance(descendant)
+                end
+            end)
+        end
+    else
+        for instance, connection in pairs(performanceModeConnections) do
+            if connection then connection:Disconnect() end
+            performanceModeConnections[instance] = nil
+        end
+        for instance, properties in pairs(performanceModeSaved) do
+            if instance and instance.Parent then
+                for property, originalValue in pairs(properties) do
+                    pcall(function() instance[property] = originalValue end)
+                end
+            end
+        end
+        table.clear(performanceModeSaved)
+        if performanceLightingState then
+            pcall(function() Lighting.GlobalShadows = performanceLightingState.globalShadows end)
+            if performanceLightingState.terrain and performanceLightingState.terrain.Parent then
+                pcall(function()
+                    performanceLightingState.terrain.Decoration = performanceLightingState.terrainDecoration
+                end)
+            end
+        end
+        performanceLightingState = nil
+    end
+    if type(AddAdminActivity) == "function" then
+        AddAdminActivity(enabled and "Performance Mode enabled · effects and shadows reduced"
+            or "Performance Mode disabled · visual settings restored", "INFO")
+    end
+end
+
 -- Free Cam remains active across character respawns; it only ends when toggled off.
-CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
+CreateSection(MiscPage, "Performance", 1)
+CreateToggle(MiscPage, "Performance Mode (Reduce Effects & Shadows)", "PerformanceMode", 2, function(isON)
+    SetPerformanceMode(isON)
+end)
+CreateHint(MiscPage, "Turns off particles, beams, trails, post effects, cast shadows, and terrain decoration. Original visual settings are restored when disabled.", 3, 38)
+SetPerformanceMode(State.PerformanceMode)
+CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 4, function(isON)
     ApplyBlackScreen(isON)
 end)
-CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, function(isON)
+CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 5, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
-CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
-CreateToggle(MiscPage, "Free Cam", "FreeCam", 4, function(isON)
+CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 6)
+CreateToggle(MiscPage, "Free Cam", "FreeCam", 7, function(isON)
     SetFreeCam(isON)
 end)
 -- Screenshot mode: suppress every game-owned ScreenGui under PlayerGui.
@@ -5835,7 +5932,7 @@ function SetGameUIScreenshotHidden(hidden)
     end
 end
 
-HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 5, function(isON)
+HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 8, function(isON)
     -- Hide all game ScreenGuis (Inventory, Summon, unit info, event windows, etc.)
     -- and the complete Hub. Preserve each game's original Enabled state for restoration.
     SetGameUIScreenshotHidden(isON)
@@ -5856,11 +5953,11 @@ local function RefreshHideScreenshotToggleVisual()
         indicator.Position = isON and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
     end
 end
-CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 6, 48)
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 9, 48)
 
-CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 7, 34)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 8, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 9, 50, 150, function()
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 10, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 11, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 12, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
