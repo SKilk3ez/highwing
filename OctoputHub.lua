@@ -1214,15 +1214,14 @@ end
 -- _stats.active_attack_cooldown on the deployed model.
 --
 -- Buff loop formula (game.lua):
---   active cooldown  C = active_attack_stats.attack_cooldown (60s for Commander/Windsong)
---                        * calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown")
---                      = base * max(0.6, (1 + cursed attack_cooldown mods) * level/artifact mods)
---   buff duration    D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
---   unit SPD         = 1 / C (casts per second); group rate R = sum(1 / C_i)
---   loop is seamless when R >= 1 / D, i.e. units needed = ceil(C / D)
--- The worker recasts one unit only when the group's current buff is about to
--- expire (lastGroupCast + D - lead), so casts are staggered instead of all
--- units firing together and leaving a gap afterwards.
+--   C = active_attack_stats.attack_cooldown * calculate_static_stat_multiplier(...)
+--   D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
+--   IMPORTANT: AttacksReplicate.GLOBAL_ATTACK_COOLDOWNS is keyed by activeId.
+--   Every unit with the same activeId shares ONE global cooldown, so duplicate
+--   units do not add rates. Best possible repeat interval is the fastest unit's
+--   effective C; 100% uptime is only possible when C <= D.
+-- The worker uses each unit's own last_active_cast AND the shared cast_time lock,
+-- starts the first cast immediately, and confirms a cast before advancing state.
 BUFF_ROTATION_ATTACKS = {
     ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander", baseCooldown = 60 },
     ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong", baseCooldown = 60 },
@@ -1478,16 +1477,17 @@ function GetUnitOverheadReadyAttribute(unit)
     return nil
 end
 
-function GetActiveAttackCooldownState(entry, now)
+function GetActiveAttackCooldownState(entry, now, globalRemaining)
     -- Mirror game.lua AttacksReplicate.get_current_active_attack_cooldown():
-    -- busy while _stats.active_queued_or_using is true, otherwise ready when
-    -- active_attack_cooldown - (tick() - last_active_cast) <= 0.
+    -- a unit must pass BOTH its own active cooldown and the shared cooldown
+    -- keyed by active attack ID in GLOBAL_ATTACK_COOLDOWNS.
     if entry.queued then
         return true, false, entry.cooldown, entry.cooldown
     end
-    local remaining = entry.cooldown - (now - entry.lastCast)
+    local localRemaining = entry.cooldown - (now - (entry.lastCast or 0))
+    local remaining = math.max(localRemaining, tonumber(globalRemaining) or 0)
     local isReady = remaining <= 0
-    if isReady and entry.lastCast <= 0 then
+    if isReady and (entry.lastCast or 0) <= 0 then
         local overheadReady = GetUnitOverheadReadyAttribute(entry.model)
         if overheadReady == false then
             isReady = false
@@ -1661,18 +1661,29 @@ function GetBuffRotationGroups(now)
                 local validLiveLastCast = (rawLiveLastCast and rawLiveLastCast > 0 and rawLiveLastCast <= now + 5)
                     and rawLiveLastCast or nil
 
+                -- game.lua writes GLOBAL_ATTACK_COOLDOWNS[activeId] =
+                -- { cast_time = tick(), cooldown = effectiveCooldown }.
+                -- This is SHARED by every deployed unit with this activeId.
                 local globalLastCast = nil
-                if type(globalEntry) == "table" and tonumber(globalEntry.last_cast) and tonumber(globalEntry.last_cast) > 0 then
-                    globalLastCast = tonumber(globalEntry.last_cast)
-                elseif tonumber(globalEntry) and tonumber(globalEntry) > 0 then
+                if type(globalEntry) == "table" then
+                    globalLastCast = tonumber(globalEntry.cast_time) or tonumber(globalEntry.last_cast)
+                elseif tonumber(globalEntry) then
                     globalLastCast = tonumber(globalEntry)
                 end
-                if globalLastCast and globalLastCast > now + 5 then
+                if globalLastCast and (globalLastCast <= 0 or globalLastCast > now + 5) then
                     globalLastCast = nil
                 end
+                local globalCooldownDuration = type(globalEntry) == "table"
+                    and (tonumber(globalEntry.cooldown) or 0) or 0
+                local globalCooldownRemaining = 0
+                if globalCooldownDuration > 0 and globalLastCast then
+                    globalCooldownRemaining = math.max(0, globalCooldownDuration - (now - globalLastCast))
+                end
 
+                -- Per-unit readiness must use only that unit's last_active_cast.
+                -- The shared cast_time is accounted for separately below.
                 local ownCast = BUFF_ROTATION_RUNTIME.ownCast[unit] or 0
-                local lastCast = math.max(validLiveLastCast or 0, globalLastCast or 0, ownCast or 0)
+                local lastCast = math.max(validLiveLastCast or 0, ownCast or 0)
 
                 local queuedValue = stats:FindFirstChild("active_queued_or_using")
                 local queued = queuedValue and queuedValue.Value == true or false
@@ -1709,6 +1720,9 @@ function GetBuffRotationGroups(now)
                     multSource = multSource,
                     speedStat = speedStat,
                     lastCast = lastCast,
+                    globalLastCast = globalLastCast,
+                    globalCooldownDuration = globalCooldownDuration,
+                    globalCooldownRemaining = globalCooldownRemaining,
                     hasLiveCast = (validLiveLastCast ~= nil) or (globalLastCast ~= nil),
                     queued = queued,
                     hasCurse = hasCurse,
@@ -1734,28 +1748,36 @@ function GetBuffRotationGroups(now)
         table.sort(group.units, function(a, b)
             return tostring(a.uuid) < tostring(b.uuid)
         end)
-        local totalRate = 0
+        local fastestCooldown = math.huge
+        local globalCooldownDuration = 0
         local multTotal = 0
+        local currentGlobalRemaining = 0
         for _, entry in ipairs(group.units) do
             entry.spd = 1 / math.max(0.1, entry.cooldown)
-            totalRate = totalRate + entry.spd
+            fastestCooldown = math.min(fastestCooldown, entry.cooldown)
+            globalCooldownDuration = math.max(globalCooldownDuration, entry.globalCooldownDuration or 0)
             multTotal = multTotal + (entry.multiplier or 1)
+            currentGlobalRemaining = math.max(currentGlobalRemaining, entry.globalCooldownRemaining or 0)
         end
         local n = #group.units
-        group.totalRate = totalRate
-        group.totalSPD = totalRate
-        group.averageSPD = n > 0 and (totalRate / n) or 0
+        -- IMPORTANT: game.lua shares GLOBAL_ATTACK_COOLDOWNS by activeId.
+        -- Duplicate Commanders/Windsongs therefore do NOT add their rates;
+        -- only one cast of the same activeId can pass the shared cooldown.
+        group.bestCooldown = math.max(fastestCooldown, globalCooldownDuration)
+        group.globalCooldownDuration = globalCooldownDuration
+        group.globalRemaining = currentGlobalRemaining
+        group.totalRate = fastestCooldown < math.huge and (1 / math.max(0.1, fastestCooldown)) or 0
+        group.totalSPD = group.totalRate
+        group.averageSPD = group.totalRate
         group.averageMultiplier = n > 0 and (multTotal / n) or 1
-        -- Average spacing between casts if every unit is used as soon as it is ready.
-        group.interval = totalRate > 0 and (1 / totalRate) or math.huge
-        group.averageCooldown = n > 0 and (n / math.max(totalRate, 0.000001)) or math.huge
-        -- Seamless loop needs one cast every D seconds: R >= 1 / D.
-        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / math.max(1, group.duration)))
-        group.sustainable = totalRate >= (1 / math.max(1, group.duration)) - 1e-6
-        -- Recast lead before expiry. Using a lead shortens the effective cycle,
-        -- so only use as much lead as the group's SPD can afford:
-        --   sum((D - lead) / C_i) >= 1  ->  lead <= D - 1 / R
-        local affordable = totalRate > 0 and (group.duration - 1 / totalRate) or 0
+        group.interval = group.bestCooldown
+        group.averageCooldown = group.bestCooldown
+        group.requiredUnitsEstimate = group.bestCooldown < math.huge
+            and math.max(1, math.ceil(group.bestCooldown / math.max(1, group.duration))) or 1
+        group.sustainable = group.bestCooldown <= math.max(1, group.duration) + 1e-6
+        -- Lead is only safe when the fastest available unit's shared cooldown
+        -- can fit inside the buff duration. The game itself enforces the lock.
+        local affordable = group.bestCooldown < math.huge and (group.duration - group.bestCooldown) or 0
         group.lead = math.clamp(affordable, 0, BUFF_ROTATION_SAFETY_MARGIN)
     end
     return groups, elfyInfo
@@ -2817,44 +2839,6 @@ function ReadAuthoritativeResultSettings()
     return nil
 end
 
-function ReadWebhookLevelContext()
-    local context = {}
-    local ok, levelData = pcall(function()
-        local src = ReplicatedStorage:FindFirstChild("src")
-        local loaderModule = src and src:FindFirstChild("Loader")
-        if not loaderModule then return nil end
-        local Loader = require(loaderModule)
-        return Loader and Loader.LevelData
-    end)
-    if not ok or type(levelData) ~= "table" then return context end
-
-    context.mode = levelData._gamemode
-    context.difficulty = levelData._difficulty
-    context.challengeId = levelData._challenge
-    context.weatherId = levelData._weather
-    context.map = levelData.map
-    context.isStory = levelData._is_actual_storymode == true
-    context.isPortal = levelData._is_map_or_portal_level == true
-
-    if context.challengeId then
-        local challengeData = LoadGameDataModule and LoadGameDataModule("ChallengeAndRewards") or nil
-        local challenges = type(challengeData) == "table" and challengeData.challenges or nil
-        local challenge = type(challenges) == "table" and challenges[context.challengeId] or nil
-        context.challenge = type(challenge) == "table" and challenge.name or tostring(context.challengeId)
-    end
-    if context.weatherId then
-        local weatherData = LoadGameDataModule and LoadGameDataModule("Weather") or nil
-        local weather = type(weatherData) == "table" and weatherData[context.weatherId] or nil
-        context.weather = type(weather) == "table" and weather.name or tostring(context.weatherId)
-    end
-    local tournament = levelData._tournament
-    if type(tournament) == "table" then
-        context.tournamentScoreType = tournament.score_type
-        context.tournamentId = tournament.tournament_id
-    end
-    return context
-end
-
 function GetResultDetails()
     local details = {}
     local settings = ReadAuthoritativeResultSettings()
@@ -2863,19 +2847,14 @@ function GetResultDetails()
         details.settings = settings
         details.result = settings.victory and "VICTORY!!!" or "DEFEAT"
         details.level = tostring(settings.title or "Unknown stage")
-        details.levelContext = ReadWebhookLevelContext()
 
         local stats = settings.stats or {}
-        details.stats = stats
         if tonumber(stats.time_taken) then
             local totalSeconds = math.ceil(tonumber(stats.time_taken))
             details.Timer = string.format("%02d:%02d", math.floor(totalSeconds / 60), totalSeconds % 60)
         end
         if tonumber(stats.waves_completed) then
             details.WavesCompleted = tostring(math.floor(tonumber(stats.waves_completed)))
-        end
-        if type(settings.tournament_stats) == "table" then
-            details.tournamentStats = settings.tournament_stats
         end
         return details
     end
@@ -2886,10 +2865,6 @@ function GetResultDetails()
     if results and results.Enabled == true and holder and holder.Visible == true then
         local levelName = holder:FindFirstChild("LevelName")
         if levelName and levelName:IsA("TextLabel") then details.level = levelName.Text end
-        local difficulty = holder:FindFirstChild("Difficulty")
-        if difficulty and difficulty:IsA("TextLabel") and difficulty.Text ~= "" then
-            details.levelContext = { difficulty = difficulty.Text }
-        end
         local title = holder:FindFirstChild("Title")
         if title and title:IsA("TextLabel") then details.result = title.Text end
         local middle = holder:FindFirstChild("Middle")
@@ -3209,87 +3184,6 @@ function BuildMatchRewardLines(resultDetails, currentCurrencies)
 end
 
 -- First-completion bonuses are reported separately from the normal stage rewards.
--- game.lua passes settings.new_items and settings.new_units to
--- SummonServiceClient.show_unit_and_item_rewards() after the result screen.
--- Use those exact result-payload drops as a fallback when inventory snapshots
--- are unavailable (for example, if the inventory profile is torn down early).
-function BuildResultPayloadRewardLines(settings)
-    if type(settings) ~= "table" then return nil, nil end
-    local itemData = LoadGameDataModule("Items") or {}
-    local unitData = LoadGameDataModule("Units") or {}
-    local grouped = {}
-    local function addReward(category, name, rarity, amount, tier)
-        amount = math.max(0, tonumber(amount) or 1)
-        if amount <= 0 then return end
-        category = tostring(category or "Item")
-        name = tostring(name or "Unknown")
-        rarity = tostring(rarity or "Unknown")
-        local key = table.concat({category, name, rarity, tostring(tier or "")}, "|")
-        local entry = grouped[key]
-        if not entry then
-            entry = { category = category, name = name, rarity = rarity, tier = tier, amount = 0 }
-            grouped[key] = entry
-        end
-        entry.amount = entry.amount + amount
-    end
-
-    for _, item in pairs(type(settings.new_items) == "table" and settings.new_items or {}) do
-        if type(item) == "table" and item.item_id ~= nil then
-            local itemId = tostring(item.item_id)
-            local def = itemData[itemId] or {}
-            local amount = item.uuid ~= nil and 1 or (tonumber(item.amount) or 1)
-            if item._mock_resource ~= nil then
-                addReward("Resource", tostring(item._mock_resource), "Unknown", amount)
-            else
-                addReward(def.item_group or "Item", def.name or itemId, def.rarity,
-                    amount, def.tier)
-            end
-        end
-    end
-
-    local localSession = type(FindLocalGameSession) == "function" and FindLocalGameSession() or nil
-    local collection = type(localSession) == "table" and localSession.collection or nil
-    for _, uuid in pairs(type(settings.new_units) == "table" and settings.new_units or {}) do
-        local unit
-        if type(collection) == "table" and type(collection.get_unit_by_uuid) == "function" then
-            local ok, value = pcall(collection.get_unit_by_uuid, collection, uuid)
-            if ok then unit = value end
-        end
-        local unitId = type(unit) == "table" and unit.unit_id or nil
-        if unitId then
-            local def = unitData[tostring(unitId)] or {}
-            addReward("Unit", def.name or tostring(unitId), def.rarity, 1)
-        else
-            addReward("Unit", "Unit UUID " .. tostring(uuid), "Unknown", 1)
-        end
-    end
-
-    local normalEntries, secretEntries = {}, {}
-    for _, reward in pairs(grouped) do
-        local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
-        local rarityText = reward.rarity ~= "Unknown" and (" · " .. reward.rarity) or ""
-        local line = string.format("• **%s ×%s** — %s%s%s",
-            reward.name, FormatNumber(reward.amount), reward.category, rarityText, tierText)
-        local entry = { sort = reward.name:lower(), line = line }
-        if reward.rarity:lower() == "secret" then
-            table.insert(secretEntries, { sort = entry.sort, line = "🌟 " .. entry.line })
-        else
-            table.insert(normalEntries, entry)
-        end
-    end
-
-    local function sortLines(entries)
-        table.sort(entries, function(a, b) return a.sort < b.sort end)
-        local lines = {}
-        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
-        return lines
-    end
-    local normalLines = sortLines(normalEntries)
-    local secretLines = sortLines(secretEntries)
-    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
-        #secretLines > 0 and table.concat(secretLines, "\n") or nil
-end
-
 function BuildFirstCompletionRewardLines(settings)
     if type(settings) ~= "table" or not settings.first_completion then return nil end
     local bonusLines = {}
@@ -3303,52 +3197,6 @@ function BuildFirstCompletionRewardLines(settings)
     end
     if #bonusLines == 0 then return nil end
     return "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n")
-end
-
--- Extra match context is read from the same Loader.LevelData fields that
--- ResultsUI.show_results() uses to render the difficulty/challenge/weather.
--- Tournament values come directly from the server result payload.
-function BuildMatchContextLines(resultDetails)
-    local lines = {}
-    local context = resultDetails and resultDetails.levelContext or {}
-    local function add(label, value)
-        if value ~= nil and tostring(value) ~= "" then
-            table.insert(lines, "• **" .. label .. ":** " .. tostring(value))
-        end
-    end
-
-    add("Mode", context.mode)
-    add("Map Key", context.map)
-    -- Match the game's own ResultsUI priority: Weather, then Challenge,
-    -- otherwise the regular difficulty label.
-    if context.weather then
-        add("Weather", context.weather)
-    elseif context.challenge then
-        add("Challenge", context.challenge)
-    elseif context.difficulty then
-        add("Difficulty", context.difficulty)
-    end
-    if context.isStory then add("Type", "Story") end
-    if context.isPortal then add("Type", "Portal / Map") end
-
-    local tournament = resultDetails and resultDetails.tournamentStats
-    if type(tournament) == "table" then
-        local scoreType = tostring(context.tournamentScoreType or "score")
-        local scoreLabel = scoreType == "damage" and "Damage" or (scoreType == "kills" and "Kills" or scoreType)
-        add("Tournament Score (" .. scoreLabel .. ")", tournament.score)
-        add("Previous Score", tournament.previous_score)
-        if tournament.is_new_high == true then
-            add("High Score", "NEW RECORD")
-        elseif tournament.previous_score ~= nil then
-            add("High Score", tournament.previous_score)
-        end
-        if tournament.tiebreak then
-            add("Tie-break Damage", tournament.damage)
-            add("Previous Tie-break Damage", tournament.previous_damage)
-        end
-    end
-
-    return #lines > 0 and table.concat(lines, "\n") or nil
 end
 
 webhookCurrencyBefore = nil
@@ -3546,18 +3394,6 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         end
     end
 
-    -- If the inventory diff could not be trusted, use the game's own result
-    -- payload (new_items/new_units) rather than silently losing those drops.
-    if not inventoryRewardsAvailable then
-        local payloadNormal, payloadSecret = BuildResultPayloadRewardLines(resultDetails and resultDetails.settings)
-        if payloadNormal then
-            inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. payloadNormal) or payloadNormal
-        end
-        if payloadSecret then
-            secretRewardText = secretRewardText and (secretRewardText .. "\n" .. payloadSecret) or payloadSecret
-        end
-    end
-
     local currentCurrencies = ReadPlayerCurrencies()
     local playerLevel = ReadPlayerLevel()
     local playerStatsText = BuildPlayerStatsText(currentCurrencies)
@@ -3648,10 +3484,6 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local fields = {
         { name = "💰 Player Stats", value = LimitEmbedText(playerStatsText, 1024), inline = false },
     }
-    local matchContextText = BuildMatchContextLines(resultDetails)
-    if matchContextText then
-        table.insert(fields, { name = "🗺️ Match Details", value = LimitEmbedText(matchContextText, 1024), inline = false })
-    end
     local function AppendLineChunks(fieldName, value, maxLength)
         value = tostring(value or "")
         local current = {}
@@ -4595,7 +4427,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph) buff loop: each unit's cooldown C = base active CD (60s) x Curse/level multiplier (min 0.6), SPD = 1/C. One unit is cast only when the current buff (D = 30s) is about to expire, so buffs chain without overlap. Seamless when sum(1/C) >= 1/D (units needed = ceil(C/D)). Elfy's Verdant Enchantment is read from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
+CreateHint(AutoPlayPage, "Buff Loop uses the game's real per-unit cooldown AND shared GLOBAL_ATTACK_COOLDOWNS (keyed by Active ID). Duplicate units with the same Active ID do not stack cooldown speed. 100% uptime is possible only when the fastest effective shared cooldown is <= buff duration (usually 30s); otherwise the game cooldown makes a gap unavoidable. First cast starts immediately; next casts are sent as soon as both cooldown locks are ready.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -7261,7 +7093,9 @@ function SendBuffActiveRequest(runtime, entry, now)
             end
 
             task.wait(0.2)
-            if unit and unit.Parent and stats and not DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId) then
+            local castConfirmed = unit and unit.Parent and stats
+                and DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
+            if not castConfirmed and unit and unit.Parent and stats then
                 -- Fallback if attack metadata was not yet synced and the server
                 -- expects the opposite parameter shape (aoe_point vs nil).
                 if not needsAoePoint and aoeParam then
@@ -7269,11 +7103,17 @@ function SendBuffActiveRequest(runtime, entry, now)
                 elseif needsAoePoint then
                     InvokeEndpoint("use_active_attack", unit)
                 end
+                task.wait(0.25)
+                castConfirmed = DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
             end
 
-            -- Always record our own cast timestamp so units using global
-            -- cooldown tracking (or where last_active_cast stays 0) rotate cleanly.
-            BUFF_ROTATION_RUNTIME.ownCast[unit] = tick()
+            if castConfirmed then
+                local confirmedCastTime = lastCastValue and tonumber(lastCastValue.Value) or 0
+                BUFF_ROTATION_RUNTIME.ownCast[unit] = confirmedCastTime > beforeLastCast
+                    and confirmedCastTime or tick()
+            else
+                error("Game did not confirm the active cast; will retry when ready")
+            end
         end)
         if not ok then
             warn("[OctoputHub] Buff request failed: " .. tostring(err))
@@ -7287,7 +7127,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(State.AutoBuffRotation and 0.2 or 1)
+        task.wait(State.AutoBuffRotation and 0.1 or 1)
         local rotationOk, rotationErr = pcall(function()
             if not State.AutoBuffRotation then
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
@@ -7332,8 +7172,9 @@ task.spawn(function()
                 local groupLastCast = 0
                 for _, entry in ipairs(group.units) do
                     liveSet[entry.model] = true
-                    if entry.lastCast <= now + 1 and entry.lastCast > groupLastCast then
-                        groupLastCast = entry.lastCast
+                    local effectiveGroupCast = math.max(entry.lastCast or 0, entry.globalLastCast or 0)
+                    if effectiveGroupCast <= now + 1 and effectiveGroupCast > groupLastCast then
+                        groupLastCast = effectiveGroupCast
                     end
                 end
                 for unit in pairs(runtime.lastRequest) do
@@ -7367,13 +7208,19 @@ task.spawn(function()
                 if pending then
                     effectiveLastCast = math.max(effectiveLastCast, pending.time)
                 end
-                local buffEnd = effectiveLastCast + group.duration
-                local castAt = buffEnd - (group.lead or 0)
+                local castAt
+                if effectiveLastCast <= 0 then
+                    -- No buff has been cast yet: open with an immediate cast.
+                    castAt = now
+                else
+                    local buffEnd = effectiveLastCast + group.duration
+                    castAt = buffEnd - (group.lead or 0)
+                end
 
                 local ready = {}
                 local nextReadyIn = math.huge
                 for _, entry in ipairs(group.units) do
-                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now, group.globalRemaining)
                     local lastRequest = runtime.lastRequest[entry.model] or -math.huge
                     if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                         table.insert(ready, entry)
@@ -7382,8 +7229,13 @@ task.spawn(function()
                         nextReadyIn = math.min(nextReadyIn, remaining)
                     end
                 end
-                -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
+                -- Prefer the unit with the shortest effective cooldown. Since
+                -- the game has one shared cooldown per activeId, choosing the
+                -- fastest unit maximizes the actual repeat rate.
                 table.sort(ready, function(a, b)
+                    if math.abs(a.cooldown - b.cooldown) > 0.05 then
+                        return a.cooldown < b.cooldown
+                    end
                     if math.abs(a.lastCast - b.lastCast) < 0.05 then
                         return tostring(a.uuid) < tostring(b.uuid)
                     end
@@ -7394,12 +7246,13 @@ task.spawn(function()
                 local avgCooldown = group.averageCooldown < math.huge and group.averageCooldown or 0
                 local formulaText
                 if group.baseCooldown then
-                    formulaText = string.format("CD %.1fs (base %gs x%.2f)", avgCooldown, group.baseCooldown, group.averageMultiplier or 1)
+                    formulaText = string.format("fastest CD %.1fs (base %gs)", avgCooldown, group.baseCooldown)
                 else
-                    formulaText = string.format("CD %.1fs", avgCooldown)
+                    formulaText = string.format("fastest CD %.1fs", avgCooldown)
                 end
-                local capacityText = group.sustainable and "Loop OK"
-                    or ("Need " .. tostring(group.requiredUnitsEstimate) .. " units")
+                local maxUptime = group.bestCooldown < math.huge and math.clamp((group.duration / math.max(0.1, group.bestCooldown)) * 100, 0, 100) or 0
+                local capacityText = group.sustainable and "100% possible"
+                    or string.format("Max %.0f%% (shared CD)", maxUptime)
                 local waitText
                 if pending then
                     waitText = "casting..."
