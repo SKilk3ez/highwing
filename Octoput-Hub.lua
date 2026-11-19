@@ -7282,14 +7282,19 @@ task.spawn(function()
 
                 local ready = {}
                 local nextReadyIn = math.huge
-                for _, entry in ipairs(group.units) do
+                -- Because the game has one shared cooldown per Active ID,
+                -- repeatedly casting a slower duplicate would reset that shared
+                -- lock and delay the fastest unit. Use the fastest unit as the
+                -- chain caster; the other copies are measured but not alternated.
+                local entry = group.fastestEntry
+                if entry then
                     local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
                     local lastRequest = runtime.lastRequest[entry.model] or -math.huge
                     if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                         table.insert(ready, entry)
                         nextReadyIn = 0
                     elseif not busy then
-                        nextReadyIn = math.min(nextReadyIn, remaining)
+                        nextReadyIn = math.max(0, remaining)
                     end
                 end
                 -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
