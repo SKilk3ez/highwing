@@ -1234,11 +1234,11 @@ end
 --                        * calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown")
 --                      = base * max(0.6, (1 + cursed attack_cooldown mods) * level/artifact mods)
 --   buff duration    D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
---   unit SPD         = 1 / C (casts per second); group rate R = sum(1 / C_i)
---   loop is seamless when R >= 1 / D, i.e. units needed = ceil(C / D)
--- The worker recasts one unit only when the group's current buff is about to
--- expire (lastGroupCast + D - lead), so casts are staggered instead of all
--- units firing together and leaving a gap afterwards.
+--   GLOBAL_ATTACK_COOLDOWNS is shared by Active ID. Every cast resets one
+--   shared lock, so duplicate Windsongs do NOT add their rates.
+--   The sustainable loop is determined by the fastest individual unit:
+--   min(C_i) <= D. Prefer that unit and honor both its own cooldown and the
+--   shared global lock before sending another cast.
 BUFF_ROTATION_ATTACKS = {
     ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander", baseCooldown = 60 },
     ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong", baseCooldown = 60 },
@@ -1667,7 +1667,9 @@ function GetBuffRotationGroups(now)
                 local globalCooldown = type(globalEntry) == "table" and tonumber(globalEntry.cooldown) or nil
                 if globalCooldown and globalCooldown <= 0 then globalCooldown = nil end
 
-                local cooldown = liveCooldown or globalCooldown or expectedCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+                -- Auto Active checks each unit's own cooldown. The shared Active-ID cooldown
+                -- is a separate manual/UI lock and must not replace this unit's cooldown.
+                local cooldown = liveCooldown or expectedCooldown or globalCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
                 cooldown = math.max(0.1, cooldown)
 
                 -- In Lua, 0 is truthy! last_active_cast.Value starts at 0 before
@@ -1677,18 +1679,15 @@ function GetBuffRotationGroups(now)
                 local validLiveLastCast = (rawLiveLastCast and rawLiveLastCast > 0 and rawLiveLastCast <= now + 5)
                     and rawLiveLastCast or nil
 
-                local globalLastCast = nil
-                if type(globalEntry) == "table" and tonumber(globalEntry.last_cast) and tonumber(globalEntry.last_cast) > 0 then
-                    globalLastCast = tonumber(globalEntry.last_cast)
-                elseif tonumber(globalEntry) and tonumber(globalEntry) > 0 then
-                    globalLastCast = tonumber(globalEntry)
-                end
-                if globalLastCast and globalLastCast > now + 5 then
-                    globalLastCast = nil
+                -- game.lua stores the shared lock timestamp as cast_time (not
+                -- last_cast). Keep it separate from this unit's own last_active_cast.
+                local globalCastTime = type(globalEntry) == "table" and tonumber(globalEntry.cast_time) or nil
+                if globalCastTime and (globalCastTime <= 0 or globalCastTime > now + 5) then
+                    globalCastTime = nil
                 end
 
                 local ownCast = BUFF_ROTATION_RUNTIME.ownCast[unit] or 0
-                local lastCast = math.max(validLiveLastCast or 0, globalLastCast or 0, ownCast or 0)
+                local lastCast = math.max(validLiveLastCast or 0, ownCast or 0)
 
                 local queuedValue = stats:FindFirstChild("active_queued_or_using")
                 local queued = queuedValue and queuedValue.Value == true or false
@@ -1705,8 +1704,12 @@ function GetBuffRotationGroups(now)
                         units = {},
                         curseCount = 0,
                         curseKnownCount = 0,
-                        maxCooldown = 0,
+                        fastestCooldown = math.huge,
+                        fastestEntry = nil,
                         baseCooldown = baseCooldown,
+                        globalCooldown = globalCooldown,
+                        globalCastTime = globalCastTime,
+                        unitType = definition.unit,
                         isElfy = definition.unit == "elfy",
                     }
                     groups[activeId] = group
@@ -1725,7 +1728,7 @@ function GetBuffRotationGroups(now)
                     multSource = multSource,
                     speedStat = speedStat,
                     lastCast = lastCast,
-                    hasLiveCast = (validLiveLastCast ~= nil) or (globalLastCast ~= nil),
+                    hasLiveCast = (validLiveLastCast ~= nil) or (globalCastTime ~= nil),
                     queued = queued,
                     hasCurse = hasCurse,
                     curseReduction = curseReduction,
@@ -1735,7 +1738,12 @@ function GetBuffRotationGroups(now)
                 })
                 if hasCurse then group.curseCount = group.curseCount + 1 end
                 if curseKnown then group.curseKnownCount = group.curseKnownCount + 1 end
-                group.maxCooldown = math.max(group.maxCooldown, cooldown)
+                if cooldown < group.fastestCooldown then
+                    group.fastestCooldown = cooldown
+                    group.fastestEntry = group.units[#group.units]
+                end
+                if globalCooldown and globalCooldown > 0 then group.globalCooldown = globalCooldown end
+                if globalCastTime and globalCastTime > 0 then group.globalCastTime = globalCastTime end
             end
         end
     end
@@ -1750,29 +1758,24 @@ function GetBuffRotationGroups(now)
         table.sort(group.units, function(a, b)
             return tostring(a.uuid) < tostring(b.uuid)
         end)
-        local totalRate = 0
-        local multTotal = 0
-        for _, entry in ipairs(group.units) do
-            entry.spd = 1 / math.max(0.1, entry.cooldown)
-            totalRate = totalRate + entry.spd
-            multTotal = multTotal + (entry.multiplier or 1)
+        local fastest = group.fastestCooldown or math.huge
+        group.totalRate = fastest < math.huge and (1 / math.max(0.1, fastest)) or 0
+        group.totalSPD = group.totalRate
+        group.averageSPD = group.totalRate
+        group.averageMultiplier = group.fastestEntry and (group.fastestEntry.multiplier or 1) or 1
+        group.interval = fastest
+        group.averageCooldown = fastest
+        -- Same Active ID means one shared global cooldown. Extra copies cannot
+        -- be counted as parallel casts; only the fastest individual cooldown
+        -- determines whether this buff can be refreshed before it expires.
+        group.requiredUnitsEstimate = fastest < math.huge
+            and math.max(1, math.ceil(fastest / math.max(1, group.duration))) or 99
+        group.sustainable = fastest <= group.duration + 1e-6
+        group.globalRemaining = 0
+        if group.globalCooldown and group.globalCastTime then
+            group.globalRemaining = math.max(0, group.globalCooldown - (now - group.globalCastTime))
         end
-        local n = #group.units
-        group.totalRate = totalRate
-        group.totalSPD = totalRate
-        group.averageSPD = n > 0 and (totalRate / n) or 0
-        group.averageMultiplier = n > 0 and (multTotal / n) or 1
-        -- Average spacing between casts if every unit is used as soon as it is ready.
-        group.interval = totalRate > 0 and (1 / totalRate) or math.huge
-        group.averageCooldown = n > 0 and (n / math.max(totalRate, 0.000001)) or math.huge
-        -- Seamless loop needs one cast every D seconds: R >= 1 / D.
-        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / math.max(1, group.duration)))
-        group.sustainable = totalRate >= (1 / math.max(1, group.duration)) - 1e-6
-        -- Recast lead before expiry. Using a lead shortens the effective cycle,
-        -- so only use as much lead as the group's SPD can afford:
-        --   sum((D - lead) / C_i) >= 1  ->  lead <= D - 1 / R
-        local affordable = totalRate > 0 and (group.duration - 1 / totalRate) or 0
-        group.lead = math.clamp(affordable, 0, BUFF_ROTATION_SAFETY_MARGIN)
+        group.lead = math.clamp(BUFF_ROTATION_SAFETY_MARGIN, 0, 0.5)
     end
     return groups, elfyInfo
 end
@@ -1793,6 +1796,75 @@ function GetBuffRotationCurseMode(group)
         return "Mixed Cooldown Curse"
     end
     return "No Cooldown Curse"
+end
+
+-- Four-Windsong chain timing from the SPA Curse rotation guide:
+-- 3.4-4.9% -> count 3, activate on the next second (4s);
+-- 5.0-6.6% -> count 4, activate on the next second (5s);
+-- 6.7-8.3% -> count 5, activate on the next second (6s).
+function GetWindsongChainInterval(group)
+    if not group or #group.units < 4 then return nil, nil, "Need 4 Windsongs" end
+    local curse = nil
+    for _, entry in ipairs(group.units) do
+        if not entry.curseKnown or not entry.hasCurse then
+            return nil, nil, "SPA Curse unavailable"
+        end
+        local value = tonumber(entry.curseReduction)
+        if not value then return nil, nil, "SPA Curse unknown" end
+        if curse == nil then
+            curse = value
+        elseif math.abs(curse - value) > 0.0005 then
+            return nil, nil, "Curse mismatch"
+        end
+    end
+    local percent = math.abs(curse or 0) * 100
+    if percent >= 3.4 and percent <= 4.9 then
+        return 4, percent, nil
+    elseif percent >= 5.0 and percent <= 6.6 then
+        return 5, percent, nil
+    elseif percent >= 6.7 and percent <= 8.3 then
+        return 6, percent, nil
+    end
+    return nil, percent, "Curse outside 3.4-8.3%"
+end
+
+function GetWindsongChainState(group, runtime, now)
+    local units = {}
+    for i = 1, math.min(4, #group.units) do
+        units[i] = group.units[i]
+    end
+    local keys = {}
+    for i, entry in ipairs(units) do
+        keys[i] = tostring(entry.uuid)
+    end
+    local key = table.concat(keys, "|")
+    local interval = GetWindsongChainInterval(group)
+    local chain = runtime.chain
+    if not chain or chain.key ~= key then
+        local latestTime, latestIndex = 0, 0
+        for i, entry in ipairs(units) do
+            if entry.lastCast > latestTime then
+                latestTime, latestIndex = entry.lastCast, i
+            end
+        end
+        local nextIndex = latestIndex > 0 and (latestIndex % 4) + 1 or 1
+        local nextAt = now
+        if latestIndex > 0 and interval then
+            local gap = (latestIndex == 1 or latestIndex == 3)
+                and interval or math.max(0.1, (group.duration or 30) - interval)
+            nextAt = latestTime + gap
+        end
+        chain = {
+            key = key,
+            nextIndex = nextIndex,
+            nextAt = nextAt,
+            interval = interval,
+        }
+        runtime.chain = chain
+    else
+        chain.interval = interval
+    end
+    return units, chain, interval
 end
 
 -- Detect farm units from both their displayed name and unit database metadata.
@@ -4498,7 +4570,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph) buff loop: each unit's cooldown C = base active CD (60s) x Curse/level multiplier (min 0.6), SPD = 1/C. One unit is cast only when the current buff (D = 30s) is about to expire, so buffs chain without overlap. Seamless when sum(1/C) >= 1/D (units needed = ceil(C/D)). Elfy's Verdant Enchantment is read from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
+CreateHint(AutoPlayPage, "Buff Loop follows game.lua: each unit has its own active cooldown, while GLOBAL_ATTACK_COOLDOWNS is shared by Active ID. Duplicate units do not stack speed. Rotation prioritizes the fastest individual Curse/CD unit and waits for BOTH its own cooldown and the shared global lock. 100% uptime is possible when the fastest effective cooldown is <= buff duration (usually 30s). Mixed Curse values are evaluated per unit. Elfy's Verdant Enchantment is read from live _stats.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -7137,7 +7209,12 @@ function SendBuffActiveRequest(runtime, entry, now)
     BUFF_ROTATION_RUNTIME.requestBusy = true
     BUFF_ROTATION_RUNTIME.requestStarted = now
     runtime.lastRequest[entry.model] = now
-    runtime.pending = { model = entry.model, time = now, before = entry.lastCast }
+    runtime.pending = {
+        model = entry.model,
+        time = now,
+        before = entry.lastCast,
+        chainIndex = runtime.chain and runtime.chain.nextIndex or nil,
+    }
     task.spawn(function()
         local ok, err = pcall(function()
             local unit = entry.model
@@ -7179,11 +7256,15 @@ function SendBuffActiveRequest(runtime, entry, now)
                 elseif needsAoePoint then
                     InvokeEndpoint("use_active_attack", unit)
                 end
+                task.wait(0.2)
             end
 
-            -- Always record our own cast timestamp so units using global
-            -- cooldown tracking (or where last_active_cast stays 0) rotate cleanly.
-            BUFF_ROTATION_RUNTIME.ownCast[unit] = tick()
+            if not unit or not unit.Parent or not DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId) then
+                error("Active cast was not confirmed; rotation will retry this slot")
+            end
+            local confirmedCast = stats:FindFirstChild("last_active_cast")
+            local confirmedTime = confirmedCast and tonumber(confirmedCast.Value) or 0
+            BUFF_ROTATION_RUNTIME.ownCast[unit] = confirmedTime > 0 and confirmedTime or tick()
         end)
         if not ok then
             warn("[OctoputHub] Buff request failed: " .. tostring(err))
@@ -7266,6 +7347,15 @@ task.spawn(function()
                     if not pendingEntry then
                         runtime.pending = nil
                     elseif pendingEntry.lastCast > (pending.before or 0) + 0.05 then
+                        if runtime.chain and pending.chainIndex then
+                            local castIndex = pending.chainIndex
+                            local castTime = pendingEntry.lastCast
+                            local interval = runtime.chain.interval or 5
+                            local gap = (castIndex == 1 or castIndex == 3)
+                                and interval or math.max(0.1, group.duration - interval)
+                            runtime.chain.nextIndex = (castIndex % 4) + 1
+                            runtime.chain.nextAt = castTime + gap
+                        end
                         runtime.pending = nil
                     elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
                         runtime.pending = nil
@@ -7282,46 +7372,100 @@ task.spawn(function()
 
                 local ready = {}
                 local nextReadyIn = math.huge
-                for _, entry in ipairs(group.units) do
-                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
-                    local lastRequest = runtime.lastRequest[entry.model] or -math.huge
-                    if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
-                        table.insert(ready, entry)
-                        nextReadyIn = 0
-                    elseif not busy then
-                        nextReadyIn = math.min(nextReadyIn, remaining)
+                local isWindsong = group.attackId == "wendy:buff_units"
+                local chainMode = false
+                local chainInterval, chainCursePercent, chainProblem = nil, nil, nil
+                local chainMaxCooldown = 0
+                local chainUnits = nil
+                local entry = nil
+
+                if isWindsong and #group.units >= 4 then
+                    chainUnits, runtime.chain, chainInterval = GetWindsongChainState(group, runtime, now)
+                    chainInterval, chainCursePercent, chainProblem = GetWindsongChainInterval(group)
+                    if chainInterval then
+                        chainMode = true
+                        entry = chainUnits[runtime.chain.nextIndex]
+                        for _, chainEntry in ipairs(chainUnits) do
+                            chainMaxCooldown = math.max(chainMaxCooldown, tonumber(chainEntry.cooldown) or 0)
+                        end
+                        local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                        local lastRequest = runtime.lastRequest[entry.model] or -math.huge
+                        local scheduleWait = math.max(0, (runtime.chain.nextAt or now) - now)
+                        if not busy and isReady and scheduleWait <= 0
+                            and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                            table.insert(ready, entry)
+                            nextReadyIn = 0
+                        elseif not busy then
+                            nextReadyIn = math.max(scheduleWait, remaining)
+                        end
                     end
                 end
-                -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
-                table.sort(ready, function(a, b)
-                    if math.abs(a.lastCast - b.lastCast) < 0.05 then
-                        return tostring(a.uuid) < tostring(b.uuid)
+
+                if not chainMode then
+                    -- Non-Windsong buff groups retain the normal single-caster
+                    -- rotation. Windsong with an unsupported Curse is held back
+                    -- rather than reporting a false 100% chain.
+                    entry = group.fastestEntry
+                    if entry then
+                        local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                        local lastRequest = runtime.lastRequest[entry.model] or -math.huge
+                        if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                            table.insert(ready, entry)
+                            nextReadyIn = 0
+                        elseif not busy then
+                            nextReadyIn = math.max(0, remaining)
+                        end
                     end
-                    return a.lastCast < b.lastCast
-                end)
+                end
 
                 local curseMode = GetBuffRotationCurseMode(group)
-                local avgCooldown = group.averageCooldown < math.huge and group.averageCooldown or 0
+                local fastestCooldown = group.fastestCooldown < math.huge and group.fastestCooldown or 0
                 local formulaText
-                if group.baseCooldown then
-                    formulaText = string.format("CD %.1fs (base %gs x%.2f)", avgCooldown, group.baseCooldown, group.averageMultiplier or 1)
+                local maxUptime
+                local capacityText
+                if chainMode then
+                    maxUptime = chainMaxCooldown > 0
+                        and math.min(100, ((group.duration * 2) / chainMaxCooldown) * 100) or 0
+                    formulaText = string.format("4-unit chain | Curse %.1f%% | stagger %ds | max CD %.1fs | max %.0f%%",
+                        chainCursePercent or 0, chainInterval, chainMaxCooldown, maxUptime)
+                    capacityText = maxUptime >= 99.9 and "100% chain capacity"
+                        or string.format("Estimated chain capacity %.0f%%", maxUptime)
+                elseif isWindsong and #group.units >= 4 then
+                    maxUptime = 0
+                    formulaText = "4-unit chain unavailable: " .. tostring(chainProblem or "Curse data unavailable")
+                    capacityText = "Check own Windsong Curse data"
+                    ready = {}
+                    nextReadyIn = math.huge
                 else
-                    formulaText = string.format("CD %.1fs", avgCooldown)
+                    maxUptime = fastestCooldown > 0
+                        and math.min(100, (group.duration / fastestCooldown) * 100) or 0
+                    if group.baseCooldown then
+                        formulaText = string.format("fastest CD %.1fs (base %gs x%.2f) | max %.0f%%", fastestCooldown, group.baseCooldown, group.averageMultiplier or 1, maxUptime)
+                    else
+                        formulaText = string.format("fastest CD %.1fs | max %.0f%%", fastestCooldown, maxUptime)
+                    end
+                    capacityText = group.sustainable and "100% possible"
+                        or ("Gap unavoidable (need CD <= " .. tostring(group.duration) .. "s)")
                 end
-                local capacityText = group.sustainable and "Loop OK"
-                    or ("Need " .. tostring(group.requiredUnitsEstimate) .. " units")
+                if chainMode then
+                    castAt = runtime.chain.nextAt or now
+                end
                 local waitText
+                local globalWait = chainMode and 0 or math.max(0, group.globalRemaining or 0)
                 if pending then
                     waitText = "casting..."
+                elseif now >= castAt and globalWait <= 0 then
+                    waitText = nextReadyIn < math.huge and string.format("ready / own CD %.1fs", nextReadyIn) or "waiting"
                 elseif now >= castAt then
-                    waitText = nextReadyIn < math.huge and string.format("gap, ready %.1fs", nextReadyIn) or "gap"
+                    waitText = string.format("global CD %.1fs", globalWait)
                 else
-                    waitText = string.format("next %.1fs", castAt - now)
+                    waitText = string.format("next %.1fs", math.max(castAt - now, globalWait))
                 end
                 table.insert(statusParts, string.format("%s: %d units | %s | %s | buff %gs | %s | %s",
                     group.name, #group.units, curseMode, formulaText, group.duration, capacityText, waitText))
 
-                group.castAt = castAt
+                group.castAt = chainMode and (runtime.chain.nextAt or castAt) or castAt
+                group.chainMode = chainMode
                 group.runtime = runtime
                 group.ready = ready
                 group.pending = pending
@@ -7333,7 +7477,8 @@ task.spawn(function()
             if not BUFF_ROTATION_RUNTIME.requestBusy then
                 local best = nil
                 for _, group in ipairs(ordered) do
-                    if not group.pending and #group.ready > 0 and now >= group.castAt then
+                    if not group.pending and #group.ready > 0 and now >= group.castAt
+                        and (group.chainMode or (group.globalRemaining or 0) <= 0) then
                         if not best or group.castAt < best.castAt then
                             best = group
                         end
