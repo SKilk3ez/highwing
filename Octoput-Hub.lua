@@ -2369,7 +2369,10 @@ function GetPlacementCFrame(index, kind)
         -- units to the existing cluster on the same side of the road so units
         -- stay tightly packed together.
         local pathCenter, look = GetPointOnPolyline(points, preferred)
-        local center = clusterAnchor or pathCenter
+        -- Keep the configured path percentage as the permanent placement focus.
+        -- Existing units only occupy nearby slots; they must not pull the anchor
+        -- away from the user's selected percentage.
+        local center = pathCenter
         local right = look:Cross(Vector3.new(0, 1, 0))
         if right.Magnitude < 0.01 then
             right = Vector3.new(1, 0, 0)
@@ -2383,27 +2386,18 @@ function GetPlacementCFrame(index, kind)
             forward = forward.Unit
         end
 
-        local maxRing = (kind == "hill") and 16 or 9
+        -- Expand outward from the selected path percentage. Offsets are sorted
+        -- nearest-first, so the first valid slot is always the closest available
+        -- position to the configured percentage. The larger outer ring is only
+        -- reached when the inner placement area is already occupied.
+        local maxRing = (kind == "hill") and 24 or 18
         local offsets = BuildCompactHexOffsets(2.6, maxRing)
-
-        -- Always search from the cluster center outward (slot 1 -> #offsets)
-        -- so units pack tightly instead of scattering into outer rings.
         for slot = 1, #offsets do
             local offset = offsets[slot]
             local candidate = center + right * offset.X + forward * offset.Y
             local finalPos = PlacementIsClear(candidate, kind)
             if finalPos then
                 return Finish(finalPos, look)
-            end
-        end
-        if clusterAnchor then
-            for slot = 1, #offsets do
-                local offset = offsets[slot]
-                local candidate = pathCenter + right * offset.X + forward * offset.Y
-                local finalPos = PlacementIsClear(candidate, kind)
-                if finalPos then
-                    return Finish(finalPos, look)
-                end
             end
         end
         return nil
@@ -2423,7 +2417,8 @@ function GetPlacementCFrame(index, kind)
     local forward = Vector3.new(look.X, 0, look.Z)
     if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
 
-    local maxFallbackRing = (kind == "hill") and 16 or 9
+    -- Same expanding search for maps that do not expose lane path points.
+    local maxFallbackRing = (kind == "hill") and 24 or 18
     local offsets = BuildCompactHexOffsets(2.6, maxFallbackRing)
     for slot = 1, #offsets do
         local offset = offsets[slot]
