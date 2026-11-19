@@ -2364,10 +2364,8 @@ function GetPlacementCFrame(index, kind)
     local clusterAnchor = GetClusterAnchorPosition(kind)
 
     if #points >= 2 then
-        -- Keep the whole formation around one point on the actual path.
-        -- Once the first unit is placed beside the road, anchor subsequent
-        -- units to the existing cluster on the same side of the road so units
-        -- stay tightly packed together.
+        -- Keep the formation centered on the configured percentage of the
+        -- actual path. Nearby occupied slots are skipped by the expanding search.
         local pathCenter, look = GetPointOnPolyline(points, preferred)
         -- Keep the configured path percentage as the permanent placement focus.
         -- Existing units only occupy nearby slots; they must not pull the anchor
