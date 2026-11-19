@@ -1707,6 +1707,7 @@ function GetBuffRotationGroups(now)
                         baseCooldown = baseCooldown,
                         globalCooldown = globalCooldown,
                         globalCastTime = globalCastTime,
+                        unitType = definition.unit,
                         isElfy = definition.unit == "elfy",
                     }
                     groups[activeId] = group
@@ -1793,6 +1794,75 @@ function GetBuffRotationCurseMode(group)
         return "Mixed Cooldown Curse"
     end
     return "No Cooldown Curse"
+end
+
+-- Four-Windsong chain timing from the SPA Curse rotation guide:
+-- 3.4-4.9% -> count 3, activate on the next second (4s);
+-- 5.0-6.6% -> count 4, activate on the next second (5s);
+-- 6.7-8.3% -> count 5, activate on the next second (6s).
+function GetWindsongChainInterval(group)
+    if not group or #group.units < 4 then return nil, nil, "Need 4 Windsongs" end
+    local curse = nil
+    for _, entry in ipairs(group.units) do
+        if not entry.curseKnown or not entry.hasCurse then
+            return nil, nil, "SPA Curse unavailable"
+        end
+        local value = tonumber(entry.curseReduction)
+        if not value then return nil, nil, "SPA Curse unknown" end
+        if curse == nil then
+            curse = value
+        elseif math.abs(curse - value) > 0.0005 then
+            return nil, nil, "Curse mismatch"
+        end
+    end
+    local percent = math.abs(curse or 0) * 100
+    if percent >= 3.4 and percent <= 4.9 then
+        return 4, percent, nil
+    elseif percent >= 5.0 and percent <= 6.6 then
+        return 5, percent, nil
+    elseif percent >= 6.7 and percent <= 8.3 then
+        return 6, percent, nil
+    end
+    return nil, percent, "Curse outside 3.4-8.3%"
+end
+
+function GetWindsongChainState(group, runtime, now)
+    local units = {}
+    for i = 1, math.min(4, #group.units) do
+        units[i] = group.units[i]
+    end
+    local keys = {}
+    for i, entry in ipairs(units) do
+        keys[i] = tostring(entry.uuid)
+    end
+    local key = table.concat(keys, "|")
+    local interval = GetWindsongChainInterval(group)
+    local chain = runtime.chain
+    if not chain or chain.key ~= key then
+        local latestTime, latestIndex = 0, 0
+        for i, entry in ipairs(units) do
+            if entry.lastCast > latestTime then
+                latestTime, latestIndex = entry.lastCast, i
+            end
+        end
+        local nextIndex = latestIndex > 0 and (latestIndex % 4) + 1 or 1
+        local nextAt = now
+        if latestIndex > 0 and interval then
+            local gap = (latestIndex == 1 or latestIndex == 3)
+                and interval or math.max(0.1, (group.duration or 30) - interval)
+            nextAt = latestTime + gap
+        end
+        chain = {
+            key = key,
+            nextIndex = nextIndex,
+            nextAt = nextAt,
+            interval = interval,
+        }
+        runtime.chain = chain
+    else
+        chain.interval = interval
+    end
+    return units, chain, interval
 end
 
 -- Detect farm units from both their displayed name and unit database metadata.
@@ -7137,7 +7207,12 @@ function SendBuffActiveRequest(runtime, entry, now)
     BUFF_ROTATION_RUNTIME.requestBusy = true
     BUFF_ROTATION_RUNTIME.requestStarted = now
     runtime.lastRequest[entry.model] = now
-    runtime.pending = { model = entry.model, time = now, before = entry.lastCast }
+    runtime.pending = {
+        model = entry.model,
+        time = now,
+        before = entry.lastCast,
+        chainIndex = runtime.chain and runtime.chain.nextIndex or nil,
+    }
     task.spawn(function()
         local ok, err = pcall(function()
             local unit = entry.model
@@ -7179,11 +7254,15 @@ function SendBuffActiveRequest(runtime, entry, now)
                 elseif needsAoePoint then
                     InvokeEndpoint("use_active_attack", unit)
                 end
+                task.wait(0.2)
             end
 
-            -- Always record our own cast timestamp so units using global
-            -- cooldown tracking (or where last_active_cast stays 0) rotate cleanly.
-            BUFF_ROTATION_RUNTIME.ownCast[unit] = tick()
+            if not unit or not unit.Parent or not DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId) then
+                error("Active cast was not confirmed; rotation will retry this slot")
+            end
+            local confirmedCast = stats:FindFirstChild("last_active_cast")
+            local confirmedTime = confirmedCast and tonumber(confirmedCast.Value) or 0
+            BUFF_ROTATION_RUNTIME.ownCast[unit] = confirmedTime > 0 and confirmedTime or tick()
         end)
         if not ok then
             warn("[OctoputHub] Buff request failed: " .. tostring(err))
@@ -7266,6 +7345,15 @@ task.spawn(function()
                     if not pendingEntry then
                         runtime.pending = nil
                     elseif pendingEntry.lastCast > (pending.before or 0) + 0.05 then
+                        if runtime.chain and pending.chainIndex then
+                            local castIndex = pending.chainIndex
+                            local castTime = pendingEntry.lastCast
+                            local interval = runtime.chain.interval or 5
+                            local gap = (castIndex == 1 or castIndex == 3)
+                                and interval or math.max(0.1, group.duration - interval)
+                            runtime.chain.nextIndex = (castIndex % 4) + 1
+                            runtime.chain.nextAt = castTime + gap
+                        end
                         runtime.pending = nil
                     elseif now - pending.time > BUFF_ROTATION_PENDING_TIMEOUT then
                         runtime.pending = nil
@@ -7282,51 +7370,87 @@ task.spawn(function()
 
                 local ready = {}
                 local nextReadyIn = math.huge
-                -- Because the game has one shared cooldown per Active ID,
-                -- repeatedly casting a slower duplicate would reset that shared
-                -- lock and delay the fastest unit. Use the fastest unit as the
-                -- chain caster; the other copies are measured but not alternated.
-                local entry = group.fastestEntry
-                if entry then
-                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
-                    local lastRequest = runtime.lastRequest[entry.model] or -math.huge
-                    if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
-                        table.insert(ready, entry)
-                        nextReadyIn = 0
-                    elseif not busy then
-                        nextReadyIn = math.max(0, remaining)
+                local isWindsong = group.attackId == "wendy:buff_units"
+                local chainMode = false
+                local chainInterval, chainCursePercent, chainProblem = nil, nil, nil
+                local chainMaxCooldown = 0
+                local chainUnits = nil
+                local entry = nil
+
+                if isWindsong and #group.units >= 4 then
+                    chainUnits, runtime.chain, chainInterval = GetWindsongChainState(group, runtime, now)
+                    chainInterval, chainCursePercent, chainProblem = GetWindsongChainInterval(group)
+                    if chainInterval then
+                        chainMode = true
+                        entry = chainUnits[runtime.chain.nextIndex]
+                        for _, chainEntry in ipairs(chainUnits) do
+                            chainMaxCooldown = math.max(chainMaxCooldown, tonumber(chainEntry.cooldown) or 0)
+                        end
+                        local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                        local lastRequest = runtime.lastRequest[entry.model] or -math.huge
+                        local scheduleWait = math.max(0, (runtime.chain.nextAt or now) - now)
+                        if not busy and isReady and scheduleWait <= 0
+                            and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                            table.insert(ready, entry)
+                            nextReadyIn = 0
+                        elseif not busy then
+                            nextReadyIn = math.max(scheduleWait, remaining)
+                        end
                     end
                 end
-                -- Only the fastest unit is eligible here; this sort is a
-                -- deterministic tie-breaker if equal cooldown units are added later.
-                table.sort(ready, function(a, b)
-                    if math.abs(a.cooldown - b.cooldown) > 0.05 then
-                        return a.cooldown < b.cooldown
+
+                if not chainMode then
+                    -- Non-Windsong buff groups retain the normal single-caster
+                    -- rotation. Windsong with an unsupported Curse is held back
+                    -- rather than reporting a false 100% chain.
+                    entry = group.fastestEntry
+                    if entry then
+                        local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
+                        local lastRequest = runtime.lastRequest[entry.model] or -math.huge
+                        if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                            table.insert(ready, entry)
+                            nextReadyIn = 0
+                        elseif not busy then
+                            nextReadyIn = math.max(0, remaining)
+                        end
                     end
-                    if math.abs(a.lastCast - b.lastCast) > 0.05 then
-                        return a.lastCast < b.lastCast
-                    end
-                    return tostring(a.uuid) < tostring(b.uuid)
-                end)
+                end
 
                 local curseMode = GetBuffRotationCurseMode(group)
                 local fastestCooldown = group.fastestCooldown < math.huge and group.fastestCooldown or 0
                 local formulaText
-                local maxUptime = fastestCooldown > 0
-                    and math.min(100, (group.duration / fastestCooldown) * 100) or 0
-                if group.baseCooldown then
-                    formulaText = string.format("fastest CD %.1fs (base %gs x%.2f) | max %.0f%%", fastestCooldown, group.baseCooldown, group.averageMultiplier or 1, maxUptime)
+                local maxUptime
+                local capacityText
+                if chainMode then
+                    maxUptime = chainMaxCooldown > 0
+                        and math.min(100, ((group.duration * 2) / chainMaxCooldown) * 100) or 0
+                    formulaText = string.format("4-unit chain | Curse %.1f%% | stagger %ds | max CD %.1fs | max %.0f%%",
+                        chainCursePercent or 0, chainInterval, chainMaxCooldown, maxUptime)
+                    capacityText = maxUptime >= 99.9 and "100% chain capacity"
+                        or string.format("Estimated chain capacity %.0f%%", maxUptime)
+                elseif isWindsong and #group.units >= 4 then
+                    maxUptime = 0
+                    formulaText = "4-unit chain unavailable: " .. tostring(chainProblem or "Curse data unavailable")
+                    capacityText = "Check own Windsong Curse data"
+                    ready = {}
+                    nextReadyIn = math.huge
                 else
-                    formulaText = string.format("fastest CD %.1fs | max %.0f%%", fastestCooldown, maxUptime)
+                    maxUptime = fastestCooldown > 0
+                        and math.min(100, (group.duration / fastestCooldown) * 100) or 0
+                    if group.baseCooldown then
+                        formulaText = string.format("fastest CD %.1fs (base %gs x%.2f) | max %.0f%%", fastestCooldown, group.baseCooldown, group.averageMultiplier or 1, maxUptime)
+                    else
+                        formulaText = string.format("fastest CD %.1fs | max %.0f%%", fastestCooldown, maxUptime)
+                    end
+                    capacityText = group.sustainable and "100% possible"
+                        or ("Gap unavoidable (need CD <= " .. tostring(group.duration) .. "s)")
                 end
-                local capacityText = group.sustainable and "100% possible"
-                    or ("Gap unavoidable (need CD <= " .. tostring(group.duration) .. "s)")
                 local waitText
-                local globalWait = math.max(0, group.globalRemaining or 0)
+                local globalWait = chainMode and 0 or math.max(0, group.globalRemaining or 0)
                 if pending then
                     waitText = "casting..."
                 elseif now >= castAt and globalWait <= 0 then
-                    waitText = nextReadyIn < math.huge and string.format("ready, own CD %.1fs", nextReadyIn) or "waiting"
+                    waitText = nextReadyIn < math.huge and string.format("ready / own CD %.1fs", nextReadyIn) or "waiting"
                 elseif now >= castAt then
                     waitText = string.format("global CD %.1fs", globalWait)
                 else
@@ -7335,7 +7459,8 @@ task.spawn(function()
                 table.insert(statusParts, string.format("%s: %d units | %s | %s | buff %gs | %s | %s",
                     group.name, #group.units, curseMode, formulaText, group.duration, capacityText, waitText))
 
-                group.castAt = castAt
+                group.castAt = chainMode and (runtime.chain.nextAt or castAt) or castAt
+                group.chainMode = chainMode
                 group.runtime = runtime
                 group.ready = ready
                 group.pending = pending
@@ -7348,7 +7473,7 @@ task.spawn(function()
                 local best = nil
                 for _, group in ipairs(ordered) do
                     if not group.pending and #group.ready > 0 and now >= group.castAt
-                        and (group.globalRemaining or 0) <= 0 then
+                        and (group.chainMode or (group.globalRemaining or 0) <= 0) then
                         if not best or group.castAt < best.castAt then
                             best = group
                         end
