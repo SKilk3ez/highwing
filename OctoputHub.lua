@@ -20,7 +20,7 @@ UserInputService = game:GetService("UserInputService")
 ReplicatedStorage = game:GetService("ReplicatedStorage")
 RunService = game:GetService("RunService")
 HttpService = game:GetService("HttpService")
-Lighting = game:GetService("Lighting")
+CollectionService = game:GetService("CollectionService")
 
 player = Players.LocalPlayer
 playerGui = player:WaitForChild("PlayerGui")
@@ -454,7 +454,6 @@ State = {
     AutoUpgrade = false,
     AutoUpgradeFarmFirst = true,
     AutoBuffRotation = false,
-    PerformanceMode = false,
     PlacePercent = 0,
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
@@ -465,6 +464,7 @@ State = {
     WebhookURL = "",
     WebhookOnEnd = false,
     BlackScreen = false,
+    PerformanceMode = false,
     AutoHideGUIOnExecute = false,
     UIScale = 1,
     PlaceHybridGround = true,
@@ -587,7 +587,6 @@ function CopyStateForSave()
         AutoUpgrade = State.AutoUpgrade,
         AutoUpgradeFarmFirst = State.AutoUpgradeFarmFirst,
         AutoBuffRotation = State.AutoBuffRotation,
-        PerformanceMode = State.PerformanceMode,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
         AutoEventQuests = State.AutoEventQuests,
@@ -596,6 +595,7 @@ function CopyStateForSave()
         WebhookURL = State.WebhookURL,
         WebhookOnEnd = State.WebhookOnEnd,
         BlackScreen = State.BlackScreen,
+        PerformanceMode = State.PerformanceMode,
         AutoHideGUIOnExecute = State.AutoHideGUIOnExecute,
         UIScale = State.UIScale,
         PlaceHybridGround = State.PlaceHybridGround,
@@ -644,8 +644,8 @@ function ApplySavedTable(saved)
         return
     end
     local boolKeys = {
-        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation", "PerformanceMode",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
+        "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
+        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -1067,15 +1067,28 @@ end
 function GetPlayerUnits()
     local myUnits = {}
     local unitsFolder = workspace:FindFirstChild("_UNITS")
-    if not unitsFolder then
+    if not unitsFolder then return myUnits end
+
+    -- Match UnitServiceCore.get_all_units_from_player() in game.lua.
+    local ok, taggedUnits = pcall(function()
+        return CollectionService:GetTagged("player_units:" .. tostring(player.UserId))
+    end)
+    if ok and type(taggedUnits) == "table" then
+        for _, unit in ipairs(taggedUnits) do
+            if unit and unit:IsA("Model") and unit.Parent == unitsFolder
+                and not CollectionService:HasTag(unit, "dying_units") then
+                table.insert(myUnits, unit)
+            end
+        end
         return myUnits
     end
 
-    for _, u in ipairs(unitsFolder:GetChildren()) do
-        if u:IsA("Model") and u:FindFirstChild("_stats") then
-            local pVal = u._stats:FindFirstChild("player")
-            if pVal and pVal.Value == player then
-                table.insert(myUnits, u)
+    -- Compatibility fallback if the game changes/removes its player-unit tag.
+    for _, unit in ipairs(unitsFolder:GetChildren()) do
+        if unit:IsA("Model") and unit:FindFirstChild("_stats") then
+            local playerValue = unit._stats:FindFirstChild("player")
+            if playerValue and playerValue.Value == player then
+                table.insert(myUnits, unit)
             end
         end
     end
@@ -1217,14 +1230,15 @@ end
 -- _stats.active_attack_cooldown on the deployed model.
 --
 -- Buff loop formula (game.lua):
---   C = active_attack_stats.attack_cooldown * calculate_static_stat_multiplier(...)
---   D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
---   IMPORTANT: AttacksReplicate.GLOBAL_ATTACK_COOLDOWNS is keyed by activeId.
---   Every unit with the same activeId shares ONE global cooldown, so duplicate
---   units do not add rates. Best possible repeat interval is the fastest unit's
---   effective C; 100% uptime is only possible when C <= D.
--- The worker uses each unit's own last_active_cast AND the shared cast_time lock,
--- starts the first cast immediately, and confirms a cast before advancing state.
+--   active cooldown  C = active_attack_stats.attack_cooldown (60s for Commander/Windsong)
+--                        * calculate_static_stat_multiplier(unit, xp, "active_attack_cooldown")
+--                      = base * max(0.6, (1 + cursed attack_cooldown mods) * level/artifact mods)
+--   buff duration    D = aoe[*].hit.buffs[*].time (30s for Commander/Windsong)
+--   unit SPD         = 1 / C (casts per second); group rate R = sum(1 / C_i)
+--   loop is seamless when R >= 1 / D, i.e. units needed = ceil(C / D)
+-- The worker recasts one unit only when the group's current buff is about to
+-- expire (lastGroupCast + D - lead), so casts are staggered instead of all
+-- units firing together and leaving a gap afterwards.
 BUFF_ROTATION_ATTACKS = {
     ["erwin:buff_units"] = { name = "Commander", duration = 30, buff = "Physical", unit = "commander", baseCooldown = 60 },
     ["wendy:buff_units"] = { name = "Windsong", duration = 30, buff = "Magic", unit = "windsong", baseCooldown = 60 },
@@ -1480,17 +1494,16 @@ function GetUnitOverheadReadyAttribute(unit)
     return nil
 end
 
-function GetActiveAttackCooldownState(entry, now, globalRemaining)
+function GetActiveAttackCooldownState(entry, now)
     -- Mirror game.lua AttacksReplicate.get_current_active_attack_cooldown():
-    -- a unit must pass BOTH its own active cooldown and the shared cooldown
-    -- keyed by active attack ID in GLOBAL_ATTACK_COOLDOWNS.
+    -- busy while _stats.active_queued_or_using is true, otherwise ready when
+    -- active_attack_cooldown - (tick() - last_active_cast) <= 0.
     if entry.queued then
         return true, false, entry.cooldown, entry.cooldown
     end
-    local localRemaining = entry.cooldown - (now - (entry.lastCast or 0))
-    local remaining = math.max(localRemaining, tonumber(globalRemaining) or 0)
+    local remaining = entry.cooldown - (now - entry.lastCast)
     local isReady = remaining <= 0
-    if isReady and (entry.lastCast or 0) <= 0 then
+    if isReady and entry.lastCast <= 0 then
         local overheadReady = GetUnitOverheadReadyAttribute(entry.model)
         if overheadReady == false then
             isReady = false
@@ -1664,29 +1677,18 @@ function GetBuffRotationGroups(now)
                 local validLiveLastCast = (rawLiveLastCast and rawLiveLastCast > 0 and rawLiveLastCast <= now + 5)
                     and rawLiveLastCast or nil
 
-                -- game.lua writes GLOBAL_ATTACK_COOLDOWNS[activeId] =
-                -- { cast_time = tick(), cooldown = effectiveCooldown }.
-                -- This is SHARED by every deployed unit with this activeId.
                 local globalLastCast = nil
-                if type(globalEntry) == "table" then
-                    globalLastCast = tonumber(globalEntry.cast_time) or tonumber(globalEntry.last_cast)
-                elseif tonumber(globalEntry) then
+                if type(globalEntry) == "table" and tonumber(globalEntry.last_cast) and tonumber(globalEntry.last_cast) > 0 then
+                    globalLastCast = tonumber(globalEntry.last_cast)
+                elseif tonumber(globalEntry) and tonumber(globalEntry) > 0 then
                     globalLastCast = tonumber(globalEntry)
                 end
-                if globalLastCast and (globalLastCast <= 0 or globalLastCast > now + 5) then
+                if globalLastCast and globalLastCast > now + 5 then
                     globalLastCast = nil
                 end
-                local globalCooldownDuration = type(globalEntry) == "table"
-                    and (tonumber(globalEntry.cooldown) or 0) or 0
-                local globalCooldownRemaining = 0
-                if globalCooldownDuration > 0 and globalLastCast then
-                    globalCooldownRemaining = math.max(0, globalCooldownDuration - (now - globalLastCast))
-                end
 
-                -- Per-unit readiness must use only that unit's last_active_cast.
-                -- The shared cast_time is accounted for separately below.
                 local ownCast = BUFF_ROTATION_RUNTIME.ownCast[unit] or 0
-                local lastCast = math.max(validLiveLastCast or 0, ownCast or 0)
+                local lastCast = math.max(validLiveLastCast or 0, globalLastCast or 0, ownCast or 0)
 
                 local queuedValue = stats:FindFirstChild("active_queued_or_using")
                 local queued = queuedValue and queuedValue.Value == true or false
@@ -1723,9 +1725,6 @@ function GetBuffRotationGroups(now)
                     multSource = multSource,
                     speedStat = speedStat,
                     lastCast = lastCast,
-                    globalLastCast = globalLastCast,
-                    globalCooldownDuration = globalCooldownDuration,
-                    globalCooldownRemaining = globalCooldownRemaining,
                     hasLiveCast = (validLiveLastCast ~= nil) or (globalLastCast ~= nil),
                     queued = queued,
                     hasCurse = hasCurse,
@@ -1751,36 +1750,28 @@ function GetBuffRotationGroups(now)
         table.sort(group.units, function(a, b)
             return tostring(a.uuid) < tostring(b.uuid)
         end)
-        local fastestCooldown = math.huge
-        local globalCooldownDuration = 0
+        local totalRate = 0
         local multTotal = 0
-        local currentGlobalRemaining = 0
         for _, entry in ipairs(group.units) do
             entry.spd = 1 / math.max(0.1, entry.cooldown)
-            fastestCooldown = math.min(fastestCooldown, entry.cooldown)
-            globalCooldownDuration = math.max(globalCooldownDuration, entry.globalCooldownDuration or 0)
+            totalRate = totalRate + entry.spd
             multTotal = multTotal + (entry.multiplier or 1)
-            currentGlobalRemaining = math.max(currentGlobalRemaining, entry.globalCooldownRemaining or 0)
         end
         local n = #group.units
-        -- IMPORTANT: game.lua shares GLOBAL_ATTACK_COOLDOWNS by activeId.
-        -- Duplicate Commanders/Windsongs therefore do NOT add their rates;
-        -- only one cast of the same activeId can pass the shared cooldown.
-        group.bestCooldown = math.max(fastestCooldown, globalCooldownDuration)
-        group.globalCooldownDuration = globalCooldownDuration
-        group.globalRemaining = currentGlobalRemaining
-        group.totalRate = fastestCooldown < math.huge and (1 / math.max(0.1, fastestCooldown)) or 0
-        group.totalSPD = group.totalRate
-        group.averageSPD = group.totalRate
+        group.totalRate = totalRate
+        group.totalSPD = totalRate
+        group.averageSPD = n > 0 and (totalRate / n) or 0
         group.averageMultiplier = n > 0 and (multTotal / n) or 1
-        group.interval = group.bestCooldown
-        group.averageCooldown = group.bestCooldown
-        group.requiredUnitsEstimate = group.bestCooldown < math.huge
-            and math.max(1, math.ceil(group.bestCooldown / math.max(1, group.duration))) or 1
-        group.sustainable = group.bestCooldown <= math.max(1, group.duration) + 1e-6
-        -- Lead is only safe when the fastest available unit's shared cooldown
-        -- can fit inside the buff duration. The game itself enforces the lock.
-        local affordable = group.bestCooldown < math.huge and (group.duration - group.bestCooldown) or 0
+        -- Average spacing between casts if every unit is used as soon as it is ready.
+        group.interval = totalRate > 0 and (1 / totalRate) or math.huge
+        group.averageCooldown = n > 0 and (n / math.max(totalRate, 0.000001)) or math.huge
+        -- Seamless loop needs one cast every D seconds: R >= 1 / D.
+        group.requiredUnitsEstimate = math.max(1, math.ceil(group.averageCooldown / math.max(1, group.duration)))
+        group.sustainable = totalRate >= (1 / math.max(1, group.duration)) - 1e-6
+        -- Recast lead before expiry. Using a lead shortens the effective cycle,
+        -- so only use as much lead as the group's SPD can afford:
+        --   sum((D - lead) / C_i) >= 1  ->  lead <= D - 1 / R
+        local affordable = totalRate > 0 and (group.duration - 1 / totalRate) or 0
         group.lead = math.clamp(affordable, 0, BUFF_ROTATION_SAFETY_MARGIN)
     end
     return groups, elfyInfo
@@ -2373,12 +2364,13 @@ function GetPlacementCFrame(index, kind)
     local clusterAnchor = GetClusterAnchorPosition(kind)
 
     if #points >= 2 then
-        -- Keep the whole formation around one point on the actual path.
-        -- Once the first unit is placed beside the road, anchor subsequent
-        -- units to the existing cluster on the same side of the road so units
-        -- stay tightly packed together.
+        -- Keep the formation centered on the configured percentage of the
+        -- actual path. Nearby occupied slots are skipped by the expanding search.
         local pathCenter, look = GetPointOnPolyline(points, preferred)
-        local center = clusterAnchor or pathCenter
+        -- Keep the configured path percentage as the permanent placement focus.
+        -- Existing units only occupy nearby slots; they must not pull the anchor
+        -- away from the user's selected percentage.
+        local center = pathCenter
         local right = look:Cross(Vector3.new(0, 1, 0))
         if right.Magnitude < 0.01 then
             right = Vector3.new(1, 0, 0)
@@ -2392,27 +2384,18 @@ function GetPlacementCFrame(index, kind)
             forward = forward.Unit
         end
 
-        local maxRing = (kind == "hill") and 16 or 9
+        -- Expand outward from the selected path percentage. Offsets are sorted
+        -- nearest-first, so the first valid slot is always the closest available
+        -- position to the configured percentage. The larger outer ring is only
+        -- reached when the inner placement area is already occupied.
+        local maxRing = (kind == "hill") and 24 or 18
         local offsets = BuildCompactHexOffsets(2.6, maxRing)
-
-        -- Always search from the cluster center outward (slot 1 -> #offsets)
-        -- so units pack tightly instead of scattering into outer rings.
         for slot = 1, #offsets do
             local offset = offsets[slot]
             local candidate = center + right * offset.X + forward * offset.Y
             local finalPos = PlacementIsClear(candidate, kind)
             if finalPos then
                 return Finish(finalPos, look)
-            end
-        end
-        if clusterAnchor then
-            for slot = 1, #offsets do
-                local offset = offsets[slot]
-                local candidate = pathCenter + right * offset.X + forward * offset.Y
-                local finalPos = PlacementIsClear(candidate, kind)
-                if finalPos then
-                    return Finish(finalPos, look)
-                end
             end
         end
         return nil
@@ -2432,7 +2415,8 @@ function GetPlacementCFrame(index, kind)
     local forward = Vector3.new(look.X, 0, look.Z)
     if forward.Magnitude < 0.01 then forward = Vector3.new(0, 0, -1) else forward = forward.Unit end
 
-    local maxFallbackRing = (kind == "hill") and 16 or 9
+    -- Same expanding search for maps that do not expose lane path points.
+    local maxFallbackRing = (kind == "hill") and 24 or 18
     local offsets = BuildCompactHexOffsets(2.6, maxFallbackRing)
     for slot = 1, #offsets do
         local offset = offsets[slot]
@@ -2766,7 +2750,7 @@ end
 
 task.spawn(function()
     while ScreenGui.Parent do
-        task.wait(0.5)
+        task.wait(0.25)
 
         if State.BlackScreen then
             local highestDisplayOrder = 9999
@@ -3733,6 +3717,87 @@ function SetInstanceHidden(inst, hidden)
     end
 end
 
+-- Performance Mode hides Unit visuals locally; it never destroys or reparents game objects.
+-- Unit stats, roots, hitboxes, physics, targeting and attacks remain intact.
+local performanceOriginals = setmetatable({}, { __mode = "k" })
+local performanceDescendantConnection = nil
+local performanceFolderAddedConnection = nil
+
+local function SetPerformanceInstanceHidden(inst, hidden)
+    if not inst then return end
+    local property
+    if inst:IsA("BasePart") then
+        property = "LocalTransparencyModifier"
+    elseif inst:IsA("Decal") or inst:IsA("Texture") then
+        property = "Transparency"
+    elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam")
+        or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles")
+        or inst:IsA("Highlight") or inst:IsA("BillboardGui") or inst:IsA("SurfaceGui") then
+        property = "Enabled"
+    end
+    if not property then return end
+    if hidden then
+        if performanceOriginals[inst] == nil then
+            local ok, original = pcall(function() return inst[property] end)
+            if ok then performanceOriginals[inst] = { property = property, value = original } end
+        end
+        pcall(function()
+            inst[property] = (property == "LocalTransparencyModifier" or property == "Transparency") and 1 or false
+        end)
+    else
+        local saved = performanceOriginals[inst]
+        if saved then
+            pcall(function() inst[saved.property] = saved.value end)
+            performanceOriginals[inst] = nil
+        end
+    end
+end
+
+local function HideAllUnitVisuals()
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return false end
+    for _, inst in ipairs(unitsFolder:GetDescendants()) do
+        SetPerformanceInstanceHidden(inst, true)
+    end
+    if performanceDescendantConnection then performanceDescendantConnection:Disconnect() end
+    performanceDescendantConnection = unitsFolder.DescendantAdded:Connect(function(inst)
+        if State.PerformanceMode then SetPerformanceInstanceHidden(inst, true) end
+    end)
+    return true
+end
+
+function ApplyPerformanceMode(enabled)
+    if performanceDescendantConnection then
+        performanceDescendantConnection:Disconnect()
+        performanceDescendantConnection = nil
+    end
+    if performanceFolderAddedConnection then
+        performanceFolderAddedConnection:Disconnect()
+        performanceFolderAddedConnection = nil
+    end
+    if enabled then
+        if not HideAllUnitVisuals() then
+            performanceFolderAddedConnection = workspace.ChildAdded:Connect(function(child)
+                if child.Name == "_UNITS" and State.PerformanceMode then
+                    if performanceFolderAddedConnection then
+                        performanceFolderAddedConnection:Disconnect()
+                        performanceFolderAddedConnection = nil
+                    end
+                    HideAllUnitVisuals()
+                end
+            end)
+        end
+    else
+        for inst, _ in pairs(performanceOriginals) do
+            if inst then SetPerformanceInstanceHidden(inst, false) end
+        end
+        table.clear(performanceOriginals)
+        if State.BlackScreen then
+            for _, inst in ipairs(workspace:GetDescendants()) do SetInstanceHidden(inst, true) end
+        end
+    end
+end
+
 function ApplyBlackScreen(enabled)
     BlackOverlay.Visible = enabled
     if blackscreenConn then
@@ -3768,6 +3833,9 @@ function ApplyBlackScreen(enabled)
                 SetInstanceHidden(inst, true)
             end
         end)
+    end
+    if State.PerformanceMode and type(ApplyPerformanceMode) == "function" then
+        ApplyPerformanceMode(true)
     end
 end
 
@@ -4430,7 +4498,7 @@ end)
 CreateToggle(AutoPlayPage, "Auto Upgrade Units", "AutoUpgrade", 3)
 CreateToggle(AutoPlayPage, "Auto Upgrade Farm First", "AutoUpgradeFarmFirst", 4)
 CreateSection(AutoPlayPage, "Buff Rotation", 5)
-CreateHint(AutoPlayPage, "Buff Loop uses the game's real per-unit cooldown AND shared GLOBAL_ATTACK_COOLDOWNS (keyed by Active ID). Duplicate units with the same Active ID do not stack cooldown speed. 100% uptime is possible only when the fastest effective shared cooldown is <= buff duration (usually 30s); otherwise the game cooldown makes a gap unavoidable. First cast starts immediately; next casts are sent as soon as both cooldown locks are ready.", 6, 42)
+CreateHint(AutoPlayPage, "Commander / Windsong / Elfy (Sylph) buff loop: each unit's cooldown C = base active CD (60s) x Curse/level multiplier (min 0.6), SPD = 1/C. One unit is cast only when the current buff (D = 30s) is about to expire, so buffs chain without overlap. Seamless when sum(1/C) >= 1/D (units needed = ceil(C/D)). Elfy's Verdant Enchantment is read from its live _stats. All buff units are auto-placed in one nearby cluster.", 6, 42)
 BuffRotationStatus = CreateHint(AutoPlayPage, "Auto Buff: Disabled", 7, 36)
 CreateToggle(AutoPlayPage, "Auto Buff Rotation", "AutoBuffRotation", 8, function(enabled)
     if not enabled then
@@ -5059,7 +5127,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(1.5)
+        task.wait(1)
         local ok, err = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
@@ -5290,7 +5358,7 @@ portalOpenBusy = false
 portalLastRefresh = 0
 portalOpenedUUIDs = {}
 task.spawn(function()
-    while task.wait(1.5) do
+    while task.wait(1) do
         if State.AutoOpenPortal and not portalOpenBusy and IsInLobby() then
             portalOpenBusy = true
             local ok, err = pcall(function()
@@ -5789,109 +5857,19 @@ function SetFreeCam(enabled)
     end
 end
 
--- Performance Mode stores original values so effects/shadows can be restored exactly.
-performanceModeSaved = {}
-performanceModeConnections = {}
-performanceLightingState = nil
-
-function ReducePerformanceInstance(instance)
-    if not instance then return end
-    local saved = performanceModeSaved[instance]
-    local function setReduced(property)
-        if not saved then
-            saved = {}
-            performanceModeSaved[instance] = saved
-        end
-        if saved[property] == nil then
-            local ok, value = pcall(function() return instance[property] end)
-            if ok then saved[property] = value end
-        end
-        pcall(function() instance[property] = false end)
-    end
-
-    if instance:IsA("ParticleEmitter") or instance:IsA("Trail") or instance:IsA("Beam")
-        or instance:IsA("Fire") or instance:IsA("Smoke") or instance:IsA("Sparkles")
-        or instance:IsA("PostEffect") then
-        setReduced("Enabled")
-    end
-    if instance:IsA("BasePart") then
-        setReduced("CastShadow")
-    end
-end
-
-function SetPerformanceMode(enabled)
-    enabled = enabled == true
-    if enabled then
-        for instance, connection in pairs(performanceModeConnections) do
-            if connection then connection:Disconnect() end
-            performanceModeConnections[instance] = nil
-        end
-        performanceModeSaved = {}
-        performanceLightingState = {
-            globalShadows = Lighting.GlobalShadows,
-        }
-        pcall(function()
-            local terrain = workspace.Terrain
-            performanceLightingState.terrain = terrain
-            performanceLightingState.terrainDecoration = terrain.Decoration
-            terrain.Decoration = false
-        end)
-        pcall(function() Lighting.GlobalShadows = false end)
-
-        for _, root in ipairs({workspace, Lighting}) do
-            for _, descendant in ipairs(root:GetDescendants()) do
-                ReducePerformanceInstance(descendant)
-            end
-            performanceModeConnections[root] = root.DescendantAdded:Connect(function(descendant)
-                if State.PerformanceMode == true then
-                    ReducePerformanceInstance(descendant)
-                end
-            end)
-        end
-    else
-        for instance, connection in pairs(performanceModeConnections) do
-            if connection then connection:Disconnect() end
-            performanceModeConnections[instance] = nil
-        end
-        for instance, properties in pairs(performanceModeSaved) do
-            if instance and instance.Parent then
-                for property, originalValue in pairs(properties) do
-                    pcall(function() instance[property] = originalValue end)
-                end
-            end
-        end
-        table.clear(performanceModeSaved)
-        if performanceLightingState then
-            pcall(function() Lighting.GlobalShadows = performanceLightingState.globalShadows end)
-            if performanceLightingState.terrain and performanceLightingState.terrain.Parent then
-                pcall(function()
-                    performanceLightingState.terrain.Decoration = performanceLightingState.terrainDecoration
-                end)
-            end
-        end
-        performanceLightingState = nil
-    end
-    if type(AddAdminActivity) == "function" then
-        AddAdminActivity(enabled and "Performance Mode enabled · effects and shadows reduced"
-            or "Performance Mode disabled · visual settings restored", "INFO")
-    end
-end
-
 -- Free Cam remains active across character respawns; it only ends when toggled off.
-CreateSection(MiscPage, "Performance", 1)
-CreateToggle(MiscPage, "Performance Mode (Reduce Effects & Shadows)", "PerformanceMode", 2, function(isON)
-    SetPerformanceMode(isON)
-end)
-CreateHint(MiscPage, "Turns off particles, beams, trails, post effects, cast shadows, and terrain decoration. Original visual settings are restored when disabled.", 3, 38)
-SetPerformanceMode(State.PerformanceMode)
-CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 4, function(isON)
+CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
     ApplyBlackScreen(isON)
 end)
-CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 5, function(isON)
+CreateToggle(MiscPage, "Performance Mode (hide all Unit visuals)", "PerformanceMode", 2, function(isON)
+    ApplyPerformanceMode(isON)
+end)
+CreateHint(MiscPage, "Hides every Unit model (all players and enemies) locally. Units are NOT destroyed; stats, hitboxes, attacks and gameplay remain active. Toggle off to restore visuals.", 3, 48)
+CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 4, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
-CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 6)
-CreateToggle(MiscPage, "Free Cam", "FreeCam", 7, function(isON)
+CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 5)
+CreateToggle(MiscPage, "Free Cam", "FreeCam", 6, function(isON)
     SetFreeCam(isON)
 end)
 -- Screenshot mode: suppress every game-owned ScreenGui under PlayerGui.
@@ -5932,7 +5910,7 @@ function SetGameUIScreenshotHidden(hidden)
     end
 end
 
-HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 8, function(isON)
+HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 7, function(isON)
     -- Hide all game ScreenGuis (Inventory, Summon, unit info, event windows, etc.)
     -- and the complete Hub. Preserve each game's original Enabled state for restoration.
     SetGameUIScreenshotHidden(isON)
@@ -5953,11 +5931,11 @@ local function RefreshHideScreenshotToggleVisual()
         indicator.Position = isON and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
     end
 end
-CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 9, 48)
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 8, 48)
 
-CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 10, 34)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 11, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 12, 50, 150, function()
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 9, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 10, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 11, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
@@ -6883,6 +6861,9 @@ AllowSave = true
 if State.BlackScreen then
     ApplyBlackScreen(true)
 end
+if State.PerformanceMode then
+    ApplyPerformanceMode(true)
+end
 RefreshUnitConfigUI()
 
 -- Estimate the next upgrade price from live unit stats first, then unit data.
@@ -6996,7 +6977,7 @@ end
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
-        task.wait(0.75)
+        task.wait(0.5)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             SyncReplicatedGameData()
@@ -7190,9 +7171,7 @@ function SendBuffActiveRequest(runtime, entry, now)
             end
 
             task.wait(0.2)
-            local castConfirmed = unit and unit.Parent and stats
-                and DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
-            if not castConfirmed and unit and unit.Parent and stats then
+            if unit and unit.Parent and stats and not DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId) then
                 -- Fallback if attack metadata was not yet synced and the server
                 -- expects the opposite parameter shape (aoe_point vs nil).
                 if not needsAoePoint and aoeParam then
@@ -7200,17 +7179,11 @@ function SendBuffActiveRequest(runtime, entry, now)
                 elseif needsAoePoint then
                     InvokeEndpoint("use_active_attack", unit)
                 end
-                task.wait(0.25)
-                castConfirmed = DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
             end
 
-            if castConfirmed then
-                local confirmedCastTime = lastCastValue and tonumber(lastCastValue.Value) or 0
-                BUFF_ROTATION_RUNTIME.ownCast[unit] = confirmedCastTime > beforeLastCast
-                    and confirmedCastTime or tick()
-            else
-                error("Game did not confirm the active cast; will retry when ready")
-            end
+            -- Always record our own cast timestamp so units using global
+            -- cooldown tracking (or where last_active_cast stays 0) rotate cleanly.
+            BUFF_ROTATION_RUNTIME.ownCast[unit] = tick()
         end)
         if not ok then
             warn("[OctoputHub] Buff request failed: " .. tostring(err))
@@ -7224,7 +7197,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(State.AutoBuffRotation and 0.1 or 1)
+        task.wait(0.1)
         local rotationOk, rotationErr = pcall(function()
             if not State.AutoBuffRotation then
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
@@ -7269,9 +7242,8 @@ task.spawn(function()
                 local groupLastCast = 0
                 for _, entry in ipairs(group.units) do
                     liveSet[entry.model] = true
-                    local effectiveGroupCast = math.max(entry.lastCast or 0, entry.globalLastCast or 0)
-                    if effectiveGroupCast <= now + 1 and effectiveGroupCast > groupLastCast then
-                        groupLastCast = effectiveGroupCast
+                    if entry.lastCast <= now + 1 and entry.lastCast > groupLastCast then
+                        groupLastCast = entry.lastCast
                     end
                 end
                 for unit in pairs(runtime.lastRequest) do
@@ -7305,19 +7277,13 @@ task.spawn(function()
                 if pending then
                     effectiveLastCast = math.max(effectiveLastCast, pending.time)
                 end
-                local castAt
-                if effectiveLastCast <= 0 then
-                    -- No buff has been cast yet: open with an immediate cast.
-                    castAt = now
-                else
-                    local buffEnd = effectiveLastCast + group.duration
-                    castAt = buffEnd - (group.lead or 0)
-                end
+                local buffEnd = effectiveLastCast + group.duration
+                local castAt = buffEnd - (group.lead or 0)
 
                 local ready = {}
                 local nextReadyIn = math.huge
                 for _, entry in ipairs(group.units) do
-                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now, group.globalRemaining)
+                    local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
                     local lastRequest = runtime.lastRequest[entry.model] or -math.huge
                     if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
                         table.insert(ready, entry)
@@ -7326,13 +7292,8 @@ task.spawn(function()
                         nextReadyIn = math.min(nextReadyIn, remaining)
                     end
                 end
-                -- Prefer the unit with the shortest effective cooldown. Since
-                -- the game has one shared cooldown per activeId, choosing the
-                -- fastest unit maximizes the actual repeat rate.
+                -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
                 table.sort(ready, function(a, b)
-                    if math.abs(a.cooldown - b.cooldown) > 0.05 then
-                        return a.cooldown < b.cooldown
-                    end
                     if math.abs(a.lastCast - b.lastCast) < 0.05 then
                         return tostring(a.uuid) < tostring(b.uuid)
                     end
@@ -7343,13 +7304,12 @@ task.spawn(function()
                 local avgCooldown = group.averageCooldown < math.huge and group.averageCooldown or 0
                 local formulaText
                 if group.baseCooldown then
-                    formulaText = string.format("fastest CD %.1fs (base %gs)", avgCooldown, group.baseCooldown)
+                    formulaText = string.format("CD %.1fs (base %gs x%.2f)", avgCooldown, group.baseCooldown, group.averageMultiplier or 1)
                 else
-                    formulaText = string.format("fastest CD %.1fs", avgCooldown)
+                    formulaText = string.format("CD %.1fs", avgCooldown)
                 end
-                local maxUptime = group.bestCooldown < math.huge and math.clamp((group.duration / math.max(0.1, group.bestCooldown)) * 100, 0, 100) or 0
-                local capacityText = group.sustainable and "100% possible"
-                    or string.format("Max %.0f%% (shared CD)", maxUptime)
+                local capacityText = group.sustainable and "Loop OK"
+                    or ("Need " .. tostring(group.requiredUnitsEstimate) .. " units")
                 local waitText
                 if pending then
                     waitText = "casting..."
@@ -7409,20 +7369,21 @@ end)
 
 task.spawn(function()
     while true do
-        task.wait(0.75)
+        task.wait(0.5)
         local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
-        unitRefreshClock = unitRefreshClock + 0.75
-        if unitRefreshClock >= 2.25 then
+        unitRefreshClock = unitRefreshClock + 0.5
+        if unitRefreshClock >= 1 then
             unitRefreshClock = 0
             pcall(RefreshUnitConfigUI)
         end
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
+            SyncReplicatedGameData()
+            local myUnits = GetPlayerUnits()
+            local wave = GetCurrentWave()
+
             if State.AutoPlace then
-                SyncReplicatedGameData()
-                local myUnits = GetPlayerUnits()
-                local wave = GetCurrentWave()
                 local equipped = EnrichEquipped(GetEquippedUnitList())
                 if #equipped > 0 then
                     -- Farm First prioritizes Farm placement first, then Farm upgrades.
@@ -7716,7 +7677,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(0.35)
+        task.wait(0.2)
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             if dataFolder ~= webhookDataFolder then
