@@ -7312,10 +7312,12 @@ task.spawn(function()
                 local curseMode = GetBuffRotationCurseMode(group)
                 local fastestCooldown = group.fastestCooldown < math.huge and group.fastestCooldown or 0
                 local formulaText
+                local maxUptime = fastestCooldown > 0
+                    and math.min(100, (group.duration / fastestCooldown) * 100) or 0
                 if group.baseCooldown then
-                    formulaText = string.format("fastest CD %.1fs (base %gs x%.2f)", fastestCooldown, group.baseCooldown, group.averageMultiplier or 1)
+                    formulaText = string.format("fastest CD %.1fs (base %gs x%.2f) | max %.0f%%", fastestCooldown, group.baseCooldown, group.averageMultiplier or 1, maxUptime)
                 else
-                    formulaText = string.format("fastest CD %.1fs", fastestCooldown)
+                    formulaText = string.format("fastest CD %.1fs | max %.0f%%", fastestCooldown, maxUptime)
                 end
                 local capacityText = group.sustainable and "100% possible"
                     or ("Gap unavoidable (need CD <= " .. tostring(group.duration) .. "s)")
