@@ -1725,7 +1725,7 @@ function GetBuffRotationGroups(now)
                     multSource = multSource,
                     speedStat = speedStat,
                     lastCast = lastCast,
-                    hasLiveCast = (validLiveLastCast ~= nil) or (globalLastCast ~= nil),
+                    hasLiveCast = (validLiveLastCast ~= nil) or (globalCastTime ~= nil),
                     queued = queued,
                     hasCurse = hasCurse,
                     curseReduction = curseReduction,
@@ -7297,9 +7297,8 @@ task.spawn(function()
                         nextReadyIn = math.max(0, remaining)
                     end
                 end
-                -- Oldest cast first keeps the rotation order stable (A, B, C, A ...).
-                -- Prefer the fastest effective Curse/CD unit. Ties rotate by
-                -- oldest own cast, then UUID for deterministic ordering.
+                -- Only the fastest unit is eligible here; this sort is a
+                -- deterministic tie-breaker if equal cooldown units are added later.
                 table.sort(ready, function(a, b)
                     if math.abs(a.cooldown - b.cooldown) > 0.05 then
                         return a.cooldown < b.cooldown
