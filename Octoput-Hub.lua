@@ -20,6 +20,7 @@ UserInputService = game:GetService("UserInputService")
 ReplicatedStorage = game:GetService("ReplicatedStorage")
 RunService = game:GetService("RunService")
 HttpService = game:GetService("HttpService")
+CollectionService = game:GetService("CollectionService")
 
 player = Players.LocalPlayer
 playerGui = player:WaitForChild("PlayerGui")
@@ -463,6 +464,7 @@ State = {
     WebhookURL = "",
     WebhookOnEnd = false,
     BlackScreen = false,
+    PerformanceMode = false,
     AutoHideGUIOnExecute = false,
     UIScale = 1,
     PlaceHybridGround = true,
@@ -593,6 +595,7 @@ function CopyStateForSave()
         WebhookURL = State.WebhookURL,
         WebhookOnEnd = State.WebhookOnEnd,
         BlackScreen = State.BlackScreen,
+        PerformanceMode = State.PerformanceMode,
         AutoHideGUIOnExecute = State.AutoHideGUIOnExecute,
         UIScale = State.UIScale,
         PlaceHybridGround = State.PlaceHybridGround,
@@ -642,7 +645,7 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -1064,15 +1067,28 @@ end
 function GetPlayerUnits()
     local myUnits = {}
     local unitsFolder = workspace:FindFirstChild("_UNITS")
-    if not unitsFolder then
+    if not unitsFolder then return myUnits end
+
+    -- Match UnitServiceCore.get_all_units_from_player() in game.lua.
+    local ok, taggedUnits = pcall(function()
+        return CollectionService:GetTagged("player_units:" .. tostring(player.UserId))
+    end)
+    if ok and type(taggedUnits) == "table" then
+        for _, unit in ipairs(taggedUnits) do
+            if unit and unit:IsA("Model") and unit.Parent == unitsFolder
+                and not CollectionService:HasTag(unit, "dying_units") then
+                table.insert(myUnits, unit)
+            end
+        end
         return myUnits
     end
 
-    for _, u in ipairs(unitsFolder:GetChildren()) do
-        if u:IsA("Model") and u:FindFirstChild("_stats") then
-            local pVal = u._stats:FindFirstChild("player")
-            if pVal and pVal.Value == player then
-                table.insert(myUnits, u)
+    -- Compatibility fallback if the game changes/removes its player-unit tag.
+    for _, unit in ipairs(unitsFolder:GetChildren()) do
+        if unit:IsA("Model") and unit:FindFirstChild("_stats") then
+            local playerValue = unit._stats:FindFirstChild("player")
+            if playerValue and playerValue.Value == player then
+                table.insert(myUnits, unit)
             end
         end
     end
@@ -3708,6 +3724,87 @@ function SetInstanceHidden(inst, hidden)
     end
 end
 
+-- Performance Mode hides Unit visuals locally; it never destroys or reparents game objects.
+-- Unit stats, roots, hitboxes, physics, targeting and attacks remain intact.
+local performanceOriginals = setmetatable({}, { __mode = "k" })
+local performanceDescendantConnection = nil
+local performanceFolderAddedConnection = nil
+
+local function SetPerformanceInstanceHidden(inst, hidden)
+    if not inst then return end
+    local property
+    if inst:IsA("BasePart") then
+        property = "LocalTransparencyModifier"
+    elseif inst:IsA("Decal") or inst:IsA("Texture") then
+        property = "Transparency"
+    elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam")
+        or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles")
+        or inst:IsA("Highlight") or inst:IsA("BillboardGui") or inst:IsA("SurfaceGui") then
+        property = "Enabled"
+    end
+    if not property then return end
+    if hidden then
+        if performanceOriginals[inst] == nil then
+            local ok, original = pcall(function() return inst[property] end)
+            if ok then performanceOriginals[inst] = { property = property, value = original } end
+        end
+        pcall(function()
+            inst[property] = (property == "LocalTransparencyModifier" or property == "Transparency") and 1 or false
+        end)
+    else
+        local saved = performanceOriginals[inst]
+        if saved then
+            pcall(function() inst[saved.property] = saved.value end)
+            performanceOriginals[inst] = nil
+        end
+    end
+end
+
+local function HideAllUnitVisuals()
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if not unitsFolder then return false end
+    for _, inst in ipairs(unitsFolder:GetDescendants()) do
+        SetPerformanceInstanceHidden(inst, true)
+    end
+    if performanceDescendantConnection then performanceDescendantConnection:Disconnect() end
+    performanceDescendantConnection = unitsFolder.DescendantAdded:Connect(function(inst)
+        if State.PerformanceMode then SetPerformanceInstanceHidden(inst, true) end
+    end)
+    return true
+end
+
+function ApplyPerformanceMode(enabled)
+    if performanceDescendantConnection then
+        performanceDescendantConnection:Disconnect()
+        performanceDescendantConnection = nil
+    end
+    if performanceFolderAddedConnection then
+        performanceFolderAddedConnection:Disconnect()
+        performanceFolderAddedConnection = nil
+    end
+    if enabled then
+        if not HideAllUnitVisuals() then
+            performanceFolderAddedConnection = workspace.ChildAdded:Connect(function(child)
+                if child.Name == "_UNITS" and State.PerformanceMode then
+                    if performanceFolderAddedConnection then
+                        performanceFolderAddedConnection:Disconnect()
+                        performanceFolderAddedConnection = nil
+                    end
+                    HideAllUnitVisuals()
+                end
+            end)
+        end
+    else
+        for inst, _ in pairs(performanceOriginals) do
+            if inst then SetPerformanceInstanceHidden(inst, false) end
+        end
+        table.clear(performanceOriginals)
+        if State.BlackScreen then
+            for _, inst in ipairs(workspace:GetDescendants()) do SetInstanceHidden(inst, true) end
+        end
+    end
+end
+
 function ApplyBlackScreen(enabled)
     BlackOverlay.Visible = enabled
     if blackscreenConn then
@@ -3743,6 +3840,9 @@ function ApplyBlackScreen(enabled)
                 SetInstanceHidden(inst, true)
             end
         end)
+    end
+    if State.PerformanceMode and type(ApplyPerformanceMode) == "function" then
+        ApplyPerformanceMode(true)
     end
 end
 
@@ -5768,11 +5868,15 @@ end
 CreateToggle(MiscPage, "Blackscreen (reduce 3D render)", "BlackScreen", 1, function(isON)
     ApplyBlackScreen(isON)
 end)
-CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 2, function(isON)
+CreateToggle(MiscPage, "Performance Mode (hide all Unit visuals)", "PerformanceMode", 2, function(isON)
+    ApplyPerformanceMode(isON)
+end)
+CreateHint(MiscPage, "Hides every Unit model (all players and enemies) locally. Units are NOT destroyed; stats, hitboxes, attacks and gameplay remain active. Toggle off to restore visuals.", 3, 48)
+CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 4, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
-CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 3)
-CreateToggle(MiscPage, "Free Cam", "FreeCam", 4, function(isON)
+CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 5)
+CreateToggle(MiscPage, "Free Cam", "FreeCam", 6, function(isON)
     SetFreeCam(isON)
 end)
 -- Screenshot mode: suppress every game-owned ScreenGui under PlayerGui.
@@ -5813,7 +5917,7 @@ function SetGameUIScreenshotHidden(hidden)
     end
 end
 
-HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 5, function(isON)
+HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 7, function(isON)
     -- Hide all game ScreenGuis (Inventory, Summon, unit info, event windows, etc.)
     -- and the complete Hub. Preserve each game's original Enabled state for restoration.
     SetGameUIScreenshotHidden(isON)
@@ -5834,11 +5938,11 @@ local function RefreshHideScreenshotToggleVisual()
         indicator.Position = isON and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
     end
 end
-CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 6, 48)
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 8, 48)
 
-CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 7, 34)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 8, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 9, 50, 150, function()
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 9, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 10, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 11, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
@@ -6763,6 +6867,9 @@ SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x
 AllowSave = true
 if State.BlackScreen then
     ApplyBlackScreen(true)
+end
+if State.PerformanceMode then
+    ApplyPerformanceMode(true)
 end
 RefreshUnitConfigUI()
 
