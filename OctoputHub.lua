@@ -465,6 +465,7 @@ State = {
     WebhookOnEnd = false,
     BlackScreen = false,
     PerformanceMode = false,
+    EnemyPerformanceMode = false,
     AutoHideGUIOnExecute = false,
     UIScale = 1,
     PlaceHybridGround = true,
@@ -596,6 +597,7 @@ function CopyStateForSave()
         WebhookOnEnd = State.WebhookOnEnd,
         BlackScreen = State.BlackScreen,
         PerformanceMode = State.PerformanceMode,
+        EnemyPerformanceMode = State.EnemyPerformanceMode,
         AutoHideGUIOnExecute = State.AutoHideGUIOnExecute,
         UIScale = State.UIScale,
         PlaceHybridGround = State.PlaceHybridGround,
@@ -645,7 +647,7 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -3870,6 +3872,140 @@ function ApplyPerformanceMode(enabled)
     end
 end
 
+-- Enemy Performance Mode: target only live PvE enemies identified by the game's
+-- own CollectionService tag. This is client-side visual reduction only.
+-- Never modify Humanoid, health, root position, movement, collision, or attack state.
+local enemyPerformanceOriginals = setmetatable({}, { __mode = "k" })
+local enemyPerformanceModelConnections = setmetatable({}, { __mode = "k" })
+local enemyPerformanceModelInstances = setmetatable({}, { __mode = "k" })
+local enemyPerformanceAddedConnection = nil
+local enemyPerformanceRemovedConnection = nil
+
+local function SetEnemyPerformanceProperty(inst, property, value, model)
+    if not inst then return end
+    local saved = enemyPerformanceOriginals[inst]
+    if not saved then
+        saved = {}
+        enemyPerformanceOriginals[inst] = saved
+    end
+    if saved[property] == nil then
+        local ok, original = pcall(function() return inst[property] end)
+        if not ok then return end
+        saved[property] = original
+    end
+    local ok = pcall(function() inst[property] = value end)
+    if ok and model then
+        local instances = enemyPerformanceModelInstances[model]
+        if not instances then
+            instances = {}
+            enemyPerformanceModelInstances[model] = instances
+        end
+        instances[inst] = true
+    end
+end
+
+local function ApplyEnemyPerformanceInstance(model, inst)
+    if not inst then return end
+    if inst:IsA("BasePart") then
+        -- LocalTransparencyModifier affects only this client; keep collision and hitboxes intact.
+        SetEnemyPerformanceProperty(inst, "LocalTransparencyModifier", 1, model)
+        SetEnemyPerformanceProperty(inst, "CastShadow", false, model)
+    elseif inst:IsA("Decal") or inst:IsA("Texture") then
+        SetEnemyPerformanceProperty(inst, "Transparency", 1, model)
+    elseif inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam")
+        or inst:IsA("Fire") or inst:IsA("Smoke") or inst:IsA("Sparkles")
+        or inst:IsA("Highlight") or inst:IsA("BillboardGui") or inst:IsA("SurfaceGui")
+        or inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then
+        SetEnemyPerformanceProperty(inst, "Enabled", false, model)
+    end
+end
+
+local function GetEnemyModel(taggedInstance)
+    if not taggedInstance then return nil end
+    local model = taggedInstance:IsA("Model") and taggedInstance or taggedInstance:FindFirstAncestorOfClass("Model")
+    if model and model:IsDescendantOf(workspace) then
+        return model
+    end
+    return nil
+end
+
+local function ApplyEnemyPerformanceModel(model)
+    if not model or not model:IsA("Model") then return end
+    for _, inst in ipairs(model:GetDescendants()) do
+        ApplyEnemyPerformanceInstance(model, inst)
+    end
+    if not enemyPerformanceModelConnections[model] then
+        enemyPerformanceModelConnections[model] = model.DescendantAdded:Connect(function(inst)
+            if State.EnemyPerformanceMode then
+                ApplyEnemyPerformanceInstance(model, inst)
+            end
+        end)
+    end
+end
+
+local function RestoreEnemyPerformanceModel(model)
+    local connection = enemyPerformanceModelConnections[model]
+    if connection then
+        connection:Disconnect()
+        enemyPerformanceModelConnections[model] = nil
+    end
+    local instances = enemyPerformanceModelInstances[model]
+    if instances then
+        for inst in pairs(instances) do
+            local saved = enemyPerformanceOriginals[inst]
+            if saved then
+                for property, original in pairs(saved) do
+                    pcall(function() inst[property] = original end)
+                end
+                enemyPerformanceOriginals[inst] = nil
+            end
+        end
+        enemyPerformanceModelInstances[model] = nil
+    end
+end
+
+function ApplyEnemyPerformanceMode(enabled)
+    if enemyPerformanceAddedConnection then
+        enemyPerformanceAddedConnection:Disconnect()
+        enemyPerformanceAddedConnection = nil
+    end
+    if enemyPerformanceRemovedConnection then
+        enemyPerformanceRemovedConnection:Disconnect()
+        enemyPerformanceRemovedConnection = nil
+    end
+    if enabled then
+        -- Anime Adventures tracks live enemies with the pve_minions_alive tag.
+        for _, tagged in ipairs(CollectionService:GetTagged("pve_minions_alive")) do
+            local model = GetEnemyModel(tagged)
+            if model then ApplyEnemyPerformanceModel(model) end
+        end
+        enemyPerformanceAddedConnection = CollectionService:GetInstanceAddedSignal("pve_minions_alive"):Connect(function(tagged)
+            if State.EnemyPerformanceMode then
+                local model = GetEnemyModel(tagged)
+                if model then ApplyEnemyPerformanceModel(model) end
+            end
+        end)
+        enemyPerformanceRemovedConnection = CollectionService:GetInstanceRemovedSignal("pve_minions_alive"):Connect(function(tagged)
+            local model = GetEnemyModel(tagged)
+            if model then RestoreEnemyPerformanceModel(model) end
+        end)
+    else
+        for model in pairs(enemyPerformanceModelConnections) do
+            RestoreEnemyPerformanceModel(model)
+        end
+        -- Safety restore for any tracked instance whose model was already unparented.
+        for inst, saved in pairs(enemyPerformanceOriginals) do
+            if inst and saved then
+                for property, original in pairs(saved) do
+                    pcall(function() inst[property] = original end)
+                end
+                enemyPerformanceOriginals[inst] = nil
+            end
+        end
+        table.clear(enemyPerformanceModelInstances)
+    end
+end
+
 function ApplyBlackScreen(enabled)
     BlackOverlay.Visible = enabled
     if blackscreenConn then
@@ -5937,11 +6073,24 @@ CreateToggle(MiscPage, "Performance Mode (hide all Unit visuals)", "PerformanceM
     ApplyPerformanceMode(isON)
 end)
 CreateHint(MiscPage, "Hides every Unit model (all players and enemies) locally. Units are NOT destroyed; stats, hitboxes, attacks and gameplay remain active. Toggle off to restore visuals.", 3, 48)
-CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 4, function(isON)
+CreateToggle(MiscPage, "Enemy Performance Mode (Extreme · All · Stable)", "EnemyPerformanceMode", 4, function(isON)
+    ApplyEnemyPerformanceMode(isON)
+    if type(AddAdminActivity) == "function" then
+        AddAdminActivity(isON and "Enemy Performance Mode enabled · Extreme / All / Stable" or "Enemy Performance Mode disabled · enemy visuals restored", "INFO")
+    end
+end)
+CreateHint(MiscPage, "Extreme: hides live enemy models, shadows, particles, lights, highlights and enemy-attached UI locally. Keeps enemy models, HP, Humanoids, movement, collision, hitboxes and combat logic intact. New enemies are handled by tag events, not per-frame scans.", 5, 58)
+-- Restore the user's saved preference after the tag listeners and UI have initialized.
+if State.EnemyPerformanceMode then
+    task.defer(function()
+        if State.EnemyPerformanceMode then ApplyEnemyPerformanceMode(true) end
+    end)
+end
+CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 6, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
-CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 5)
-CreateToggle(MiscPage, "Free Cam", "FreeCam", 6, function(isON)
+CreateToggle(MiscPage, "Anti-AFK (Prevent 20-minute idle disconnect)", "AntiAFK", 7)
+CreateToggle(MiscPage, "Free Cam", "FreeCam", 8, function(isON)
     SetFreeCam(isON)
 end)
 -- Screenshot mode: suppress every game-owned ScreenGui under PlayerGui.
@@ -5982,7 +6131,7 @@ function SetGameUIScreenshotHidden(hidden)
     end
 end
 
-HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 7, function(isON)
+HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "HideGUIForScreenshots", 9, function(isON)
     -- Hide all game ScreenGuis (Inventory, Summon, unit info, event windows, etc.)
     -- and the complete Hub. Preserve each game's original Enabled state for restoration.
     SetGameUIScreenshotHidden(isON)
@@ -6003,11 +6152,11 @@ local function RefreshHideScreenshotToggleVisual()
         indicator.Position = isON and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
     end
 end
-CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 8, 48)
+CreateHint(MiscPage, "Free Cam works anywhere. WASD = move, Space / Ctrl = up / down, Mouse = look, Shift = 3x speed. Your character does not move. Toggle off to restore the normal camera.", 10, 48)
 
-CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 9, 34)
-CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 10, 34)
-CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 11, 50, 150, function()
+CreateHint(MiscPage, "Anti-AFK responds to Roblox's Player.Idled event with a small virtual input. It does not move your character.", 11, 34)
+CreateHint(MiscPage, "When enabled, the hub runs normally but its window starts hidden. Press Right Shift to show or hide it.", 12, 34)
+CreateSingleSlider(MiscPage, "UI Scale", "50% smaller    150% larger", 13, 50, 150, function()
     return math.floor(State.UIScale * 100 + 0.5)
 end, function(value)
     State.UIScale = math.clamp(value / 100, 0.5, 1.5)
