@@ -1515,6 +1515,34 @@ function GetActiveAttackCooldownState(entry, now)
     return false, isReady, entry.cooldown, math.max(0, remaining)
 end
 
+-- Select the buff unit that will actually become ready first.
+-- Do not permanently pin Commander / Elfy to the lowest nominal cooldown:
+-- their per-unit last cast and queued state can differ during a live match.
+-- The game's shared Active-ID global cooldown is still honored by the worker.
+function GetBestBuffRotationEntry(group, now)
+    if not group or type(group.units) ~= "table" then
+        return nil, false, math.huge, nil
+    end
+    local bestEntry, bestReady = nil, false
+    local bestRemaining, bestCooldown = math.huge, math.huge
+    for _, candidate in ipairs(group.units) do
+        local busy, isReady, cooldown, remaining = GetActiveAttackCooldownState(candidate, now)
+        if not busy then
+            cooldown = tonumber(cooldown) or tonumber(candidate.cooldown) or math.huge
+            remaining = tonumber(remaining) or math.huge
+            if (isReady and not bestReady)
+                or (isReady == bestReady and (remaining < bestRemaining
+                    or (math.abs(remaining - bestRemaining) < 0.001 and cooldown < bestCooldown))) then
+                bestEntry = candidate
+                bestReady = isReady
+                bestRemaining = remaining
+                bestCooldown = cooldown
+            end
+        end
+    end
+    return bestEntry, bestReady, bestRemaining, bestCooldown < math.huge and bestCooldown or nil
+end
+
 function IsElfySylphUnit(rawId, unitData, unit)
     for _, value in ipairs({ rawId, unitData and unitData.id, unit and unit.Name }) do
         local id = NormalizeName(value)
@@ -7325,14 +7353,16 @@ end)
 
 -- Adaptive Commander / Windsong / Elfy (Sylph) buff loop.
 -- Elfy's static Units record omits the Verdant Enchantment active, but its
--- live UnitUpgrade UI exposes the active through _stats.active_attack. Resolve
--- and rotate that runtime active just like Commander and Windsong.
+-- live UnitUpgrade UI exposes the active through _stats.active_attack.
+-- Commander and Elfy share the generic best-ready scheduler; Windsong's
+-- special 4-unit Curse chain remains separate.
 --
 -- Loop rule per buff type (attack id):
 --   buffEnd = lastGroupCast + D
---   cast ONE ready unit when tick() >= buffEnd - lead
--- Each unit's readiness uses its own cooldown (SPD after Curse), so units with
--- different Curse modifiers rotate correctly without overlapping buffs.
+--   cast ONE eligible unit when the group/global cooldown permits it.
+-- The scheduler chooses the unit with the earliest individual ready time,
+-- then honors the game's shared Active-ID global lock. It never claims 100%
+-- when the actual cooldown is longer than the buff duration.
 function DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
     if not unit or not stats then return false end
     local lastCastValue = stats:FindFirstChild("last_active_cast")
@@ -7551,18 +7581,22 @@ task.spawn(function()
                 end
 
                 if not chainMode then
-                    -- Non-Windsong buff groups retain the normal single-caster
-                    -- rotation. Windsong with an unsupported Curse is held back
-                    -- rather than reporting a false 100% chain.
-                    entry = group.fastestEntry
+                    -- Commander and Elfy use the same data-driven rotation:
+                    -- choose whichever own unit is ready first, then honor the
+                    -- shared Active-ID global cooldown before dispatch.
+                    -- This avoids waiting on a previously selected unit when
+                    -- another copy has an earlier individual ready time.
+                    local selectedReady = false
+                    local selectedRemaining = math.huge
+                    entry, selectedReady, selectedRemaining = GetBestBuffRotationEntry(group, now)
                     if entry then
-                        local busy, isReady, _, remaining = GetActiveAttackCooldownState(entry, now)
                         local lastRequest = runtime.lastRequest[entry.model] or -math.huge
-                        if not busy and isReady and now - lastRequest >= BUFF_ROTATION_MIN_REQUEST_GAP then
+                        local requestWait = math.max(0, BUFF_ROTATION_MIN_REQUEST_GAP - (now - lastRequest))
+                        if selectedReady and requestWait <= 0 then
                             table.insert(ready, entry)
                             nextReadyIn = 0
-                        elseif not busy then
-                            nextReadyIn = math.max(0, remaining)
+                        else
+                            nextReadyIn = math.max(selectedRemaining, requestWait)
                         end
                     end
                 end
