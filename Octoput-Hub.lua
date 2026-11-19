@@ -6080,6 +6080,12 @@ CreateToggle(MiscPage, "Enemy Performance Mode (Extreme · All · Stable)", "Ene
     end
 end)
 CreateHint(MiscPage, "Extreme: hides live enemy models, shadows, particles, lights, highlights and enemy-attached UI locally. Keeps enemy models, HP, Humanoids, movement, collision, hitboxes and combat logic intact. New enemies are handled by tag events, not per-frame scans.", 5, 58)
+-- Restore the user's saved preference after the tag listeners and UI have initialized.
+if State.EnemyPerformanceMode then
+    task.defer(function()
+        if State.EnemyPerformanceMode then ApplyEnemyPerformanceMode(true) end
+    end)
+end
 CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 6, function(isON)
     -- This setting is saved and takes effect on the next script execution.
 end)
