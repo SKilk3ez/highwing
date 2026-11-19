@@ -490,6 +490,17 @@ State = {
     SnipeSummonCount = 10,
 }
 
+-- Derived runtime condition: prioritize active gameplay while BlackScreen is on.
+-- Background UI/inventory/diagnostic work is throttled and resumes automatically.
+function IsBlackScreenAutoPlayPriority()
+    if State.BlackScreen ~= true then return false end
+    if not (State.AutoPlace or State.AutoUpgrade or State.AutoBuffRotation
+        or State.AutoFindMatch or State.AutoEventQuests or State.AutoPickCards) then
+        return false
+    end
+    return workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
+end
+
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
 BUFF_DEFS = {
     { id = "attack", label = "Attack" },
@@ -2852,7 +2863,7 @@ end
 
 task.spawn(function()
     while ScreenGui.Parent do
-        task.wait(0.25)
+        task.wait(IsBlackScreenAutoPlayPriority() and 1 or 0.25)
 
         if State.BlackScreen then
             local highestDisplayOrder = 9999
@@ -2885,7 +2896,8 @@ task.spawn(function()
 
         local showPanel = State.BlackScreen == true and inMatch
         MatchInfoPanel.Visible = showPanel
-        if showPanel and os.clock() - lastMatchInfoRefresh >= 0.5 then
+        local matchInfoInterval = IsBlackScreenAutoPlayPriority() and 3 or 0.5
+        if showPanel and os.clock() - lastMatchInfoRefresh >= matchInfoInterval then
             lastMatchInfoRefresh = os.clock()
             MatchTimerLabel.Text = "TIME  " .. FormatElapsed(matchStartedAt and (os.clock() - matchStartedAt) or 0)
             MatchStageLabel.Text = "STAGE: " .. ReadCurrentStageName()
@@ -5363,7 +5375,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(1)
+        task.wait(IsBlackScreenAutoPlayPriority() and 3 or 1)
         local ok, err = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
@@ -7226,7 +7238,7 @@ end
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(IsBlackScreenAutoPlayPriority() and 0.75 or 0.5)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             SyncReplicatedGameData()
@@ -7697,13 +7709,20 @@ end)
 
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        local priorityMode = IsBlackScreenAutoPlayPriority()
+        task.wait(priorityMode and 0.75 or 0.5)
         local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
-        unitRefreshClock = unitRefreshClock + 0.5
-        if unitRefreshClock >= 1 then
+        if not priorityMode then
+            unitRefreshClock = unitRefreshClock + 0.5
+            if unitRefreshClock >= 1 then
+                unitRefreshClock = 0
+                pcall(RefreshUnitConfigUI)
+            end
+        else
+            -- Unit Configuration is presentation-only; defer its scan until
+            -- gameplay priority ends instead of refreshing it every second.
             unitRefreshClock = 0
-            pcall(RefreshUnitConfigUI)
         end
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
@@ -8220,8 +8239,9 @@ task.spawn(function()
             end
 
             -- Sample unit stats while the match is alive, before the game tears down _UNITS.
+            local unitCaptureInterval = IsBlackScreenAutoPlayPriority() and 1 or 0.5
             if webhookGameWasActive and not webhookEndDetected
-                and os.clock() - (webhookLastUnitCaptureAt or 0) >= 0.5 then
+                and os.clock() - (webhookLastUnitCaptureAt or 0) >= unitCaptureInterval then
                 webhookLastUnitCaptureAt = os.clock()
                 local unitOk, unitSnapshot = pcall(ReadMatchUnitLines)
                 if unitOk and unitSnapshot and unitSnapshot ~= "No placed unit stats captured." then
@@ -8399,7 +8419,9 @@ RefreshAdminDiagnostics()
 task.spawn(function()
     while ScreenGui and ScreenGui.Parent do
         task.wait(5)
-        pcall(RefreshAdminDiagnostics)
+        if not IsBlackScreenAutoPlayPriority() then
+            pcall(RefreshAdminDiagnostics)
+        end
     end
 end)
 
