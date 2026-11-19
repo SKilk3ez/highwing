@@ -1667,7 +1667,9 @@ function GetBuffRotationGroups(now)
                 local globalCooldown = type(globalEntry) == "table" and tonumber(globalEntry.cooldown) or nil
                 if globalCooldown and globalCooldown <= 0 then globalCooldown = nil end
 
-                local cooldown = liveCooldown or globalCooldown or expectedCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
+                -- Auto Active checks each unit's own cooldown. The shared Active-ID cooldown
+                -- is a separate manual/UI lock and must not replace this unit's cooldown.
+                local cooldown = liveCooldown or expectedCooldown or globalCooldown or BUFF_ROTATION_DEFAULT_ACTIVE_COOLDOWN
                 cooldown = math.max(0.1, cooldown)
 
                 -- In Lua, 0 is truthy! last_active_cast.Value starts at 0 before
@@ -7444,6 +7446,9 @@ task.spawn(function()
                     end
                     capacityText = group.sustainable and "100% possible"
                         or ("Gap unavoidable (need CD <= " .. tostring(group.duration) .. "s)")
+                end
+                if chainMode then
+                    castAt = runtime.chain.nextAt or now
                 end
                 local waitText
                 local globalWait = chainMode and 0 or math.max(0, group.globalRemaining or 0)
