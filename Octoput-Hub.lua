@@ -2995,7 +2995,15 @@ function GetResultDetails()
         details.level = tostring(settings.title or "Unknown stage")
         -- Capture LevelData context immediately when the authoritative result is read.
         -- SendEndWebhook may wait for inventory synchronization afterwards.
-        details.levelContext = ReadWebhookLevelContext()
+        local liveContext = ReadWebhookLevelContext()
+        local savedContext = type(webhookLevelContextAtStart) == "table"
+            and table.clone(webhookLevelContextAtStart) or {}
+        -- Prefer the values captured during this match; fill only missing fields
+        -- from the still-live Loader.LevelData result-screen context.
+        for key, value in pairs(liveContext) do
+            if savedContext[key] == nil then savedContext[key] = value end
+        end
+        details.levelContext = savedContext
 
         local stats = type(settings.stats) == "table" and settings.stats or {}
         details.stats = stats
@@ -8196,6 +8204,7 @@ webhookLastUnitCaptureAt = 0
 webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
+webhookLevelContextAtStart = nil
 webhookNextResultReadAt = 0
 
 local initialDataForWebhook = workspace:FindFirstChild("_DATA")
@@ -8306,6 +8315,7 @@ task.spawn(function()
                     webhookUnitLinesSnapshot = nil
                     skyPortalMatchDrops = {}
                     webhookResultSettingsAtStart = nil
+                    webhookLevelContextAtStart = nil
                 end
 
                 -- Never seed this edge from the replacement object: if it is
@@ -8457,6 +8467,11 @@ task.spawn(function()
                 webhookMatchToken = webhookMatchToken + 1
                 -- A new match owns a fresh send slot; older requests are token-isolated.
                 webhookSending = false
+                -- Capture Loader.LevelData while the match is definitely active.
+                -- The game may clear or replace it during result/replay teardown.
+                local levelContextOk, levelContextSnapshot = pcall(ReadWebhookLevelContext)
+                webhookLevelContextAtStart = levelContextOk and type(levelContextSnapshot) == "table"
+                    and table.clone(levelContextSnapshot) or nil
                 -- Mark the match active before optional inventory readers run.
                 -- A transient getgc/profile error must not prevent end detection.
                 webhookGameWasActive = true
