@@ -2963,7 +2963,8 @@ function InstallWebhookResultsHook()
                     return original(self, settings, ...)
                 end
 
-                local hookOk, originalFunction = pcall(hookfunction, showResults, wrapper)
+                local hookClosure = type(newcclosure) == "function" and newcclosure(wrapper) or wrapper
+                local hookOk, originalFunction = pcall(hookfunction, showResults, hookClosure)
                 if hookOk and type(originalFunction) == "function" then
                     original = originalFunction
                     webhookHookedResultFunctions[showResults] = true
@@ -8409,7 +8410,7 @@ task.spawn(function()
             -- exists. Retry slowly if ResultsUI is created after the Hub starts.
             if resultsGui and webhookHookedResultsGui ~= resultsGui
                 and os.clock() >= (webhookNextHookInstallAt or 0) then
-                webhookNextHookInstallAt = os.clock() + 2
+                webhookNextHookInstallAt = os.clock() + 8
                 local hookOk, hookInstalled = pcall(InstallWebhookResultsHook)
                 if not hookOk then
                     warn("[Octoput Hub Webhook] Direct result hook install failed: " .. tostring(hookInstalled))
