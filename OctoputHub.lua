@@ -2917,12 +2917,80 @@ task.spawn(function()
     end
 end)
 
+-- Directly tap the game's ResultsUI.show_results(self, settings) method.
+-- game.lua's game_finished endpoint calls this method with the authoritative
+-- server payload; this captures that exact table before UI rendering starts.
+webhookDirectResultSettings = nil
+webhookDirectResultGui = nil
+webhookDirectResultCapturedAt = 0
+webhookLevelContextAtResult = nil
+webhookHookedResultFunctions = webhookHookedResultFunctions or {}
+webhookHookedResultsGui = nil
+webhookNextHookInstallAt = 0
+
+function InstallWebhookResultsHook()
+    local results = playerGui:FindFirstChild("ResultsUI")
+    if not results or webhookHookedResultsGui == results then return webhookHookedResultsGui == results end
+    if type(getgc) ~= "function" or type(hookfunction) ~= "function" then return false end
+
+    local scanOk, objects = pcall(getgc, true)
+    if not scanOk or type(objects) ~= "table" then return false end
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" and object.screenGUI == results then
+            local showResults = object.show_results
+            if type(showResults) == "function" and not webhookHookedResultFunctions[showResults] then
+                local original
+                local wrapper = function(self, settings, ...)
+                    if type(settings) == "table" and type(settings.victory) == "boolean"
+                        and type(settings.stats) == "table" then
+                        webhookDirectResultSettings = settings
+                        webhookDirectResultGui = self and self.screenGUI or results
+                        webhookDirectResultCapturedAt = os.clock()
+                        local contextOk, context = pcall(ReadWebhookLevelContext)
+                        if contextOk and type(context) == "table" then
+                            webhookLevelContextAtResult = table.clone(context)
+                        end
+                        -- The server result payload is definitive; schedule the
+                        -- end handler after the game's own show_results call begins.
+                        task.defer(function()
+                            if webhookDirectResultSettings == settings
+                                and webhookDirectResultGui == results then
+                                MarkWebhookEnd("game.lua ResultsUI.show_results")
+                            end
+                        end)
+                    end
+                    return original(self, settings, ...)
+                end
+
+                local hookClosure = type(newcclosure) == "function" and newcclosure(wrapper) or wrapper
+                local hookOk, originalFunction = pcall(hookfunction, showResults, hookClosure)
+                if hookOk and type(originalFunction) == "function" then
+                    original = originalFunction
+                    webhookHookedResultFunctions[showResults] = true
+                    webhookHookedResultsGui = results
+                    print("[Octoput Hub Webhook] Direct game.lua ResultsUI.show_results hook installed.")
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
 function ReadAuthoritativeResultSettings()
     -- game.lua ResultsUI.new() stores the ResultsUI ScreenGui in screenGUI,
     -- and ResultsUI.show_results(settings) stores the exact server result in .settings.
     local results = playerGui:FindFirstChild("ResultsUI")
-    -- ResultsUI.settings is assigned before the GUI is enabled. Do not gate
-    -- result access on ScreenGui.Enabled: rendering/BlackScreen can keep it hidden.
+    -- Prefer the exact payload intercepted at the game's result method.
+    if results and webhookDirectResultGui == results
+        and type(webhookDirectResultSettings) == "table"
+        and type(webhookDirectResultSettings.victory) == "boolean"
+        and type(webhookDirectResultSettings.stats) == "table" then
+        return webhookDirectResultSettings
+    end
+    -- Fallback to the controller's settings table for executors where
+    -- hookfunction is unavailable or the method cannot be resolved.
     if not results or type(getgc) ~= "function" then return nil end
 
     local ok, objects = pcall(getgc, true)
@@ -2996,8 +3064,10 @@ function GetResultDetails()
         -- Capture LevelData context immediately when the authoritative result is read.
         -- SendEndWebhook may wait for inventory synchronization afterwards.
         local liveContext = ReadWebhookLevelContext()
-        local savedContext = type(webhookLevelContextAtStart) == "table"
-            and table.clone(webhookLevelContextAtStart) or {}
+        local savedContext = type(webhookLevelContextAtResult) == "table"
+            and table.clone(webhookLevelContextAtResult)
+            or (type(webhookLevelContextAtStart) == "table"
+                and table.clone(webhookLevelContextAtStart) or {})
         -- Prefer the values captured during this match; fill only missing fields
         -- from the still-live Loader.LevelData result-screen context.
         for key, value in pairs(liveContext) do
@@ -8316,6 +8386,10 @@ task.spawn(function()
                     skyPortalMatchDrops = {}
                     webhookResultSettingsAtStart = nil
                     webhookLevelContextAtStart = nil
+                    webhookDirectResultSettings = nil
+                    webhookDirectResultGui = nil
+                    webhookDirectResultCapturedAt = 0
+                    webhookLevelContextAtResult = nil
                 end
 
                 -- Never seed this edge from the replacement object: if it is
@@ -8331,6 +8405,17 @@ task.spawn(function()
             local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
             local unitsFolder = workspace:FindFirstChild("_UNITS")
             local resultsGui = playerGui:FindFirstChild("ResultsUI")
+
+            -- Install the direct game.lua result-method tap once the controller
+            -- exists. Retry slowly if ResultsUI is created after the Hub starts.
+            if resultsGui and webhookHookedResultsGui ~= resultsGui
+                and os.clock() >= (webhookNextHookInstallAt or 0) then
+                webhookNextHookInstallAt = os.clock() + 8
+                local hookOk, hookInstalled = pcall(InstallWebhookResultsHook)
+                if not hookOk then
+                    warn("[Octoput Hub Webhook] Direct result hook install failed: " .. tostring(hookInstalled))
+                end
+            end
 
             -- Bind to the game's real completion signals as well as polling.
             -- ResultsUI.show_results assigns settings before Enabled becomes true.
@@ -8490,6 +8575,10 @@ task.spawn(function()
                 webhookEndDetected = false
                 webhookSent = false
                 webhookRetryAt = 0
+                webhookDirectResultSettings = nil
+                webhookDirectResultGui = nil
+                webhookDirectResultCapturedAt = 0
+                webhookLevelContextAtResult = nil
                 webhookUnitLinesSnapshot = nil
                 webhookUnitStatsByInstance = {}
                 webhookLastUnitCaptureAt = 0
