@@ -490,6 +490,17 @@ State = {
     SnipeSummonCount = 10,
 }
 
+-- Derived runtime condition: prioritize active gameplay while BlackScreen is on.
+-- Background UI/inventory/diagnostic work is throttled and resumes automatically.
+function IsBlackScreenAutoPlayPriority()
+    if State.BlackScreen ~= true then return false end
+    if not (State.AutoPlace or State.AutoUpgrade or State.AutoBuffRotation
+        or State.AutoFindMatch or State.AutoEventQuests or State.AutoPickCards) then
+        return false
+    end
+    return workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
+end
+
 -- Names match GUIService._STAT_ID_TO_STAT_NAME and WaveModifiersServiceClient.is_effect_buff.
 BUFF_DEFS = {
     { id = "attack", label = "Attack" },
@@ -2852,7 +2863,7 @@ end
 
 task.spawn(function()
     while ScreenGui.Parent do
-        task.wait(0.25)
+        task.wait(IsBlackScreenAutoPlayPriority() and 1 or 0.25)
 
         if State.BlackScreen then
             local highestDisplayOrder = 9999
@@ -2885,7 +2896,8 @@ task.spawn(function()
 
         local showPanel = State.BlackScreen == true and inMatch
         MatchInfoPanel.Visible = showPanel
-        if showPanel and os.clock() - lastMatchInfoRefresh >= 0.5 then
+        local matchInfoInterval = IsBlackScreenAutoPlayPriority() and 3 or 0.5
+        if showPanel and os.clock() - lastMatchInfoRefresh >= matchInfoInterval then
             lastMatchInfoRefresh = os.clock()
             MatchTimerLabel.Text = "TIME  " .. FormatElapsed(matchStartedAt and (os.clock() - matchStartedAt) or 0)
             MatchStageLabel.Text = "STAGE: " .. ReadCurrentStageName()
@@ -2928,6 +2940,51 @@ function ReadAuthoritativeResultSettings()
     return nil
 end
 
+function ReadWebhookLevelContext()
+    -- game.lua ResultsUI.show_results() reads these exact fields from Loader.LevelData.
+    local context = {}
+    local ok, levelData = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then return nil end
+        local Loader = require(loaderModule)
+        return Loader and Loader.LevelData
+    end)
+    if not ok or type(levelData) ~= "table" then
+        return context
+    end
+
+    context.mode = levelData._gamemode
+    context.map = levelData.map
+    context.difficulty = levelData._difficulty
+    context.challengeId = levelData._challenge
+    context.weatherId = levelData._weather
+    context.isStory = levelData._is_actual_storymode == true
+    context.isPortal = levelData._is_map_or_portal_level == true
+
+    -- Resolve IDs using the same data modules that game.lua uses for ResultsUI.
+    if context.challengeId ~= nil then
+        local challengeData = type(LoadGameDataModule) == "function"
+            and LoadGameDataModule("ChallengeAndRewards") or nil
+        local challenges = type(challengeData) == "table" and challengeData.challenges or nil
+        local challenge = type(challenges) == "table" and challenges[context.challengeId] or nil
+        context.challenge = type(challenge) == "table" and challenge.name or tostring(context.challengeId)
+    end
+    if context.weatherId ~= nil then
+        local weatherData = type(LoadGameDataModule) == "function"
+            and LoadGameDataModule("Weather") or nil
+        local weather = type(weatherData) == "table" and weatherData[context.weatherId] or nil
+        context.weather = type(weather) == "table" and weather.name or tostring(context.weatherId)
+    end
+
+    local tournament = levelData._tournament
+    if type(tournament) == "table" then
+        context.tournamentScoreType = tournament.score_type
+        context.tournamentId = tournament.tournament_id
+    end
+    return context
+end
+
 function GetResultDetails()
     local details = {}
     local settings = ReadAuthoritativeResultSettings()
@@ -2936,8 +2993,20 @@ function GetResultDetails()
         details.settings = settings
         details.result = settings.victory and "VICTORY!!!" or "DEFEAT"
         details.level = tostring(settings.title or "Unknown stage")
+        -- Capture LevelData context immediately when the authoritative result is read.
+        -- SendEndWebhook may wait for inventory synchronization afterwards.
+        local liveContext = ReadWebhookLevelContext()
+        local savedContext = type(webhookLevelContextAtStart) == "table"
+            and table.clone(webhookLevelContextAtStart) or {}
+        -- Prefer the values captured during this match; fill only missing fields
+        -- from the still-live Loader.LevelData result-screen context.
+        for key, value in pairs(liveContext) do
+            if savedContext[key] == nil then savedContext[key] = value end
+        end
+        details.levelContext = savedContext
 
-        local stats = settings.stats or {}
+        local stats = type(settings.stats) == "table" and settings.stats or {}
+        details.stats = stats
         if tonumber(stats.time_taken) then
             local totalSeconds = math.ceil(tonumber(stats.time_taken))
             details.Timer = string.format("%02d:%02d", math.floor(totalSeconds / 60), totalSeconds % 60)
@@ -2945,15 +3014,25 @@ function GetResultDetails()
         if tonumber(stats.waves_completed) then
             details.WavesCompleted = tostring(math.floor(tonumber(stats.waves_completed)))
         end
+        if type(settings.tournament_stats) == "table" then
+            details.tournamentStats = settings.tournament_stats
+        end
         return details
     end
 
-    -- UI fallback for executors where the ResultsUI controller cannot be read.
+    -- UI fallback for executors which cannot inspect the ResultsUI controller.
+    -- This fallback intentionally reports only data actually shown by game.lua.
     local results = playerGui:FindFirstChild("ResultsUI")
     local holder = results and results:FindFirstChild("Holder")
     if results and results.Enabled == true and holder and holder.Visible == true then
         local levelName = holder:FindFirstChild("LevelName")
         if levelName and levelName:IsA("TextLabel") then details.level = levelName.Text end
+        local difficulty = holder:FindFirstChild("Difficulty")
+        if difficulty and difficulty:IsA("TextLabel") and difficulty.Text ~= "" then
+            details.levelContext = { difficulty = difficulty.Text }
+        else
+            details.levelContext = ReadWebhookLevelContext()
+        end
         local title = holder:FindFirstChild("Title")
         if title and title:IsA("TextLabel") then details.result = title.Text end
         local middle = holder:FindFirstChild("Middle")
@@ -2976,7 +3055,12 @@ end
 -- Snapshot unique Secret rewards at match start so Webhook can report only
 -- Secret Units / Secret Portals newly granted by this match.
 function LoadGameDataModule(moduleName)
-    local module = ReplicatedStorage:FindFirstChild(moduleName, true)
+    local src = ReplicatedStorage:FindFirstChild("src")
+    local dataFolder = src and src:FindFirstChild("Data")
+    local module = dataFolder and dataFolder:FindFirstChild(moduleName)
+    if not module then
+        module = ReplicatedStorage:FindFirstChild(moduleName, true)
+    end
     if module and module:IsA("ModuleScript") then
         local ok, data = pcall(require, module)
         if ok and type(data) == "table" then return data end
@@ -3153,8 +3237,8 @@ function BuildInventoryRewardLines(before, after, skipTrackedPortals)
     for itemId, portal in pairs(WEBHOOK_PORTAL_ITEMS) do
         local gained = math.max(0, (afterPortals[itemId] or 0) - (beforePortals[itemId] or 0))
         if gained > 0 then
-            local line = string.format("• **+%s %s [%s]** — Portals · %s",
-                FormatNumber(gained), portal.name, FormatNumber(afterPortals[itemId] or 0), portal.rarity)
+            local line = string.format("• **%s ×%s** — Portals · %s",
+                portal.name, FormatNumber(gained), portal.rarity)
             local entry = { sort = portal.name:lower(), line = line }
             if portal.rarity == "Secret" then
                 table.insert(secretEntries, { sort = entry.sort, line = "🌟 " .. entry.line })
@@ -3273,6 +3357,109 @@ function BuildMatchRewardLines(resultDetails, currentCurrencies)
 end
 
 -- First-completion bonuses are reported separately from the normal stage rewards.
+-- game.lua passes settings.new_items and settings.new_units to
+-- SummonServiceClient.show_unit_and_item_rewards(). Use this exact payload if the
+-- live inventory before/after snapshot is unavailable.
+function BuildResultPayloadRewardLines(settings, trackedPortals)
+    settings = type(settings) == "table" and settings or {}
+    local itemData = LoadGameDataModule("Items") or {}
+    local unitData = LoadGameDataModule("Units") or {}
+    local grouped = {}
+    local payloadPortalCounts = { portal_item__skypiea = 0, portal_item__enel = 0 }
+    local trackedPortalCounts = { portal_item__skypiea = 0, portal_item__enel = 0 }
+
+    local function addReward(category, name, rarity, amount, tier)
+        amount = math.max(0, tonumber(amount) or 1)
+        if amount <= 0 then return end
+        category = tostring(category or "Item")
+        name = tostring(name or "Unknown")
+        rarity = tostring(rarity or "Unknown")
+        local key = table.concat({category, name, rarity, tostring(tier or "")}, "|")
+        local entry = grouped[key]
+        if not entry then
+            entry = { category = category, name = name, rarity = rarity, tier = tier, amount = 0 }
+            grouped[key] = entry
+        end
+        entry.amount = entry.amount + amount
+    end
+
+    for _, item in pairs(type(settings.new_items) == "table" and settings.new_items or {}) do
+        if type(item) == "table" and item.item_id ~= nil then
+            local itemId = tostring(item.item_id)
+            local amount = item.uuid ~= nil and 1 or (tonumber(item.amount) or 1)
+            if payloadPortalCounts[itemId] ~= nil then
+                payloadPortalCounts[itemId] = payloadPortalCounts[itemId] + amount
+            elseif item._mock_resource ~= nil then
+                addReward("Resource", tostring(item._mock_resource), "Unknown", amount)
+            else
+                local def = itemData[itemId] or {}
+                addReward(def.item_group or "Item", def.name or itemId, def.rarity,
+                    amount, def.tier)
+            end
+        end
+    end
+
+    for _, reward in pairs(trackedPortals or {}) do
+        local itemId = tostring(reward and reward.itemId or "")
+        if trackedPortalCounts[itemId] ~= nil then
+            trackedPortalCounts[itemId] = trackedPortalCounts[itemId] + 1
+        end
+    end
+
+    local portalDefinitions = {
+        portal_item__skypiea = { name = "Sky Portal", rarity = "Mythic" },
+        portal_item__enel = { name = "Sky God's Portal", rarity = "Secret" },
+    }
+    for itemId, definition in pairs(portalDefinitions) do
+        local amount = math.max(payloadPortalCounts[itemId] or 0, trackedPortalCounts[itemId] or 0)
+        if amount > 0 then
+            addReward("Portals", definition.name, definition.rarity, amount)
+        end
+    end
+
+    local localSession = type(FindLocalGameSession) == "function" and FindLocalGameSession() or nil
+    local collection = type(localSession) == "table" and localSession.collection or nil
+    for _, uuid in pairs(type(settings.new_units) == "table" and settings.new_units or {}) do
+        local unit
+        if type(collection) == "table" and type(collection.get_unit_by_uuid) == "function" then
+            local ok, value = pcall(collection.get_unit_by_uuid, collection, uuid)
+            if ok then unit = value end
+        end
+        local unitId = type(unit) == "table" and unit.unit_id or nil
+        if unitId then
+            local def = unitData[tostring(unitId)] or {}
+            addReward("Unit", def.name or tostring(unitId), def.rarity, 1)
+        else
+            addReward("Unit", "Unit UUID " .. tostring(uuid), "Unknown", 1)
+        end
+    end
+
+    local normalEntries, secretEntries = {}, {}
+    for _, reward in pairs(grouped) do
+        local tierText = reward.tier and (" · Tier " .. tostring(reward.tier)) or ""
+        local rarityText = reward.rarity ~= "Unknown" and (" · " .. reward.rarity) or ""
+        local line = string.format("• **%s ×%s** — %s%s%s",
+            reward.name, FormatNumber(reward.amount), reward.category, rarityText, tierText)
+        local entry = { sort = reward.name:lower(), line = line }
+        if reward.rarity:lower() == "secret" then
+            table.insert(secretEntries, { sort = entry.sort, line = "🌟 " .. entry.line })
+        else
+            table.insert(normalEntries, entry)
+        end
+    end
+
+    local function sortLines(entries)
+        table.sort(entries, function(a, b) return a.sort < b.sort end)
+        local lines = {}
+        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
+        return lines
+    end
+    local normalLines = sortLines(normalEntries)
+    local secretLines = sortLines(secretEntries)
+    return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
+        #secretLines > 0 and table.concat(secretLines, "\n") or nil
+end
+
 function BuildFirstCompletionRewardLines(settings)
     if type(settings) ~= "table" or not settings.first_completion then return nil end
     local bonusLines = {}
@@ -3286,6 +3473,83 @@ function BuildFirstCompletionRewardLines(settings)
     end
     if #bonusLines == 0 then return nil end
     return "**⭐ First Completion Bonus**\n" .. table.concat(bonusLines, "\n")
+end
+
+function FormatWebhookTournamentScore(score, damage, scoreType)
+    if score == nil then return nil end
+    local ok, formatted = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then return nil end
+        local Loader = require(loaderModule)
+        local service = Loader and Loader.load_core_service
+            and Loader.load_core_service(game, "TournamentServiceCore") or nil
+        if service and type(service.format_score_with_damage) == "function" then
+            return service.format_score_with_damage(score, damage, scoreType, true)
+        end
+        return nil
+    end)
+    if ok and formatted ~= nil then return tostring(formatted) end
+    return FormatNumber(score)
+end
+
+function BuildMatchContextLines(resultDetails)
+    local lines = {}
+    local context = resultDetails and resultDetails.levelContext or {}
+    local function add(label, value)
+        if value ~= nil and tostring(value) ~= "" then
+            table.insert(lines, "• **" .. label .. ":** " .. tostring(value))
+        end
+    end
+
+    add("Mode", context.mode)
+    add("Map Key", context.map)
+    add("Difficulty", context.difficulty)
+    add("Challenge", context.challenge)
+    add("Weather", context.weather)
+    if context.isStory then add("Type", "Story") end
+    if context.isPortal then add("Type", "Portal / Map") end
+
+    -- game.lua reads tournament_stats from the server result and score_type
+    -- from Loader.LevelData._tournament, then formats score/high score via
+    -- TournamentServiceCore.format_score_with_damage().
+    local tournament = resultDetails and resultDetails.tournamentStats
+    if type(tournament) == "table" then
+        local scoreType = tostring(context.tournamentScoreType or "score")
+        local scoreLabel = scoreType == "damage" and "Damage"
+            or (scoreType == "kills" and "Kills" or scoreType)
+        local tieBreak = tournament.tiebreak == true
+        local scoreText = FormatWebhookTournamentScore(
+            tournament.score, tieBreak and tournament.damage or nil, scoreType)
+        add("Tournament Score (" .. scoreLabel .. ")", scoreText)
+
+        if tournament.previous_score ~= nil then
+            local previousText = FormatWebhookTournamentScore(
+                tournament.previous_score, tieBreak and tournament.previous_damage or nil, scoreType)
+            add("Previous Score", previousText)
+        end
+
+        local isNewHigh = tournament.is_new_high
+        if isNewHigh == nil then
+            local previous = tonumber(tournament.previous_score)
+            local current = tonumber(tournament.score)
+            isNewHigh = previous == nil or (current ~= nil and previous < current)
+        end
+        local highScore = isNewHigh and tournament.score or tournament.previous_score or tournament.score
+        local highDamage = nil
+        if tieBreak then
+            highDamage = isNewHigh and tournament.damage or tournament.previous_damage
+        end
+        add(isNewHigh and "High Score (NEW)" or "High Score",
+            FormatWebhookTournamentScore(highScore, highDamage, scoreType))
+
+        if tieBreak then
+            add("Tie-break Damage", tournament.damage)
+            add("Previous Tie-break Damage", tournament.previous_damage)
+        end
+    end
+
+    return #lines > 0 and table.concat(lines, "\n") or nil
 end
 
 webhookCurrencyBefore = nil
@@ -3468,18 +3732,16 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
         warn("[Octoput Hub Webhook] Inventory baseline unavailable; inventory drops cannot be diffed.")
     end
 
-    -- Portal UUIDs observed during the live match are authoritative even if the
-    -- inventory profile disappears during defeat / result-screen teardown.
-    -- Only use live UUID tracking as a fallback when the final inventory read
-    -- failed. When the final read succeeds, its before/after diff already includes
-    -- both normal stack amounts and unique Portal UUIDs.
+    -- game.lua's own result payload is the fallback for item/unit drops.
+    -- It is merged with live Portal tracking using max counts to avoid duplicate Portal reports.
     if not inventoryRewardsAvailable then
-        local trackedPortalNormal, trackedPortalSecret = BuildTrackedSkyPortalRewardLines(trackedPortalSnapshot)
-        if trackedPortalNormal then
-            inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. trackedPortalNormal) or trackedPortalNormal
+        local payloadNormal, payloadSecret = BuildResultPayloadRewardLines(
+            resultDetails and resultDetails.settings, trackedPortalSnapshot)
+        if payloadNormal then
+            inventoryRewardText = inventoryRewardText and (inventoryRewardText .. "\n" .. payloadNormal) or payloadNormal
         end
-        if trackedPortalSecret then
-            secretRewardText = secretRewardText and (secretRewardText .. "\n" .. trackedPortalSecret) or trackedPortalSecret
+        if payloadSecret then
+            secretRewardText = secretRewardText and (secretRewardText .. "\n" .. payloadSecret) or payloadSecret
         end
     end
 
@@ -3573,6 +3835,12 @@ function SendEndWebhook(currencyBaseline, secretBaseline, secretBaselineAvailabl
     local fields = {
         { name = "💰 Player Stats", value = LimitEmbedText(playerStatsText, 1024), inline = false },
     }
+    local matchContextText = BuildMatchContextLines(resultDetails)
+    if matchContextText then
+        table.insert(fields, { name = "🗺️ Match Details", value = LimitEmbedText(matchContextText, 1024), inline = false })
+    elseif resultDetails and resultDetails.authoritative then
+        table.insert(fields, { name = "🗺️ Match Details", value = "Mode / Map metadata unavailable from Loader.LevelData.", inline = false })
+    end
     local function AppendLineChunks(fieldName, value, maxLength)
         value = tostring(value or "")
         local current = {}
@@ -5363,7 +5631,7 @@ end
 
 task.spawn(function()
     while true do
-        task.wait(1)
+        task.wait(IsBlackScreenAutoPlayPriority() and 3 or 1)
         local ok, err = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
             local gameStarted = dataFolder and dataFolder:FindFirstChild("GameStarted")
@@ -7226,7 +7494,7 @@ end
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        task.wait(IsBlackScreenAutoPlayPriority() and 0.75 or 0.5)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             SyncReplicatedGameData()
@@ -7697,13 +7965,20 @@ end)
 
 task.spawn(function()
     while true do
-        task.wait(0.5)
+        local priorityMode = IsBlackScreenAutoPlayPriority()
+        task.wait(priorityMode and 0.75 or 0.5)
         local workerOk, workerError = pcall(function()
         SuppressErrorNotifications()
-        unitRefreshClock = unitRefreshClock + 0.5
-        if unitRefreshClock >= 1 then
+        if not priorityMode then
+            unitRefreshClock = unitRefreshClock + 0.5
+            if unitRefreshClock >= 1 then
+                unitRefreshClock = 0
+                pcall(RefreshUnitConfigUI)
+            end
+        else
+            -- Unit Configuration is presentation-only; defer its scan until
+            -- gameplay priority ends instead of refreshing it every second.
             unitRefreshClock = 0
-            pcall(RefreshUnitConfigUI)
         end
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
@@ -7929,6 +8204,7 @@ webhookLastUnitCaptureAt = 0
 webhookResultTitleAtStart = nil
 webhookResultsVisibleAtStart = false
 webhookResultSettingsAtStart = nil
+webhookLevelContextAtStart = nil
 webhookNextResultReadAt = 0
 
 local initialDataForWebhook = workspace:FindFirstChild("_DATA")
@@ -8039,6 +8315,7 @@ task.spawn(function()
                     webhookUnitLinesSnapshot = nil
                     skyPortalMatchDrops = {}
                     webhookResultSettingsAtStart = nil
+                    webhookLevelContextAtStart = nil
                 end
 
                 -- Never seed this edge from the replacement object: if it is
@@ -8190,6 +8467,11 @@ task.spawn(function()
                 webhookMatchToken = webhookMatchToken + 1
                 -- A new match owns a fresh send slot; older requests are token-isolated.
                 webhookSending = false
+                -- Capture Loader.LevelData while the match is definitely active.
+                -- The game may clear or replace it during result/replay teardown.
+                local levelContextOk, levelContextSnapshot = pcall(ReadWebhookLevelContext)
+                webhookLevelContextAtStart = levelContextOk and type(levelContextSnapshot) == "table"
+                    and table.clone(levelContextSnapshot) or nil
                 -- Mark the match active before optional inventory readers run.
                 -- A transient getgc/profile error must not prevent end detection.
                 webhookGameWasActive = true
@@ -8220,8 +8502,9 @@ task.spawn(function()
             end
 
             -- Sample unit stats while the match is alive, before the game tears down _UNITS.
+            local unitCaptureInterval = IsBlackScreenAutoPlayPriority() and 1 or 0.5
             if webhookGameWasActive and not webhookEndDetected
-                and os.clock() - (webhookLastUnitCaptureAt or 0) >= 0.5 then
+                and os.clock() - (webhookLastUnitCaptureAt or 0) >= unitCaptureInterval then
                 webhookLastUnitCaptureAt = os.clock()
                 local unitOk, unitSnapshot = pcall(ReadMatchUnitLines)
                 if unitOk and unitSnapshot and unitSnapshot ~= "No placed unit stats captured." then
@@ -8399,7 +8682,9 @@ RefreshAdminDiagnostics()
 task.spawn(function()
     while ScreenGui and ScreenGui.Parent do
         task.wait(5)
-        pcall(RefreshAdminDiagnostics)
+        if not IsBlackScreenAutoPlayPriority() then
+            pcall(RefreshAdminDiagnostics)
+        end
     end
 end)
 
