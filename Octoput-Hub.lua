@@ -460,6 +460,8 @@ State = {
     AutoFindMatch = false,
     AutoFindMistyMatch = false,
     AutoEventQuests = false,
+    AutoClaimDailyQuests = false,
+    AutoClaimEventQuests = false,
     AutoPickCards = false,
     AutoReplay = true,
     WebhookURL = "",
@@ -497,7 +499,8 @@ function IsBlackScreenAutoPlayPriority()
     if State.BlackScreen ~= true then return false end
     if not (State.AutoPlace or State.AutoUpgrade or State.AutoBuffRotation
         or State.AutoFindMatch or State.AutoFindMistyMatch
-        or State.AutoEventQuests or State.AutoPickCards) then
+        or State.AutoEventQuests or State.AutoClaimDailyQuests
+        or State.AutoClaimEventQuests or State.AutoPickCards) then
         return false
     end
     return workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
@@ -605,6 +608,8 @@ function CopyStateForSave()
         AutoFindMatch = State.AutoFindMatch,
         AutoFindMistyMatch = State.AutoFindMistyMatch,
         AutoEventQuests = State.AutoEventQuests,
+        AutoClaimDailyQuests = State.AutoClaimDailyQuests,
+        AutoClaimEventQuests = State.AutoClaimEventQuests,
         AutoPickCards = State.AutoPickCards,
         AutoReplay = State.AutoReplay,
         WebhookURL = State.WebhookURL,
@@ -661,7 +666,8 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoFindMistyMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoFindMistyMatch", "AutoEventQuests",
+        "AutoClaimDailyQuests", "AutoClaimEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -6182,6 +6188,142 @@ function RequestMistyVillageMatchmaking()
     return true
 end
 
+-- Auto-claim completed quests from the Quests UI's Daily and Event groups.
+-- The game validates completion with QuestClassesCore.is_quest_complete before redeem_quest.
+-- Quests requiring an NPC turn-in are skipped when block_button_completion is set.
+local autoQuestClaimRuntime = nil
+local autoQuestClaimRuntimeRetryAt = 0
+local autoQuestClaimAttemptAt = {}
+local autoQuestClaimBusy = false
+
+local function GetAutoQuestClaimRuntime()
+    if autoQuestClaimRuntime then
+        local session = autoQuestClaimRuntime.session
+        if session and session.quest_handler and autoQuestClaimRuntime.core then
+            return autoQuestClaimRuntime
+        end
+        autoQuestClaimRuntime = nil
+    end
+
+    if os.clock() < autoQuestClaimRuntimeRetryAt then
+        return nil
+    end
+
+    local ok, runtime = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then
+            error("ReplicatedStorage.src.Loader is unavailable")
+        end
+
+        local Loader = require(loaderModule)
+        local questService = Loader.load_client_service(game, "QuestServiceClient")
+        local questCore = Loader.load_core_service(game, "QuestClassesCore")
+        local session = questService and questService.session
+        if not session or not session.quest_handler then
+            error("QuestServiceClient session is not ready")
+        end
+        if type(questCore) ~= "table" or type(questCore.is_quest_complete) ~= "function" then
+            error("QuestClassesCore.is_quest_complete is unavailable")
+        end
+
+        return { session = session, core = questCore }
+    end)
+
+    if not ok or type(runtime) ~= "table" then
+        autoQuestClaimRuntimeRetryAt = os.clock() + 15
+        return nil
+    end
+
+    autoQuestClaimRuntime = runtime
+    return runtime
+end
+
+local function ClaimCompletedQuestsByType(runtime, questType, now)
+    local session = runtime.session
+    local handler = session and session.quest_handler
+    if not handler or type(handler.get_quests_by_type) ~= "function" then
+        return 0
+    end
+
+    local ok, quests = pcall(function()
+        return handler:get_quests_by_type(questType)
+    end)
+    if not ok or type(quests) ~= "table" then
+        return 0
+    end
+
+    local claimedCount = 0
+    for _, quest in pairs(quests) do
+        if type(quest) ~= "table" or type(quest.uuid) ~= "string"
+            or type(quest.quest_info) ~= "table" then
+            continue
+        end
+
+        local info = quest.quest_info
+        if info.block_button_completion == true then
+            continue
+        end
+        local expiry = tonumber(info.expiry_time)
+        if expiry and expiry <= os.time() then
+            continue
+        end
+
+        local lastAttempt = autoQuestClaimAttemptAt[quest.uuid] or 0
+        if now - lastAttempt < 45 then
+            continue
+        end
+
+        local completeOk, isComplete = pcall(function()
+            return runtime.core.is_quest_complete(session, quest)
+        end)
+        if not completeOk or isComplete ~= true then
+            continue
+        end
+
+        autoQuestClaimAttemptAt[quest.uuid] = now
+        local requestOk, requestResult = pcall(InvokeEndpoint, "redeem_quest", quest.uuid)
+        if requestOk and requestResult ~= false then
+            claimedCount = claimedCount + 1
+        elseif not requestOk then
+            warn("[Octoput Hub Auto Quest Claim] " .. questType .. " claim failed: " .. tostring(requestResult))
+        end
+        task.wait(0.25)
+    end
+
+    return claimedCount
+end
+
+local function AutoClaimCompletedQuests()
+    if autoQuestClaimBusy then return end
+    if not State.AutoClaimDailyQuests and not State.AutoClaimEventQuests then return end
+
+    autoQuestClaimBusy = true
+    local ok, err = pcall(function()
+        local runtime = GetAutoQuestClaimRuntime()
+        if not runtime then return end
+
+        local now = os.clock()
+        if State.AutoClaimDailyQuests then
+            ClaimCompletedQuestsByType(runtime, "daily", now)
+        end
+        if State.AutoClaimEventQuests then
+            ClaimCompletedQuestsByType(runtime, "event", now)
+        end
+
+        for uuid, attemptedAt in pairs(autoQuestClaimAttemptAt) do
+            if now - attemptedAt > 300 then
+                autoQuestClaimAttemptAt[uuid] = nil
+            end
+        end
+    end)
+    autoQuestClaimBusy = false
+
+    if not ok then
+        warn("[Octoput Hub Auto Quest Claim] " .. tostring(err))
+    end
+end
+
 function HandlePopups()
     local notifWindows = playerGui:FindFirstChild("NotificationWindows")
     if not notifWindows then
@@ -6279,7 +6421,7 @@ SummerAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Summer Hunt)",
         end
     end
 end)
-CreateToggle(EventPage, "Auto Event Quests (Summer Bingo)", "AutoEventQuests", 3)
+CreateToggle(EventPage, "Auto Claim Summer Bingo", "AutoEventQuests", 3)
 
 CreateSection(EventPage, "MISTY VILLAGE", 4)
 MistyAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Misty Village)", "AutoFindMistyMatch", 5, function(isON)
@@ -6301,12 +6443,17 @@ MistyAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Misty Village)"
 end)
 CreateHint(EventPage, "Automatically selects Day, Night, or Blood Moon using the game's shared village clock. Locked stages are not queued.", 6, 36)
 
-CreateSection(EventPage, "SHARED OPTIONS", 7)
-CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 8)
-CreateSection(EventPage, "Pick Card", 9)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 10)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 13)
-CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 16)
+CreateSection(EventPage, "AUTO CLAIM QUESTS", 7)
+CreateToggle(EventPage, "Auto Claim Daily Quests", "AutoClaimDailyQuests", 8)
+CreateToggle(EventPage, "Auto Claim Event Quests", "AutoClaimEventQuests", 9)
+CreateHint(EventPage, "Claims completed quests only. Event quests marked for NPC turn-in are skipped and must be claimed from the required NPC.", 10, 34)
+
+CreateSection(EventPage, "SHARED OPTIONS", 11)
+CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 12)
+CreateSection(EventPage, "Pick Card", 13)
+CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 14)
+CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 17)
+CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 20)
 
 WebhookStatus = nil
 CreateTextBox(WebhookPage, "Discord Webhook URL", "https://discord.com/api/webhooks/...", 1, function(text)
@@ -8344,6 +8491,7 @@ end)
 
 lastMatchmakingRequest = 0
 lastQuestClaim = 0
+lastAutoQuestClaimScan = 0
 task.spawn(function()
     while true do
         task.wait(1.5)
@@ -8411,6 +8559,12 @@ task.spawn(function()
         if not State.AutoFindMistyMatch and State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
             lastQuestClaim = os.clock()
             InvokeEndpoint("claim_summer2_map_board_lines")
+        end
+
+        if (State.AutoClaimDailyQuests or State.AutoClaimEventQuests)
+            and os.clock() - lastAutoQuestClaimScan >= 20 then
+            lastAutoQuestClaimScan = os.clock()
+            task.spawn(AutoClaimCompletedQuests)
         end
         end)
         if not mmOk then
