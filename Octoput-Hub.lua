@@ -654,10 +654,20 @@ function SaveConfig()
     if not ok then
         return
     end
-    if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("OctoputHub") then
-        pcall(makefolder, "OctoputHub")
+    if type(makefolder) == "function" then
+        local folderReady = false
+        if type(isfolder) == "function" then
+            local folderOk, folderExists = pcall(isfolder, "OctoputHub")
+            folderReady = folderOk and folderExists == true
+        end
+        if not folderReady then
+            pcall(makefolder, "OctoputHub")
+        end
     end
-    pcall(writefile, CONFIG_FILE, payload)
+    local writeOk, writeError = pcall(writefile, CONFIG_FILE, payload)
+    if not writeOk then
+        warn("[OctoputHub Config] Save failed: " .. tostring(writeError))
+    end
 end
 
 function ApplySavedTable(saved)
@@ -787,7 +797,15 @@ function LoadConfig()
     end
 end
 
-LoadConfig()
+function SafeStartupStep(label, callback)
+    local ok, result = pcall(callback)
+    if not ok then
+        warn("[OctoputHub Startup] " .. tostring(label) .. " failed: " .. tostring(result))
+    end
+    return ok, result
+end
+
+SafeStartupStep("Load config", LoadConfig)
 -- Only one Event matchmaking target can be active at a time.
 if State.AutoFindMatch and State.AutoFindMistyMatch then
     State.AutoFindMistyMatch = false
@@ -4582,9 +4600,17 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
             TweenService:Create(Indicator, tweenInfo, { Position = UDim2.new(0, 3, 0.5, -8) }):Play()
         end
 
-        SaveConfig()
+        local saveOk, saveError = pcall(SaveConfig)
+        if not saveOk then
+            warn("[OctoputHub Config] Toggle save failed: " .. tostring(saveError))
+        end
         if callback then
-            task.spawn(callback, isON)
+            task.spawn(function()
+                local callbackOk, callbackError = pcall(callback, isON)
+                if not callbackOk then
+                    warn("[OctoputHub Toggle] " .. tostring(title) .. " callback failed: " .. tostring(callbackError))
+                end
+            end)
         end
     end)
 
@@ -5903,7 +5929,7 @@ function RefreshPortalUI()
     end
     PortalStatus.Text = string.format("Found %d portal type(s). Select portals and tiers, then enable Auto Open Portal.", #portals)
 end
-RefreshPortalTierUI()
+SafeStartupStep("Portal tier UI", RefreshPortalTierUI)
 PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
 CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 4)
 CreateToggle(PortalPage, "Auto Next Portal (Win / Lose)", "AutoNextPortal", 5)
@@ -6451,8 +6477,12 @@ CreateHint(EventPage, "Claims completed quests only. Event quests marked for NPC
 CreateSection(EventPage, "SHARED OPTIONS", 11)
 CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 12)
 CreateSection(EventPage, "Pick Card", 13)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 14)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 17)
+SafeStartupStep("Event buff priority UI", function()
+    CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 14)
+end)
+SafeStartupStep("Event debuff priority UI", function()
+    CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 17)
+end)
 CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 20)
 
 WebhookStatus = nil
@@ -6746,7 +6776,11 @@ CreateHint(MiscPage, "Extreme: hides live enemy models, shadows, particles, ligh
 -- Restore the user's saved preference after the tag listeners and UI have initialized.
 if State.EnemyPerformanceMode then
     task.defer(function()
-        if State.EnemyPerformanceMode then ApplyEnemyPerformanceMode(true) end
+        if State.EnemyPerformanceMode then
+            SafeStartupStep("Restore Enemy Performance Mode", function()
+                ApplyEnemyPerformanceMode(true)
+            end)
+        end
     end)
 end
 CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 6, function(isON)
@@ -7735,18 +7769,18 @@ SnipeRefreshButton = CreateButton(SummonPage, "Refresh Banners / Units", 11, fun
 end)
 SnipeStatusLabel = SnipeMakeLabel(SummonPage, "Status: Idle", 12, 34, Color3.fromRGB(190, 210, 230))
 SnipeStartButton = CreateButton(SummonPage, "Start Summon", 13, SnipeStart)
-SnipeBuildBannerList()
-SnipeBuildUnitList()
+SafeStartupStep("Summon banner list", SnipeBuildBannerList)
+SafeStartupStep("Summon target list", SnipeBuildUnitList)
 SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x" or "1x") .. " (click to switch)"
 
 AllowSave = true
 if State.BlackScreen then
-    ApplyBlackScreen(true)
+    SafeStartupStep("Restore BlackScreen", function() ApplyBlackScreen(true) end)
 end
 if State.PerformanceMode then
-    ApplyPerformanceMode(true)
+    SafeStartupStep("Restore Performance Mode", function() ApplyPerformanceMode(true) end)
 end
-RefreshUnitConfigUI()
+SafeStartupStep("Refresh Unit Configuration", RefreshUnitConfigUI)
 
 -- Estimate the next upgrade price from live unit stats first, then unit data.
 -- Unknown prices for non-maxed units fall back to 0 instead of math.huge so
