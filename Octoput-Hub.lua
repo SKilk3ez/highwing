@@ -4515,29 +4515,6 @@ function CreateHint(parent, text, layoutOrder, height)
     return Label
 end
 
-AdminActivityEntries = AdminActivityEntries or {}
-AdminActivityLabel = nil
-AdminDiagnosticsRows = {}
-
-function AddAdminActivity(message, level)
-    local entry = {
-        time = os.date("%H:%M:%S"),
-        level = tostring(level or "INFO"),
-        message = tostring(message or ""),
-    }
-    table.insert(AdminActivityEntries, 1, entry)
-    while #AdminActivityEntries > 40 do
-        table.remove(AdminActivityEntries)
-    end
-    if AdminActivityLabel then
-        local lines = {}
-        for index, item in ipairs(AdminActivityEntries) do
-            table.insert(lines, string.format("[%s] [%s] %s", item.time, item.level, item.message))
-        end
-        AdminActivityLabel.Text = #lines > 0 and table.concat(lines, "\n") or "No activity yet."
-    end
-end
-
 function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
@@ -4600,9 +4577,6 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
         end
 
         SaveConfig()
-        if type(AddAdminActivity) == "function" then
-            AddAdminActivity(title .. (isON and " enabled" or " disabled"), isON and "INFO" or "WARN")
-        end
         if callback then
             task.spawn(callback, isON)
         end
@@ -4985,7 +4959,6 @@ EventPage = CreateTab("Event", 4)
 WebhookPage = CreateTab("Webhook", 5)
 MiscPage = CreateTab("Misc", 6)
 SummonPage = CreateTab("Summon", 7)
-AdminPage = CreateTab("Admin", 8)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -5055,18 +5028,11 @@ AutoPlayStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 AutoPlayStatusLabel.ZIndex = 13
 AutoPlayStatusLabel.Parent = AutoPlayStatusCard
 
-AdminLastAutoPlayStatus = nil
 function UpdateAutoPlayStatus(text, color)
     if AutoPlayStatusLabel then
         AutoPlayStatusLabel.Text = "Auto Play: " .. text
         if color then
             AutoPlayStatusLabel.TextColor3 = color
-        end
-    end
-    if AdminLastAutoPlayStatus ~= tostring(text) then
-        AdminLastAutoPlayStatus = tostring(text)
-        if type(AddAdminActivity) == "function" then
-            AddAdminActivity("Auto Play: " .. tostring(text), color == Color3.fromRGB(255, 100, 100) and "ERROR" or "INFO")
         end
     end
 end
@@ -6628,9 +6594,6 @@ end)
 CreateHint(MiscPage, "Hides every Unit model (all players and enemies) locally. Units are NOT destroyed; stats, hitboxes, attacks and gameplay remain active. Toggle off to restore visuals.", 3, 48)
 CreateToggle(MiscPage, "Enemy Performance Mode (Extreme · All · Stable)", "EnemyPerformanceMode", 4, function(isON)
     ApplyEnemyPerformanceMode(isON)
-    if type(AddAdminActivity) == "function" then
-        AddAdminActivity(isON and "Enemy Performance Mode enabled · Extreme / All / Stable" or "Enemy Performance Mode disabled · enemy visuals restored", "INFO")
-    end
 end)
 CreateHint(MiscPage, "Extreme: hides live enemy models, shadows, particles, lights, highlights and enemy-attached UI locally. Keeps enemy models, HP, Humanoids, movement, collision, hitboxes and combat logic intact. New enemies are handled by tag events, not per-frame scans.", 5, 58)
 -- Restore the user's saved preference after the tag listeners and UI have initialized.
@@ -6689,9 +6652,6 @@ HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "
     -- and the complete Hub. Preserve each game's original Enabled state for restoration.
     SetGameUIScreenshotHidden(isON)
     if ScreenGui then ScreenGui.Enabled = not isON end
-    if type(AddAdminActivity) == "function" then
-        AddAdminActivity(isON and "Screenshot mode enabled · GUI hidden" or "Screenshot mode disabled · GUI restored", "INFO")
-    end
 end)
 local function RefreshHideScreenshotToggleVisual()
     if not HideScreenshotGUIToggle then return end
@@ -8507,7 +8467,6 @@ function StartWebhookEndSend(reason)
     local trackedPortalSnapshot = table.clone(skyPortalMatchDrops or {})
 
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
-    AddAdminActivity("Webhook send started (" .. tostring(reason or "result") .. ")", "INFO")
     task.spawn(function()
         local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot, trackedPortalSnapshot)
         -- A previous match's HTTP request may finish after a new match has begun.
@@ -8522,11 +8481,9 @@ function StartWebhookEndSend(reason)
             local finalDetails = GetResultDetails()
             webhookLastSentSettings = finalDetails and finalDetails.settings or nil
             print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
-            AddAdminActivity("Match-end webhook sent successfully", "SUCCESS")
         else
             local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
             warn("[Octoput Hub Webhook] Send failed: " .. failure)
-            AddAdminActivity("Webhook send failed: " .. failure, "ERROR")
             webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 8, 3, 120)
         end
     end)
@@ -8548,7 +8505,6 @@ function MarkWebhookEnd(reason)
             warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
         end
         print("[Octoput Hub Webhook] END DETECTED by " .. tostring(reason or "game result") .. ".")
-        AddAdminActivity("Match end detected (" .. tostring(reason or "game result") .. ")", "INFO")
     end
     StartWebhookEndSend(reason)
 end
@@ -8791,7 +8747,6 @@ task.spawn(function()
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
                 print("[Octoput Hub Webhook] Match start detected; reward baseline captured.")
-                AddAdminActivity("Match started · reward baseline captured", "INFO")
             end
 
             -- Sample unit stats while the match is alive, before the game tears down _UNITS.
@@ -8831,152 +8786,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
             if ScreenGui then ScreenGui.Enabled = true end
             SaveConfig()
             RefreshHideScreenshotToggleVisual()
-            if type(AddAdminActivity) == "function" then
-                AddAdminActivity("Screenshot mode disabled · GUI restored with Right Shift", "INFO")
-            end
         else
             MainFrame.Visible = not MainFrame.Visible
-        end
-    end
-end)
-
--- Admin page: live diagnostics and a bounded in-memory activity log.
-CreateSection(AdminPage, "SYSTEM DIAGNOSTICS", 1)
-CreateHint(AdminPage, "Live status checks for the Hub, automation, inventory reader and webhook monitor.", 2, 30)
-
-local function CreateAdminStatusRow(parent, title, layoutOrder)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -10, 0, 34)
-    row.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-    row.LayoutOrder = layoutOrder
-    row.ZIndex = 12
-    row.Parent = parent
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 5)
-    corner.Parent = row
-    local name = Instance.new("TextLabel")
-    name.Size = UDim2.new(0.62, -8, 1, 0)
-    name.Position = UDim2.new(0, 10, 0, 0)
-    name.BackgroundTransparency = 1
-    name.Text = title
-    name.TextColor3 = Color3.fromRGB(210, 215, 230)
-    name.TextSize = 12
-    name.Font = Enum.Font.Gotham
-    name.TextXAlignment = Enum.TextXAlignment.Left
-    name.ZIndex = 13
-    name.Parent = row
-    local value = Instance.new("TextLabel")
-    value.Size = UDim2.new(0.38, -10, 1, 0)
-    value.Position = UDim2.new(0.62, 0, 0, 0)
-    value.BackgroundTransparency = 1
-    value.Text = "Checking..."
-    value.TextColor3 = Color3.fromRGB(160, 160, 180)
-    value.TextSize = 12
-    value.Font = Enum.Font.GothamBold
-    value.TextXAlignment = Enum.TextXAlignment.Right
-    value.ZIndex = 13
-    value.Parent = row
-    AdminDiagnosticsRows[title] = value
-    return row
-end
-
-CreateAdminStatusRow(AdminPage, "Hub UI", 3)
-CreateAdminStatusRow(AdminPage, "Webhook", 4)
-CreateAdminStatusRow(AdminPage, "Webhook Monitor", 5)
-CreateAdminStatusRow(AdminPage, "Match State", 6)
-CreateAdminStatusRow(AdminPage, "Inventory Reader", 7)
-CreateAdminStatusRow(AdminPage, "Unit Stats Capture", 8)
-CreateAdminStatusRow(AdminPage, "Auto Play", 9)
-CreateAdminStatusRow(AdminPage, "Free Cam", 10)
-
-local function SetAdminDiagnostic(name, value, good)
-    local label = AdminDiagnosticsRows[name]
-    if label then
-        label.Text = tostring(value)
-        label.TextColor3 = good and Color3.fromRGB(90, 225, 145)
-            or Color3.fromRGB(255, 185, 85)
-    end
-end
-
-function RefreshAdminDiagnostics()
-    SetAdminDiagnostic("Hub UI", ScreenGui and ScreenGui.Parent and "Running" or "Unavailable", ScreenGui and ScreenGui.Parent ~= nil)
-    local webhookUrl = NormalizeWebhookUrl(State.WebhookURL)
-    local webhookProblem = WebhookProblem(webhookUrl)
-    local webhookReady = webhookProblem == nil
-    SetAdminDiagnostic("Webhook", not webhookReady and (State.WebhookOnEnd and "Enabled · URL invalid" or "URL not configured")
-        or (State.WebhookOnEnd and "Enabled · Ready" or "Ready · Sending off"), webhookReady)
-    SetAdminDiagnostic("Webhook Monitor", webhookMonitorStarted and "Running" or "Not started", webhookMonitorStarted == true)
-    SetAdminDiagnostic("Match State", webhookGameWasActive and "In Match"
-        or (webhookEndDetected and "Result detected" or "Idle"), true)
-
-    -- Avoid running the expensive executor/session scan on the 5-second UI refresh.
-    -- Actual profile availability is checked by the match-end reward reader.
-    local inventoryReaderLoaded = type(ReadInventoryRewardSnapshot) == "function"
-    SetAdminDiagnostic("Inventory Reader", inventoryReaderLoaded and "Loaded · checked at match end" or "Unavailable", inventoryReaderLoaded)
-
-    local unitCount = 0
-    for _ in pairs(webhookUnitStatsByInstance or {}) do unitCount = unitCount + 1 end
-    SetAdminDiagnostic("Unit Stats Capture", tostring(unitCount) .. " unit(s) tracked", unitCount > 0 or not webhookGameWasActive)
-
-    local autoCount = 0
-    for _, key in ipairs({"AutoPlace", "AutoUpgrade", "AutoBuffRotation", "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoOpenPortal", "AutoNextPortal"}) do
-        if State[key] == true then autoCount = autoCount + 1 end
-    end
-    SetAdminDiagnostic("Auto Play", tostring(autoCount) .. " task(s) enabled", true)
-    SetAdminDiagnostic("Free Cam", freeCamActive and "Active" or "Inactive", true)
-end
-
-CreateButton(AdminPage, "↻ Refresh Diagnostics", 11, RefreshAdminDiagnostics)
-CreateSection(AdminPage, "LIVE ACTIVITY LOG", 12)
-CreateHint(AdminPage, "Recent Hub events. The log is kept in memory and resets when the script is re-executed.", 13, 28)
-CreateButton(AdminPage, "Clear Activity Log", 14, function()
-    table.clear(AdminActivityEntries)
-    if AdminActivityLabel then AdminActivityLabel.Text = "No activity yet." end
-    AddAdminActivity("Activity log cleared", "INFO")
-end)
-
-local AdminLogFrame = Instance.new("Frame")
-AdminLogFrame.Size = UDim2.new(1, -10, 0, 220)
-AdminLogFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-AdminLogFrame.BorderSizePixel = 0
-AdminLogFrame.LayoutOrder = 15
-AdminLogFrame.ZIndex = 12
-AdminLogFrame.Parent = AdminPage
-local AdminLogCorner = Instance.new("UICorner")
-AdminLogCorner.CornerRadius = UDim.new(0, 6)
-AdminLogCorner.Parent = AdminLogFrame
-local AdminLogScroll = Instance.new("ScrollingFrame")
-AdminLogScroll.Size = UDim2.new(1, -12, 1, -12)
-AdminLogScroll.Position = UDim2.new(0, 6, 0, 6)
-AdminLogScroll.BackgroundTransparency = 1
-AdminLogScroll.BorderSizePixel = 0
-AdminLogScroll.ScrollBarThickness = 4
-AdminLogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-AdminLogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-AdminLogScroll.ZIndex = 13
-AdminLogScroll.Parent = AdminLogFrame
-AdminActivityLabel = Instance.new("TextLabel")
-AdminActivityLabel.Size = UDim2.new(1, -8, 0, 0)
-AdminActivityLabel.AutomaticSize = Enum.AutomaticSize.Y
-AdminActivityLabel.BackgroundTransparency = 1
-AdminActivityLabel.Text = "No activity yet."
-AdminActivityLabel.TextColor3 = Color3.fromRGB(190, 195, 210)
-AdminActivityLabel.TextSize = 11
-AdminActivityLabel.Font = Enum.Font.Code
-AdminActivityLabel.TextXAlignment = Enum.TextXAlignment.Left
-AdminActivityLabel.TextYAlignment = Enum.TextYAlignment.Top
-AdminActivityLabel.TextWrapped = true
-AdminActivityLabel.ZIndex = 14
-AdminActivityLabel.Parent = AdminLogScroll
-
-AddAdminActivity("Admin diagnostics initialized", "INFO")
-RefreshAdminDiagnostics()
-
-task.spawn(function()
-    while ScreenGui and ScreenGui.Parent do
-        task.wait(5)
-        if not IsBlackScreenAutoPlayPriority() then
-            pcall(RefreshAdminDiagnostics)
         end
     end
 end)
