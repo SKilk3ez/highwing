@@ -1,6 +1,54 @@
 -- Keep script-level state in a private environment so large feature sets do not
 -- exceed Lua/Luau's 200 active-local limit. Executor globals remain readable.
-local _octoputBaseEnv = (type(getfenv) == "function" and getfenv(1)) or _G
+local _octoputBaseEnv = _G
+pcall(function()
+    if type(getgenv) == "function" then
+        local globalEnv = getgenv()
+        if type(globalEnv) == "table" then
+            _octoputBaseEnv = globalEnv
+        end
+    end
+end)
+
+-- The Hub may be executed again without the player leaving the game. Cancel the
+-- previous run before creating new workers so Auto Place / Webhook cannot overlap.
+local _octoputRunRegistryKey = "__OCTOPUT_HUB_ACTIVE_RUN"
+local _octoputPreviousRun = rawget(_octoputBaseEnv, _octoputRunRegistryKey)
+if type(_octoputPreviousRun) == "table" then
+    _octoputPreviousRun.cancelled = true
+    if type(task) == "table" and type(task.cancel) == "function" then
+        for _, thread in ipairs(_octoputPreviousRun.threads or {}) do
+            pcall(task.cancel, thread)
+        end
+    end
+    for index = #(_octoputPreviousRun.cleanups or {}), 1, -1 do
+        local cleanup = _octoputPreviousRun.cleanups[index]
+        if type(cleanup) == "function" then
+            pcall(cleanup)
+        end
+    end
+end
+
+local _octoputCurrentRun = { cancelled = false, threads = {}, cleanups = {} }
+rawset(_octoputBaseEnv, _octoputRunRegistryKey, _octoputCurrentRun)
+
+local function IsOctoputRunActive()
+    return not _octoputCurrentRun.cancelled
+        and rawget(_octoputBaseEnv, _octoputRunRegistryKey) == _octoputCurrentRun
+end
+
+local function StartManagedLoop(callback)
+    local thread = task.spawn(callback)
+    table.insert(_octoputCurrentRun.threads, thread)
+    return thread
+end
+
+local function RegisterOctoputCleanup(callback)
+    if type(callback) == "function" then
+        table.insert(_octoputCurrentRun.cleanups, callback)
+    end
+end
+
 local _octoputPrivateEnv = setmetatable({}, { __index = _octoputBaseEnv })
 if type(setfenv) == "function" then
     -- setfenv is invoked by pcall: level 1 is pcall and level 2 is this chunk.
@@ -654,10 +702,20 @@ function SaveConfig()
     if not ok then
         return
     end
-    if type(makefolder) == "function" and type(isfolder) == "function" and not isfolder("OctoputHub") then
-        pcall(makefolder, "OctoputHub")
+    if type(makefolder) == "function" then
+        local folderReady = false
+        if type(isfolder) == "function" then
+            local folderOk, folderExists = pcall(isfolder, "OctoputHub")
+            folderReady = folderOk and folderExists == true
+        end
+        if not folderReady then
+            pcall(makefolder, "OctoputHub")
+        end
     end
-    pcall(writefile, CONFIG_FILE, payload)
+    local writeOk, writeError = pcall(writefile, CONFIG_FILE, payload)
+    if not writeOk then
+        warn("[OctoputHub Config] Save failed: " .. tostring(writeError))
+    end
 end
 
 function ApplySavedTable(saved)
@@ -787,7 +845,15 @@ function LoadConfig()
     end
 end
 
-LoadConfig()
+function SafeStartupStep(label, callback)
+    local ok, result = pcall(callback)
+    if not ok then
+        warn("[OctoputHub Startup] " .. tostring(label) .. " failed: " .. tostring(result))
+    end
+    return ok, result
+end
+
+SafeStartupStep("Load config", LoadConfig)
 -- Only one Event matchmaking target can be active at a time.
 if State.AutoFindMatch and State.AutoFindMistyMatch then
     State.AutoFindMistyMatch = false
@@ -826,7 +892,17 @@ local function BindViewportScale()
     end
     ApplyHubScale()
 end
-workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(BindViewportScale)
+local currentCameraConnection = workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(BindViewportScale)
+RegisterOctoputCleanup(function()
+    if currentCameraConnection then
+        currentCameraConnection:Disconnect()
+        currentCameraConnection = nil
+    end
+    if viewportConnection then
+        viewportConnection:Disconnect()
+        viewportConnection = nil
+    end
+end)
 BindViewportScale()
 
 EVENT_LEVEL_ID = "summer2_event"
@@ -2875,8 +2951,8 @@ function ReadCurrentStageName()
     return "Unknown Stage"
 end
 
-task.spawn(function()
-    while ScreenGui.Parent do
+StartManagedLoop(function()
+    while IsOctoputRunActive() and ScreenGui and ScreenGui.Parent do
         task.wait(IsBlackScreenAutoPlayPriority() and 1 or 0.25)
 
         if State.BlackScreen then
@@ -4582,9 +4658,17 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
             TweenService:Create(Indicator, tweenInfo, { Position = UDim2.new(0, 3, 0.5, -8) }):Play()
         end
 
-        SaveConfig()
+        local saveOk, saveError = pcall(SaveConfig)
+        if not saveOk then
+            warn("[OctoputHub Config] Toggle save failed: " .. tostring(saveError))
+        end
         if callback then
-            task.spawn(callback, isON)
+            task.spawn(function()
+                local callbackOk, callbackError = pcall(callback, isON)
+                if not callbackOk then
+                    warn("[OctoputHub Toggle] " .. tostring(title) .. " callback failed: " .. tostring(callbackError))
+                end
+            end)
         end
     end)
 
@@ -5679,8 +5763,8 @@ function NotifySkyPortalDrop(itemId, gained, total)
     end)
 end
 
-task.spawn(function()
-    while true do
+StartManagedLoop(function()
+    while IsOctoputRunActive() do
         task.wait(IsBlackScreenAutoPlayPriority() and 3 or 1)
         local ok, err = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
@@ -5903,7 +5987,7 @@ function RefreshPortalUI()
     end
     PortalStatus.Text = string.format("Found %d portal type(s). Select portals and tiers, then enable Auto Open Portal.", #portals)
 end
-RefreshPortalTierUI()
+SafeStartupStep("Portal tier UI", RefreshPortalTierUI)
 PortalRefreshButton.MouseButton1Click:Connect(RefreshPortalUI)
 CreateToggle(PortalPage, "Auto Open Portal", "AutoOpenPortal", 4)
 CreateToggle(PortalPage, "Auto Next Portal (Win / Lose)", "AutoNextPortal", 5)
@@ -5911,8 +5995,8 @@ CreateToggle(PortalPage, "Auto Next Portal (Win / Lose)", "AutoNextPortal", 5)
 portalOpenBusy = false
 portalLastRefresh = 0
 portalOpenedUUIDs = {}
-task.spawn(function()
-    while task.wait(1) do
+StartManagedLoop(function()
+    while IsOctoputRunActive() and task.wait(1) do
         if State.AutoOpenPortal and not portalOpenBusy and IsInLobby() then
             portalOpenBusy = true
             local ok, err = pcall(function()
@@ -6451,8 +6535,12 @@ CreateHint(EventPage, "Claims completed quests only. Event quests marked for NPC
 CreateSection(EventPage, "SHARED OPTIONS", 11)
 CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 12)
 CreateSection(EventPage, "Pick Card", 13)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 14)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 17)
+SafeStartupStep("Event buff priority UI", function()
+    CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 14)
+end)
+SafeStartupStep("Event debuff priority UI", function()
+    CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 17)
+end)
 CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 20)
 
 WebhookStatus = nil
@@ -6746,7 +6834,11 @@ CreateHint(MiscPage, "Extreme: hides live enemy models, shadows, particles, ligh
 -- Restore the user's saved preference after the tag listeners and UI have initialized.
 if State.EnemyPerformanceMode then
     task.defer(function()
-        if State.EnemyPerformanceMode then ApplyEnemyPerformanceMode(true) end
+        if State.EnemyPerformanceMode then
+            SafeStartupStep("Restore Enemy Performance Mode", function()
+                ApplyEnemyPerformanceMode(true)
+            end)
+        end
     end)
 end
 CreateToggle(MiscPage, "Auto Hide GUI on Execute", "AutoHideGUIOnExecute", 6, function(isON)
@@ -6800,6 +6892,30 @@ HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "
     SetGameUIScreenshotHidden(isON)
     if ScreenGui then ScreenGui.Enabled = not isON end
 end)
+RegisterOctoputCleanup(function()
+    local restoreScreenshot = State.HideGUIForScreenshots == true
+    local restorePerformance = State.PerformanceMode == true
+    local restoreEnemyPerformance = State.EnemyPerformanceMode == true
+    local restoreBlackScreen = State.BlackScreen == true
+
+    -- Clear the old run's mode flags first. ApplyBlackScreen(false) normally
+    -- reapplies Performance Mode when its flag is still on; that must not happen
+    -- while tearing down a previous execution.
+    State.HideGUIForScreenshots = false
+    State.PerformanceMode = false
+    State.EnemyPerformanceMode = false
+    State.BlackScreen = false
+
+    if freeCamActive then pcall(SetFreeCam, false) end
+    if restoreScreenshot then
+        pcall(SetGameUIScreenshotHidden, false)
+        if ScreenGui then ScreenGui.Enabled = true end
+    end
+    if restorePerformance then pcall(ApplyPerformanceMode, false) end
+    if restoreEnemyPerformance then pcall(ApplyEnemyPerformanceMode, false) end
+    if restoreBlackScreen then pcall(ApplyBlackScreen, false) end
+end)
+
 local function RefreshHideScreenshotToggleVisual()
     if not HideScreenshotGUIToggle then return end
     local switchButton = HideScreenshotGUIToggle:FindFirstChildWhichIsA("TextButton")
@@ -7228,6 +7344,14 @@ pcall(function()
         end)
     end)
 end)
+if antiAfkConnection then
+    RegisterOctoputCleanup(function()
+        if antiAfkConnection then
+            antiAfkConnection:Disconnect()
+            antiAfkConnection = nil
+        end
+    end)
+end
 
 -- [[ SUMMON ]] --
 -- Watches the selected live banner and stops as soon as a newly obtained target unit is detected.
@@ -7591,7 +7715,7 @@ local function SnipeStart()
 
     task.spawn(function()
         local launchedSummons = 0
-        while SnipeRuntime.Running do
+        while IsOctoputRunActive() and SnipeRuntime.Running do
             if not player.Parent then SnipeStop("Player unavailable") break end
 
             local liveUnits = SnipeGetBannerUnitData(selectedBanner)
@@ -7637,7 +7761,7 @@ local function SnipeStart()
                     Color3.fromRGB(100, 190, 255))
 
                 local foundUnitId = nil
-                while batch.done < batchSize do
+                while IsOctoputRunActive() and batch.done < batchSize do
                     task.wait(0.2)
                     local liveOwned = SnipeFindOwnedUnits() or owned
                     local hasTarget, unitId = SnipeHasNewTarget(liveOwned, targetSnapshot, State.SnipeTargets)
@@ -7735,18 +7859,18 @@ SnipeRefreshButton = CreateButton(SummonPage, "Refresh Banners / Units", 11, fun
 end)
 SnipeStatusLabel = SnipeMakeLabel(SummonPage, "Status: Idle", 12, 34, Color3.fromRGB(190, 210, 230))
 SnipeStartButton = CreateButton(SummonPage, "Start Summon", 13, SnipeStart)
-SnipeBuildBannerList()
-SnipeBuildUnitList()
+SafeStartupStep("Summon banner list", SnipeBuildBannerList)
+SafeStartupStep("Summon target list", SnipeBuildUnitList)
 SnipeModeButton.Text = "Summon Mode: " .. (State.SnipeSummonCount == 10 and "10x" or "1x") .. " (click to switch)"
 
 AllowSave = true
 if State.BlackScreen then
-    ApplyBlackScreen(true)
+    SafeStartupStep("Restore BlackScreen", function() ApplyBlackScreen(true) end)
 end
 if State.PerformanceMode then
-    ApplyPerformanceMode(true)
+    SafeStartupStep("Restore Performance Mode", function() ApplyPerformanceMode(true) end)
 end
-RefreshUnitConfigUI()
+SafeStartupStep("Refresh Unit Configuration", RefreshUnitConfigUI)
 
 -- Estimate the next upgrade price from live unit stats first, then unit data.
 -- Unknown prices for non-maxed units fall back to 0 instead of math.huge so
@@ -7857,8 +7981,8 @@ function GetNextFarmUpgradeCost(myUnits)
 end
 
 -- Run upgrades in their own worker so a slow upgrade request cannot stall Auto Place.
-task.spawn(function()
-    while true do
+StartManagedLoop(function()
+    while IsOctoputRunActive() do
         task.wait(IsBlackScreenAutoPlayPriority() and 0.75 or 0.5)
         local upgradeOk, upgradeErr = pcall(function()
         if State.AutoUpgrade and not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
@@ -8088,8 +8212,8 @@ function SendBuffActiveRequest(runtime, entry, now)
     end)
 end
 
-task.spawn(function()
-    while true do
+StartManagedLoop(function()
+    while IsOctoputRunActive() do
         task.wait(0.1)
         local rotationOk, rotationErr = pcall(function()
             if not State.AutoBuffRotation then
@@ -8328,8 +8452,8 @@ task.spawn(function()
     end
 end)
 
-task.spawn(function()
-    while true do
+StartManagedLoop(function()
+    while IsOctoputRunActive() do
         local priorityMode = IsBlackScreenAutoPlayPriority()
         task.wait(priorityMode and 0.75 or 0.5)
         local workerOk, workerError = pcall(function()
@@ -8492,8 +8616,8 @@ end)
 lastMatchmakingRequest = 0
 lastQuestClaim = 0
 lastAutoQuestClaimScan = 0
-task.spawn(function()
-    while true do
+StartManagedLoop(function()
+    while IsOctoputRunActive() do
         task.wait(1.5)
         local mmOk, mmErr = pcall(function()
 
@@ -8663,8 +8787,8 @@ function MarkWebhookEnd(reason)
     StartWebhookEndSend(reason)
 end
 
-task.spawn(function()
-    while true do
+StartManagedLoop(function()
+    while IsOctoputRunActive() do
         task.wait(0.2)
         local loopOk, loopError = pcall(function()
             local dataFolder = workspace:FindFirstChild("_DATA")
@@ -8932,7 +9056,7 @@ task.spawn(function()
     end
 end)
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
+local rightShiftConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if not gameProcessed and input.KeyCode == Enum.KeyCode.RightShift then
         if State.HideGUIForScreenshots == true then
             State.HideGUIForScreenshots = false
@@ -8943,6 +9067,12 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         else
             MainFrame.Visible = not MainFrame.Visible
         end
+    end
+end)
+RegisterOctoputCleanup(function()
+    if rightShiftConnection then
+        rightShiftConnection:Disconnect()
+        rightShiftConnection = nil
     end
 end)
 
