@@ -32,18 +32,18 @@ end
 local _octoputCurrentRun = { cancelled = false, threads = {}, cleanups = {} }
 rawset(_octoputBaseEnv, _octoputRunRegistryKey, _octoputCurrentRun)
 
-function IsOctoputRunActive()
+local function IsOctoputRunActive()
     return not _octoputCurrentRun.cancelled
         and rawget(_octoputBaseEnv, _octoputRunRegistryKey) == _octoputCurrentRun
 end
 
-function StartManagedLoop(callback)
+local function StartManagedLoop(callback)
     local thread = task.spawn(callback)
     table.insert(_octoputCurrentRun.threads, thread)
     return thread
 end
 
-function RegisterOctoputCleanup(callback)
+local function RegisterOctoputCleanup(callback)
     if type(callback) == "function" then
         table.insert(_octoputCurrentRun.cleanups, callback)
     end
