@@ -6893,15 +6893,27 @@ HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "
     if ScreenGui then ScreenGui.Enabled = not isON end
 end)
 RegisterOctoputCleanup(function()
+    local restoreScreenshot = State.HideGUIForScreenshots == true
+    local restorePerformance = State.PerformanceMode == true
+    local restoreEnemyPerformance = State.EnemyPerformanceMode == true
+    local restoreBlackScreen = State.BlackScreen == true
+
+    -- Clear the old run's mode flags first. ApplyBlackScreen(false) normally
+    -- reapplies Performance Mode when its flag is still on; that must not happen
+    -- while tearing down a previous execution.
+    State.HideGUIForScreenshots = false
+    State.PerformanceMode = false
+    State.EnemyPerformanceMode = false
+    State.BlackScreen = false
+
     if freeCamActive then pcall(SetFreeCam, false) end
-    if State.HideGUIForScreenshots == true then
+    if restoreScreenshot then
         pcall(SetGameUIScreenshotHidden, false)
         if ScreenGui then ScreenGui.Enabled = true end
     end
-    if State.PerformanceMode == true then pcall(ApplyPerformanceMode, false) end
-    if State.EnemyPerformanceMode == true then pcall(ApplyEnemyPerformanceMode, false) end
-    -- BlackScreen is restored after the other visual modes so the world ends visible.
-    if State.BlackScreen == true then pcall(ApplyBlackScreen, false) end
+    if restorePerformance then pcall(ApplyPerformanceMode, false) end
+    if restoreEnemyPerformance then pcall(ApplyEnemyPerformanceMode, false) end
+    if restoreBlackScreen then pcall(ApplyBlackScreen, false) end
 end)
 
 local function RefreshHideScreenshotToggleVisual()
