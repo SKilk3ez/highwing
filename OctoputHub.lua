@@ -458,7 +458,10 @@ State = {
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
     AutoFindMatch = false,
+    AutoFindMistyMatch = false,
     AutoEventQuests = false,
+    AutoClaimDailyQuests = false,
+    AutoClaimEventQuests = false,
     AutoPickCards = false,
     AutoReplay = true,
     WebhookURL = "",
@@ -495,7 +498,9 @@ State = {
 function IsBlackScreenAutoPlayPriority()
     if State.BlackScreen ~= true then return false end
     if not (State.AutoPlace or State.AutoUpgrade or State.AutoBuffRotation
-        or State.AutoFindMatch or State.AutoEventQuests or State.AutoPickCards) then
+        or State.AutoFindMatch or State.AutoFindMistyMatch
+        or State.AutoEventQuests or State.AutoClaimDailyQuests
+        or State.AutoClaimEventQuests or State.AutoPickCards) then
         return false
     end
     return workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
@@ -601,7 +606,10 @@ function CopyStateForSave()
         AutoBuffRotation = State.AutoBuffRotation,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
+        AutoFindMistyMatch = State.AutoFindMistyMatch,
         AutoEventQuests = State.AutoEventQuests,
+        AutoClaimDailyQuests = State.AutoClaimDailyQuests,
+        AutoClaimEventQuests = State.AutoClaimEventQuests,
         AutoPickCards = State.AutoPickCards,
         AutoReplay = State.AutoReplay,
         WebhookURL = State.WebhookURL,
@@ -658,7 +666,8 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoFindMistyMatch", "AutoEventQuests",
+        "AutoClaimDailyQuests", "AutoClaimEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -779,6 +788,10 @@ function LoadConfig()
 end
 
 LoadConfig()
+-- Only one Event matchmaking target can be active at a time.
+if State.AutoFindMatch and State.AutoFindMistyMatch then
+    State.AutoFindMistyMatch = false
+end
 -- Auto Open Portal is intentionally session-only and always starts disabled.
 State.AutoOpenPortal = false
 -- Free Cam is also session-only; never restore a Scriptable camera automatically.
@@ -857,6 +870,7 @@ end
 function IsInLobby()
     return workspace:FindFirstChild("_LOBBIES") ~= nil
         or workspace:FindFirstChild("enel_ship") ~= nil
+        or workspace:FindFirstChild("_swordsmith_area") ~= nil
         or game.PlaceId == 8304191830
 end
 
@@ -4507,29 +4521,6 @@ function CreateHint(parent, text, layoutOrder, height)
     return Label
 end
 
-AdminActivityEntries = AdminActivityEntries or {}
-AdminActivityLabel = nil
-AdminDiagnosticsRows = {}
-
-function AddAdminActivity(message, level)
-    local entry = {
-        time = os.date("%H:%M:%S"),
-        level = tostring(level or "INFO"),
-        message = tostring(message or ""),
-    }
-    table.insert(AdminActivityEntries, 1, entry)
-    while #AdminActivityEntries > 40 do
-        table.remove(AdminActivityEntries)
-    end
-    if AdminActivityLabel then
-        local lines = {}
-        for index, item in ipairs(AdminActivityEntries) do
-            table.insert(lines, string.format("[%s] [%s] %s", item.time, item.level, item.message))
-        end
-        AdminActivityLabel.Text = #lines > 0 and table.concat(lines, "\n") or "No activity yet."
-    end
-end
-
 function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
@@ -4592,9 +4583,6 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
         end
 
         SaveConfig()
-        if type(AddAdminActivity) == "function" then
-            AddAdminActivity(title .. (isON and " enabled" or " disabled"), isON and "INFO" or "WARN")
-        end
         if callback then
             task.spawn(callback, isON)
         end
@@ -4977,7 +4965,6 @@ EventPage = CreateTab("Event", 4)
 WebhookPage = CreateTab("Webhook", 5)
 MiscPage = CreateTab("Misc", 6)
 SummonPage = CreateTab("Summon", 7)
-AdminPage = CreateTab("Admin", 8)
 
 tabs["Auto Play"].Page.Visible = true
 tabs["Auto Play"].Button.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
@@ -5047,18 +5034,11 @@ AutoPlayStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 AutoPlayStatusLabel.ZIndex = 13
 AutoPlayStatusLabel.Parent = AutoPlayStatusCard
 
-AdminLastAutoPlayStatus = nil
 function UpdateAutoPlayStatus(text, color)
     if AutoPlayStatusLabel then
         AutoPlayStatusLabel.Text = "Auto Play: " .. text
         if color then
             AutoPlayStatusLabel.TextColor3 = color
-        end
-    end
-    if AdminLastAutoPlayStatus ~= tostring(text) then
-        AdminLastAutoPlayStatus = tostring(text)
-        if type(AddAdminActivity) == "function" then
-            AddAdminActivity("Auto Play: " .. tostring(text), color == Color3.fromRGB(255, 100, 100) and "ERROR" or "INFO")
         end
     end
 end
@@ -6037,7 +6017,7 @@ EventStatusLabel = Instance.new("TextLabel")
 EventStatusLabel.Size = UDim2.new(1, -20, 1, 0)
 EventStatusLabel.Position = UDim2.new(0, 10, 0, 0)
 EventStatusLabel.BackgroundTransparency = 1
-EventStatusLabel.Text = "Target Event: Summer Hunt (summer2_event) | Status: Idle"
+EventStatusLabel.Text = "Target Event: Select an event below | Status: Idle"
 EventStatusLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
 EventStatusLabel.TextSize = 12
 EventStatusLabel.Font = Enum.Font.GothamMedium
@@ -6045,9 +6025,13 @@ EventStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 EventStatusLabel.ZIndex = 13
 EventStatusLabel.Parent = EventStatusCard
 
-function UpdateEventStatus(text, color)
+function UpdateEventStatus(text, color, eventName)
     if EventStatusLabel then
-        EventStatusLabel.Text = "Target: Summer Hunt | " .. text
+        local target = eventName
+        if not target then
+            target = State.AutoFindMistyMatch and "Misty Village" or "Summer Hunt"
+        end
+        EventStatusLabel.Text = "Target: " .. target .. " | " .. tostring(text or "Idle")
         if color then
             EventStatusLabel.TextColor3 = color
         end
@@ -6075,6 +6059,269 @@ function RequestSummerHuntMatchmaking()
         return false
     end
     return result ~= false
+end
+
+
+-- Misty Village uses the game's shared village clock and stage-unlock state.
+-- Never guess the phase locally: the game core is authoritative for Day/Night/Blood Moon.
+local mistyVillageCore = nil
+local mistyVillageClient = nil
+local mistyVillageServicesRetryAt = 0
+local mistyMatchmakingLastRequest = 0
+local mistyMatchmakingBusy = false
+
+local function GetMistyVillageServices()
+    if mistyVillageCore and mistyVillageClient then
+        return mistyVillageCore, mistyVillageClient
+    end
+    if os.clock() < mistyVillageServicesRetryAt then
+        return nil, nil, "Misty Village services are not ready"
+    end
+
+    local ok, services = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then
+            error("ReplicatedStorage.src.Loader is unavailable")
+        end
+        local Loader = require(loaderModule)
+        local core = Loader.load_core_service(game, "SwordsmithServiceCore")
+        local client = Loader.load_client_service(game, "SwordsmithServiceClient")
+        if type(core) ~= "table" or type(core.is_night) ~= "function"
+            or type(core.is_blood_moon) ~= "function" then
+            error("SwordsmithServiceCore clock API is unavailable")
+        end
+        if type(client) ~= "table" or type(client.get_choice_state) ~= "function" then
+            error("SwordsmithServiceClient stage-state API is unavailable")
+        end
+        return { core = core, client = client }
+    end)
+
+    if not ok then
+        mistyVillageServicesRetryAt = os.clock() + 10
+        return nil, nil, tostring(services)
+    end
+
+    mistyVillageCore = services.core
+    mistyVillageClient = services.client
+    return mistyVillageCore, mistyVillageClient
+end
+
+local function GetMistyVillageTargetStage()
+    local core, client, serviceError = GetMistyVillageServices()
+    if not core or not client then
+        return nil, nil, serviceError or "Misty Village services unavailable"
+    end
+
+    local nightOk, isNight = pcall(core.is_night)
+    if not nightOk or type(isNight) ~= "boolean" then
+        return nil, nil, "Unable to read the shared Misty Village clock"
+    end
+
+    local candidates = {}
+    if not isNight then
+        table.insert(candidates, { id = "swordsmith_day", name = "Day Stage" })
+    else
+        local moonOk, isBloodMoon = pcall(core.is_blood_moon)
+        if not moonOk then
+            return nil, nil, "Unable to read Blood Moon state"
+        end
+        if isBloodMoon == true then
+            table.insert(candidates, { id = "swordsmith_blood_moon", name = "Blood Moon Stage" })
+        end
+        table.insert(candidates, { id = "swordsmith_night", name = "Night Stage" })
+        -- Day Stage is open during both phases and is a safe fallback when
+        -- the player's progression has not unlocked the current night stage.
+        table.insert(candidates, { id = "swordsmith_day", name = "Day Stage" })
+    end
+
+    local lastStageName = "Misty Village"
+    local lastLockMessage = "No available Misty Village stage"
+    for _, candidate in ipairs(candidates) do
+        lastStageName = candidate.name
+        local stateOk, choiceState = pcall(client.get_choice_state, candidate.id)
+        if not stateOk then
+            return nil, candidate.name, "Unable to check stage unlock state"
+        end
+        if type(choiceState) ~= "table" or not choiceState.locked then
+            return candidate.id, candidate.name
+        end
+        lastLockMessage = tostring(choiceState.message or choiceState.locked)
+            :gsub("<[^>]->", "")
+            :gsub("[%c]+", " ")
+    end
+
+    return nil, lastStageName, lastLockMessage
+end
+
+function RequestMistyVillageMatchmaking()
+    if mistyMatchmakingBusy or not IsInLobby() or IsMatchmaking() then
+        return false
+    end
+
+    local levelId, stageName, reason = GetMistyVillageTargetStage()
+    if not levelId then
+        UpdateEventStatus(
+            "Waiting for " .. tostring(stageName or "stage") .. ": " .. tostring(reason or "not available"),
+            Color3.fromRGB(255, 190, 80),
+            "Misty Village"
+        )
+        return false
+    end
+
+    local now = os.clock()
+    if now - mistyMatchmakingLastRequest < EVENT_MATCHMAKING_COOLDOWN then
+        return false
+    end
+
+    mistyMatchmakingLastRequest = now
+    mistyMatchmakingBusy = true
+    UpdateEventStatus("Requesting " .. stageName .. "...", Color3.fromRGB(255, 200, 70), "Misty Village")
+
+    local ok, result = pcall(InvokeEndpoint, "request_matchmaking", levelId)
+    mistyMatchmakingBusy = false
+    if not ok or result == false then
+        warn("[Octoput Hub Misty Village] Matchmaking request failed: " .. tostring(result))
+        UpdateEventStatus("Matchmaking request failed (" .. stageName .. ")", Color3.fromRGB(255, 100, 100), "Misty Village")
+        return false
+    end
+    return true
+end
+
+-- Auto-claim completed quests from the Quests UI's Daily and Event groups.
+-- The game validates completion with QuestClassesCore.is_quest_complete before redeem_quest.
+-- Quests requiring an NPC turn-in are skipped when block_button_completion is set.
+local autoQuestClaimRuntime = nil
+local autoQuestClaimRuntimeRetryAt = 0
+local autoQuestClaimAttemptAt = {}
+local autoQuestClaimBusy = false
+
+local function GetAutoQuestClaimRuntime()
+    if autoQuestClaimRuntime then
+        local session = autoQuestClaimRuntime.session
+        if session and session.quest_handler and autoQuestClaimRuntime.core then
+            return autoQuestClaimRuntime
+        end
+        autoQuestClaimRuntime = nil
+    end
+
+    if os.clock() < autoQuestClaimRuntimeRetryAt then
+        return nil
+    end
+
+    local ok, runtime = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then
+            error("ReplicatedStorage.src.Loader is unavailable")
+        end
+
+        local Loader = require(loaderModule)
+        local questService = Loader.load_client_service(game, "QuestServiceClient")
+        local questCore = Loader.load_core_service(game, "QuestClassesCore")
+        local session = questService and questService.session
+        if not session or not session.quest_handler then
+            error("QuestServiceClient session is not ready")
+        end
+        if type(questCore) ~= "table" or type(questCore.is_quest_complete) ~= "function" then
+            error("QuestClassesCore.is_quest_complete is unavailable")
+        end
+
+        return { session = session, core = questCore }
+    end)
+
+    if not ok or type(runtime) ~= "table" then
+        autoQuestClaimRuntimeRetryAt = os.clock() + 15
+        return nil
+    end
+
+    autoQuestClaimRuntime = runtime
+    return runtime
+end
+
+local function ClaimCompletedQuestsByType(runtime, questType, now)
+    local session = runtime.session
+    local handler = session and session.quest_handler
+    if not handler or type(handler.get_quests_by_type) ~= "function" then
+        return 0
+    end
+
+    local ok, quests = pcall(function()
+        return handler:get_quests_by_type(questType)
+    end)
+    if not ok or type(quests) ~= "table" then
+        return 0
+    end
+
+    local claimedCount = 0
+    for _, quest in pairs(quests) do
+        if type(quest) ~= "table" or type(quest.uuid) ~= "string"
+            or type(quest.quest_info) ~= "table" then
+            continue
+        end
+
+        local info = quest.quest_info
+        if info.block_button_completion == true then
+            continue
+        end
+        local expiry = tonumber(info.expiry_time)
+        if expiry and expiry <= os.time() then
+            continue
+        end
+
+        local lastAttempt = autoQuestClaimAttemptAt[quest.uuid] or 0
+        if now - lastAttempt < 45 then
+            continue
+        end
+
+        local completeOk, isComplete = pcall(function()
+            return runtime.core.is_quest_complete(session, quest)
+        end)
+        if not completeOk or isComplete ~= true then
+            continue
+        end
+
+        autoQuestClaimAttemptAt[quest.uuid] = now
+        local requestOk, requestResult = pcall(InvokeEndpoint, "redeem_quest", quest.uuid)
+        if requestOk and requestResult ~= false then
+            claimedCount = claimedCount + 1
+        elseif not requestOk then
+            warn("[Octoput Hub Auto Quest Claim] " .. questType .. " claim failed: " .. tostring(requestResult))
+        end
+        task.wait(0.25)
+    end
+
+    return claimedCount
+end
+
+local function AutoClaimCompletedQuests()
+    if autoQuestClaimBusy then return end
+    if not State.AutoClaimDailyQuests and not State.AutoClaimEventQuests then return end
+
+    autoQuestClaimBusy = true
+    local ok, err = pcall(function()
+        local runtime = GetAutoQuestClaimRuntime()
+        if not runtime then return end
+
+        local now = os.clock()
+        if State.AutoClaimDailyQuests then
+            ClaimCompletedQuestsByType(runtime, "daily", now)
+        end
+        if State.AutoClaimEventQuests then
+            ClaimCompletedQuestsByType(runtime, "event", now)
+        end
+
+        for uuid, attemptedAt in pairs(autoQuestClaimAttemptAt) do
+            if now - attemptedAt > 300 then
+                autoQuestClaimAttemptAt[uuid] = nil
+            end
+        end
+    end)
+    autoQuestClaimBusy = false
+
+    if not ok then
+        warn("[Octoput Hub Auto Quest Claim] " .. tostring(err))
+    end
 end
 
 function HandlePopups()
@@ -6132,28 +6379,81 @@ end
 
 eventAutomationStopped = false
 
-CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
-    -- Manually toggling Auto Find Match back on resumes event automation.
+local SummerAutoMatchToggle = nil
+local MistyAutoMatchToggle = nil
+
+local function SetEventToggleVisual(toggleFrame, enabled)
+    local switch = toggleFrame and toggleFrame:FindFirstChildWhichIsA("TextButton", true)
+    local indicator = switch and switch:FindFirstChild("Indicator")
+    if not switch or not indicator then return end
+
+    switch.BackgroundColor3 = enabled and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
+    indicator.Position = enabled and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+end
+
+local function DisableOtherEventTarget(otherStateKey, otherToggle)
+    if State[otherStateKey] then
+        State[otherStateKey] = false
+        SetEventToggleVisual(otherToggle, false)
+        SaveConfig()
+        if IsInLobby() and IsMatchmaking() then
+            pcall(InvokeEndpoint, "leave_matchmaking")
+            task.wait(1)
+        end
+    end
+end
+
+CreateSection(EventPage, "SUMMER EVENT", 1)
+SummerAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 2, function(isON)
     eventAutomationStopped = false
     if isON then
-        UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70))
+        DisableOtherEventTarget("AutoFindMistyMatch", MistyAutoMatchToggle)
+        UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70), "Summer Hunt")
         if IsInLobby() and not IsMatchmaking() then
             RequestSummerHuntMatchmaking()
         end
     else
-        UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180))
-        if IsInLobby() and IsMatchmaking() then
-            InvokeEndpoint("leave_matchmaking")
+        if not State.AutoFindMistyMatch then
+            UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180), "Summer Hunt")
+            if IsInLobby() and IsMatchmaking() then
+                InvokeEndpoint("leave_matchmaking")
+            end
         end
     end
 end)
+CreateToggle(EventPage, "Auto Claim Summer Bingo", "AutoEventQuests", 3)
 
-CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 2)
-CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 3)
-CreateSection(EventPage, "Pick Card", 4)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 5)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, "DebuffAvoid", 8)
-CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 11)
+CreateSection(EventPage, "MISTY VILLAGE", 4)
+MistyAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Misty Village)", "AutoFindMistyMatch", 5, function(isON)
+    eventAutomationStopped = false
+    if isON then
+        DisableOtherEventTarget("AutoFindMatch", SummerAutoMatchToggle)
+        UpdateEventStatus("Checking village clock...", Color3.fromRGB(255, 200, 70), "Misty Village")
+        if IsInLobby() and not IsMatchmaking() then
+            RequestMistyVillageMatchmaking()
+        end
+    else
+        if not State.AutoFindMatch then
+            UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180), "Misty Village")
+            if IsInLobby() and IsMatchmaking() then
+                InvokeEndpoint("leave_matchmaking")
+            end
+        end
+    end
+end)
+CreateHint(EventPage, "Automatically selects Day, Night, or Blood Moon using the game's shared village clock. Locked stages are not queued.", 6, 36)
+
+CreateSection(EventPage, "AUTO CLAIM QUESTS", 7)
+CreateToggle(EventPage, "Auto Claim Daily Quests", "AutoClaimDailyQuests", 8)
+CreateToggle(EventPage, "Auto Claim Event Quests", "AutoClaimEventQuests", 9)
+CreateHint(EventPage, "Claims completed quests only. Event quests marked for NPC turn-in are skipped and must be claimed from the required NPC.", 10, 34)
+
+CreateSection(EventPage, "SHARED OPTIONS", 11)
+CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 12)
+CreateSection(EventPage, "Pick Card", 13)
+CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 14)
+CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 17)
+CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 20)
 
 WebhookStatus = nil
 CreateTextBox(WebhookPage, "Discord Webhook URL", "https://discord.com/api/webhooks/...", 1, function(text)
@@ -6441,9 +6741,6 @@ end)
 CreateHint(MiscPage, "Hides every Unit model (all players and enemies) locally. Units are NOT destroyed; stats, hitboxes, attacks and gameplay remain active. Toggle off to restore visuals.", 3, 48)
 CreateToggle(MiscPage, "Enemy Performance Mode (Extreme · All · Stable)", "EnemyPerformanceMode", 4, function(isON)
     ApplyEnemyPerformanceMode(isON)
-    if type(AddAdminActivity) == "function" then
-        AddAdminActivity(isON and "Enemy Performance Mode enabled · Extreme / All / Stable" or "Enemy Performance Mode disabled · enemy visuals restored", "INFO")
-    end
 end)
 CreateHint(MiscPage, "Extreme: hides live enemy models, shadows, particles, lights, highlights and enemy-attached UI locally. Keeps enemy models, HP, Humanoids, movement, collision, hitboxes and combat logic intact. New enemies are handled by tag events, not per-frame scans.", 5, 58)
 -- Restore the user's saved preference after the tag listeners and UI have initialized.
@@ -6502,9 +6799,6 @@ HideScreenshotGUIToggle = CreateToggle(MiscPage, "Hide GUI (Screenshot Mode)", "
     -- and the complete Hub. Preserve each game's original Enabled state for restoration.
     SetGameUIScreenshotHidden(isON)
     if ScreenGui then ScreenGui.Enabled = not isON end
-    if type(AddAdminActivity) == "function" then
-        AddAdminActivity(isON and "Screenshot mode enabled · GUI hidden" or "Screenshot mode disabled · GUI restored", "INFO")
-    end
 end)
 local function RefreshHideScreenshotToggleVisual()
     if not HideScreenshotGUIToggle then return end
@@ -6853,6 +7147,7 @@ function HandleMatchEnd(gameFinished)
     -- Priority: Main tab controls always win over Event tab automation.
     -- Main order: Next (when available) > Main Replay > Main Leave.
     -- Event Replay is only a fallback when no Main action is selected.
+    local eventAutoFindActive = State.AutoFindMatch or State.AutoFindMistyMatch
     local nextKind = State.AutoNext and NextActionAvailable() or nil
     local mainActionSelected = State.AutoNext or State.MainAutoReplay or State.AutoLeave
     local action = nil
@@ -6863,9 +7158,9 @@ function HandleMatchEnd(gameFinished)
         action = "replay"
     elseif State.AutoLeave then
         action = "leave"
-    elseif not mainActionSelected and State.AutoFindMatch and State.AutoReplay then
+    elseif not mainActionSelected and eventAutoFindActive and State.AutoReplay then
         action = "replay"
-    elseif not mainActionSelected and State.AutoFindMatch and not State.AutoReplay then
+    elseif not mainActionSelected and eventAutoFindActive and not State.AutoReplay then
         action = "leave"
     end
     if not action then
@@ -6889,7 +7184,7 @@ function HandleMatchEnd(gameFinished)
         elseif action == "replay" then
             UpdateEventStatus("Match Finished! Voting Replay...", Color3.fromRGB(255, 170, 0))
             InvokeEndpoint("set_game_finished_vote", "replay")
-            if State.AutoFindMatch then
+            if eventAutoFindActive then
                 task.wait(8)
                 if gameFinished.Parent and gameFinished.Value == true then
                     UpdateEventStatus("Returning to Lobby for Next Match...", Color3.fromRGB(255, 100, 100))
@@ -8196,6 +8491,7 @@ end)
 
 lastMatchmakingRequest = 0
 lastQuestClaim = 0
+lastAutoQuestClaimScan = 0
 task.spawn(function()
     while true do
         task.wait(1.5)
@@ -8207,21 +8503,37 @@ task.spawn(function()
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         HandleMatchEnd(gameFinished)
 
-        if State.AutoFindMatch and not eventAutomationStopped then
+        if (State.AutoFindMatch or State.AutoFindMistyMatch) and not eventAutomationStopped then
             if IsInLobby() then
-                HandlePopups()
+                if State.AutoFindMatch then
+                    HandlePopups()
+                end
 
                 if IsMatchmaking() then
-                    UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
+                    if State.AutoFindMistyMatch then
+                        local _, stageName = GetMistyVillageTargetStage()
+                        UpdateEventStatus("In Queue (" .. tostring(stageName or "Misty Village") .. ")...", Color3.fromRGB(70, 200, 255), "Misty Village")
+                    else
+                        UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255), "Summer Hunt")
+                    end
                 else
-                    UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
-                    if os.clock() - lastMatchmakingRequest >= 5 then
-                        lastMatchmakingRequest = os.clock()
-                        InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                    if State.AutoFindMistyMatch then
+                        RequestMistyVillageMatchmaking()
+                    else
+                        UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70), "Summer Hunt")
+                        if os.clock() - lastMatchmakingRequest >= 5 then
+                            lastMatchmakingRequest = os.clock()
+                            RequestSummerHuntMatchmaking()
+                        end
                     end
                 end
             elseif not matchEndHandled then
-                UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
+                if State.AutoFindMistyMatch then
+                    local _, stageName = GetMistyVillageTargetStage()
+                    UpdateEventStatus("In Match (" .. tostring(stageName or "Misty Village") .. ")", Color3.fromRGB(100, 255, 100), "Misty Village")
+                else
+                    UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100), "Summer Hunt")
+                end
             end
         end
 
@@ -8244,9 +8556,15 @@ task.spawn(function()
             end
         end
 
-        if State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
+        if not State.AutoFindMistyMatch and State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
             lastQuestClaim = os.clock()
             InvokeEndpoint("claim_summer2_map_board_lines")
+        end
+
+        if (State.AutoClaimDailyQuests or State.AutoClaimEventQuests)
+            and os.clock() - lastAutoQuestClaimScan >= 20 then
+            lastAutoQuestClaimScan = os.clock()
+            task.spawn(AutoClaimCompletedQuests)
         end
         end)
         if not mmOk then
@@ -8303,7 +8621,6 @@ function StartWebhookEndSend(reason)
     local trackedPortalSnapshot = table.clone(skyPortalMatchDrops or {})
 
     print("[Octoput Hub Webhook] Sending match result. Trigger: " .. tostring(reason or "result"))
-    AddAdminActivity("Webhook send started (" .. tostring(reason or "result") .. ")", "INFO")
     task.spawn(function()
         local callOk, sendResult, sendError, retryDelay = pcall(SendEndWebhook, currencyBaseline, secretBaseline, secretAvailable, unitLinesSnapshot, trackedPortalSnapshot)
         -- A previous match's HTTP request may finish after a new match has begun.
@@ -8318,11 +8635,9 @@ function StartWebhookEndSend(reason)
             local finalDetails = GetResultDetails()
             webhookLastSentSettings = finalDetails and finalDetails.settings or nil
             print("[Octoput Hub Webhook] Match-end webhook confirmed sent.")
-            AddAdminActivity("Match-end webhook sent successfully", "SUCCESS")
         else
             local failure = callOk and tostring(sendError or "SendEndWebhook returned false") or tostring(sendResult)
             warn("[Octoput Hub Webhook] Send failed: " .. failure)
-            AddAdminActivity("Webhook send failed: " .. failure, "ERROR")
             webhookRetryAt = os.clock() + math.clamp(tonumber(retryDelay) or 8, 3, 120)
         end
     end)
@@ -8344,7 +8659,6 @@ function MarkWebhookEnd(reason)
             warn("[Octoput Hub Webhook] Unit snapshot failed: " .. tostring(snapshot))
         end
         print("[Octoput Hub Webhook] END DETECTED by " .. tostring(reason or "game result") .. ".")
-        AddAdminActivity("Match end detected (" .. tostring(reason or "game result") .. ")", "INFO")
     end
     StartWebhookEndSend(reason)
 end
@@ -8587,7 +8901,6 @@ task.spawn(function()
                 webhookResultsVisibleAtStart = resultsVisible
                 webhookResultSettingsAtStart = currentSettings
                 print("[Octoput Hub Webhook] Match start detected; reward baseline captured.")
-                AddAdminActivity("Match started · reward baseline captured", "INFO")
             end
 
             -- Sample unit stats while the match is alive, before the game tears down _UNITS.
@@ -8627,152 +8940,8 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
             if ScreenGui then ScreenGui.Enabled = true end
             SaveConfig()
             RefreshHideScreenshotToggleVisual()
-            if type(AddAdminActivity) == "function" then
-                AddAdminActivity("Screenshot mode disabled · GUI restored with Right Shift", "INFO")
-            end
         else
             MainFrame.Visible = not MainFrame.Visible
-        end
-    end
-end)
-
--- Admin page: live diagnostics and a bounded in-memory activity log.
-CreateSection(AdminPage, "SYSTEM DIAGNOSTICS", 1)
-CreateHint(AdminPage, "Live status checks for the Hub, automation, inventory reader and webhook monitor.", 2, 30)
-
-local function CreateAdminStatusRow(parent, title, layoutOrder)
-    local row = Instance.new("Frame")
-    row.Size = UDim2.new(1, -10, 0, 34)
-    row.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
-    row.LayoutOrder = layoutOrder
-    row.ZIndex = 12
-    row.Parent = parent
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 5)
-    corner.Parent = row
-    local name = Instance.new("TextLabel")
-    name.Size = UDim2.new(0.62, -8, 1, 0)
-    name.Position = UDim2.new(0, 10, 0, 0)
-    name.BackgroundTransparency = 1
-    name.Text = title
-    name.TextColor3 = Color3.fromRGB(210, 215, 230)
-    name.TextSize = 12
-    name.Font = Enum.Font.Gotham
-    name.TextXAlignment = Enum.TextXAlignment.Left
-    name.ZIndex = 13
-    name.Parent = row
-    local value = Instance.new("TextLabel")
-    value.Size = UDim2.new(0.38, -10, 1, 0)
-    value.Position = UDim2.new(0.62, 0, 0, 0)
-    value.BackgroundTransparency = 1
-    value.Text = "Checking..."
-    value.TextColor3 = Color3.fromRGB(160, 160, 180)
-    value.TextSize = 12
-    value.Font = Enum.Font.GothamBold
-    value.TextXAlignment = Enum.TextXAlignment.Right
-    value.ZIndex = 13
-    value.Parent = row
-    AdminDiagnosticsRows[title] = value
-    return row
-end
-
-CreateAdminStatusRow(AdminPage, "Hub UI", 3)
-CreateAdminStatusRow(AdminPage, "Webhook", 4)
-CreateAdminStatusRow(AdminPage, "Webhook Monitor", 5)
-CreateAdminStatusRow(AdminPage, "Match State", 6)
-CreateAdminStatusRow(AdminPage, "Inventory Reader", 7)
-CreateAdminStatusRow(AdminPage, "Unit Stats Capture", 8)
-CreateAdminStatusRow(AdminPage, "Auto Play", 9)
-CreateAdminStatusRow(AdminPage, "Free Cam", 10)
-
-local function SetAdminDiagnostic(name, value, good)
-    local label = AdminDiagnosticsRows[name]
-    if label then
-        label.Text = tostring(value)
-        label.TextColor3 = good and Color3.fromRGB(90, 225, 145)
-            or Color3.fromRGB(255, 185, 85)
-    end
-end
-
-function RefreshAdminDiagnostics()
-    SetAdminDiagnostic("Hub UI", ScreenGui and ScreenGui.Parent and "Running" or "Unavailable", ScreenGui and ScreenGui.Parent ~= nil)
-    local webhookUrl = NormalizeWebhookUrl(State.WebhookURL)
-    local webhookProblem = WebhookProblem(webhookUrl)
-    local webhookReady = webhookProblem == nil
-    SetAdminDiagnostic("Webhook", not webhookReady and (State.WebhookOnEnd and "Enabled · URL invalid" or "URL not configured")
-        or (State.WebhookOnEnd and "Enabled · Ready" or "Ready · Sending off"), webhookReady)
-    SetAdminDiagnostic("Webhook Monitor", webhookMonitorStarted and "Running" or "Not started", webhookMonitorStarted == true)
-    SetAdminDiagnostic("Match State", webhookGameWasActive and "In Match"
-        or (webhookEndDetected and "Result detected" or "Idle"), true)
-
-    -- Avoid running the expensive executor/session scan on the 5-second UI refresh.
-    -- Actual profile availability is checked by the match-end reward reader.
-    local inventoryReaderLoaded = type(ReadInventoryRewardSnapshot) == "function"
-    SetAdminDiagnostic("Inventory Reader", inventoryReaderLoaded and "Loaded · checked at match end" or "Unavailable", inventoryReaderLoaded)
-
-    local unitCount = 0
-    for _ in pairs(webhookUnitStatsByInstance or {}) do unitCount = unitCount + 1 end
-    SetAdminDiagnostic("Unit Stats Capture", tostring(unitCount) .. " unit(s) tracked", unitCount > 0 or not webhookGameWasActive)
-
-    local autoCount = 0
-    for _, key in ipairs({"AutoPlace", "AutoUpgrade", "AutoBuffRotation", "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoOpenPortal", "AutoNextPortal"}) do
-        if State[key] == true then autoCount = autoCount + 1 end
-    end
-    SetAdminDiagnostic("Auto Play", tostring(autoCount) .. " task(s) enabled", true)
-    SetAdminDiagnostic("Free Cam", freeCamActive and "Active" or "Inactive", true)
-end
-
-CreateButton(AdminPage, "↻ Refresh Diagnostics", 11, RefreshAdminDiagnostics)
-CreateSection(AdminPage, "LIVE ACTIVITY LOG", 12)
-CreateHint(AdminPage, "Recent Hub events. The log is kept in memory and resets when the script is re-executed.", 13, 28)
-CreateButton(AdminPage, "Clear Activity Log", 14, function()
-    table.clear(AdminActivityEntries)
-    if AdminActivityLabel then AdminActivityLabel.Text = "No activity yet." end
-    AddAdminActivity("Activity log cleared", "INFO")
-end)
-
-local AdminLogFrame = Instance.new("Frame")
-AdminLogFrame.Size = UDim2.new(1, -10, 0, 220)
-AdminLogFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
-AdminLogFrame.BorderSizePixel = 0
-AdminLogFrame.LayoutOrder = 15
-AdminLogFrame.ZIndex = 12
-AdminLogFrame.Parent = AdminPage
-local AdminLogCorner = Instance.new("UICorner")
-AdminLogCorner.CornerRadius = UDim.new(0, 6)
-AdminLogCorner.Parent = AdminLogFrame
-local AdminLogScroll = Instance.new("ScrollingFrame")
-AdminLogScroll.Size = UDim2.new(1, -12, 1, -12)
-AdminLogScroll.Position = UDim2.new(0, 6, 0, 6)
-AdminLogScroll.BackgroundTransparency = 1
-AdminLogScroll.BorderSizePixel = 0
-AdminLogScroll.ScrollBarThickness = 4
-AdminLogScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-AdminLogScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-AdminLogScroll.ZIndex = 13
-AdminLogScroll.Parent = AdminLogFrame
-AdminActivityLabel = Instance.new("TextLabel")
-AdminActivityLabel.Size = UDim2.new(1, -8, 0, 0)
-AdminActivityLabel.AutomaticSize = Enum.AutomaticSize.Y
-AdminActivityLabel.BackgroundTransparency = 1
-AdminActivityLabel.Text = "No activity yet."
-AdminActivityLabel.TextColor3 = Color3.fromRGB(190, 195, 210)
-AdminActivityLabel.TextSize = 11
-AdminActivityLabel.Font = Enum.Font.Code
-AdminActivityLabel.TextXAlignment = Enum.TextXAlignment.Left
-AdminActivityLabel.TextYAlignment = Enum.TextYAlignment.Top
-AdminActivityLabel.TextWrapped = true
-AdminActivityLabel.ZIndex = 14
-AdminActivityLabel.Parent = AdminLogScroll
-
-AddAdminActivity("Admin diagnostics initialized", "INFO")
-RefreshAdminDiagnostics()
-
-task.spawn(function()
-    while ScreenGui and ScreenGui.Parent do
-        task.wait(5)
-        if not IsBlackScreenAutoPlayPriority() then
-            pcall(RefreshAdminDiagnostics)
         end
     end
 end)
