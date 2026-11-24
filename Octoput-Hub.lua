@@ -458,6 +458,7 @@ State = {
     PlaceRangeMin = 0,
     PlaceRangeMax = 100,
     AutoFindMatch = false,
+    AutoFindMistyMatch = false,
     AutoEventQuests = false,
     AutoPickCards = false,
     AutoReplay = true,
@@ -495,7 +496,8 @@ State = {
 function IsBlackScreenAutoPlayPriority()
     if State.BlackScreen ~= true then return false end
     if not (State.AutoPlace or State.AutoUpgrade or State.AutoBuffRotation
-        or State.AutoFindMatch or State.AutoEventQuests or State.AutoPickCards) then
+        or State.AutoFindMatch or State.AutoFindMistyMatch
+        or State.AutoEventQuests or State.AutoPickCards) then
         return false
     end
     return workspace:FindFirstChild("_UNITS") ~= nil and not IsInLobby()
@@ -601,6 +603,7 @@ function CopyStateForSave()
         AutoBuffRotation = State.AutoBuffRotation,
         PlacePercent = State.PlacePercent,
         AutoFindMatch = State.AutoFindMatch,
+        AutoFindMistyMatch = State.AutoFindMistyMatch,
         AutoEventQuests = State.AutoEventQuests,
         AutoPickCards = State.AutoPickCards,
         AutoReplay = State.AutoReplay,
@@ -658,7 +661,7 @@ function ApplySavedTable(saved)
     end
     local boolKeys = {
         "AutoPlace", "AutoUpgrade", "AutoUpgradeFarmFirst", "AutoBuffRotation",
-        "AutoFindMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
+        "AutoFindMatch", "AutoFindMistyMatch", "AutoEventQuests", "AutoPickCards", "AutoReplay", "WebhookOnEnd", "BlackScreen", "PerformanceMode", "EnemyPerformanceMode", "AutoHideGUIOnExecute",
         "PlaceHybridGround", "PlaceHybridHill", "AutoStart", "MainAutoReplay", "AutoNext", "AutoLeave", "AntiAFK",
     }
     for _, key in ipairs(boolKeys) do
@@ -779,6 +782,10 @@ function LoadConfig()
 end
 
 LoadConfig()
+-- Only one Event matchmaking target can be active at a time.
+if State.AutoFindMatch and State.AutoFindMistyMatch then
+    State.AutoFindMistyMatch = false
+end
 -- Auto Open Portal is intentionally session-only and always starts disabled.
 State.AutoOpenPortal = false
 -- Free Cam is also session-only; never restore a Scriptable camera automatically.
@@ -857,6 +864,7 @@ end
 function IsInLobby()
     return workspace:FindFirstChild("_LOBBIES") ~= nil
         or workspace:FindFirstChild("enel_ship") ~= nil
+        or workspace:FindFirstChild("_swordsmith_area") ~= nil
         or game.PlaceId == 8304191830
 end
 
@@ -6037,7 +6045,7 @@ EventStatusLabel = Instance.new("TextLabel")
 EventStatusLabel.Size = UDim2.new(1, -20, 1, 0)
 EventStatusLabel.Position = UDim2.new(0, 10, 0, 0)
 EventStatusLabel.BackgroundTransparency = 1
-EventStatusLabel.Text = "Target Event: Summer Hunt (summer2_event) | Status: Idle"
+EventStatusLabel.Text = "Target Event: Select an event below | Status: Idle"
 EventStatusLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
 EventStatusLabel.TextSize = 12
 EventStatusLabel.Font = Enum.Font.GothamMedium
@@ -6045,9 +6053,13 @@ EventStatusLabel.TextXAlignment = Enum.TextXAlignment.Left
 EventStatusLabel.ZIndex = 13
 EventStatusLabel.Parent = EventStatusCard
 
-function UpdateEventStatus(text, color)
+function UpdateEventStatus(text, color, eventName)
     if EventStatusLabel then
-        EventStatusLabel.Text = "Target: Summer Hunt | " .. text
+        local target = eventName
+        if not target then
+            target = State.AutoFindMistyMatch and "Misty Village" or "Summer Hunt"
+        end
+        EventStatusLabel.Text = "Target: " .. target .. " | " .. tostring(text or "Idle")
         if color then
             EventStatusLabel.TextColor3 = color
         end
@@ -6075,6 +6087,130 @@ function RequestSummerHuntMatchmaking()
         return false
     end
     return result ~= false
+end
+
+
+-- Misty Village uses the game's shared village clock and stage-unlock state.
+-- Never guess the phase locally: the game core is authoritative for Day/Night/Blood Moon.
+local mistyVillageCore = nil
+local mistyVillageClient = nil
+local mistyVillageServicesRetryAt = 0
+local mistyMatchmakingLastRequest = 0
+local mistyMatchmakingBusy = false
+
+local function GetMistyVillageServices()
+    if mistyVillageCore and mistyVillageClient then
+        return mistyVillageCore, mistyVillageClient
+    end
+    if os.clock() < mistyVillageServicesRetryAt then
+        return nil, nil, "Misty Village services are not ready"
+    end
+
+    local ok, services = pcall(function()
+        local src = ReplicatedStorage:FindFirstChild("src")
+        local loaderModule = src and src:FindFirstChild("Loader")
+        if not loaderModule then
+            error("ReplicatedStorage.src.Loader is unavailable")
+        end
+        local Loader = require(loaderModule)
+        local core = Loader.load_core_service(game, "SwordsmithServiceCore")
+        local client = Loader.load_client_service(game, "SwordsmithServiceClient")
+        if type(core) ~= "table" or type(core.is_night) ~= "function"
+            or type(core.is_blood_moon) ~= "function" then
+            error("SwordsmithServiceCore clock API is unavailable")
+        end
+        if type(client) ~= "table" or type(client.get_choice_state) ~= "function" then
+            error("SwordsmithServiceClient stage-state API is unavailable")
+        end
+        return { core = core, client = client }
+    end)
+
+    if not ok then
+        mistyVillageServicesRetryAt = os.clock() + 10
+        return nil, nil, tostring(services)
+    end
+
+    mistyVillageCore = services.core
+    mistyVillageClient = services.client
+    return mistyVillageCore, mistyVillageClient
+end
+
+local function GetMistyVillageTargetStage()
+    local core, client, serviceError = GetMistyVillageServices()
+    if not core or not client then
+        return nil, nil, serviceError or "Misty Village services unavailable"
+    end
+
+    local nightOk, isNight = pcall(core.is_night)
+    if not nightOk or type(isNight) ~= "boolean" then
+        return nil, nil, "Unable to read the shared Misty Village clock"
+    end
+
+    local levelId
+    local stageName
+    if not isNight then
+        levelId = "swordsmith_day"
+        stageName = "Day Stage"
+    else
+        local moonOk, isBloodMoon = pcall(core.is_blood_moon)
+        if not moonOk then
+            return nil, nil, "Unable to read Blood Moon state"
+        end
+        if isBloodMoon == true then
+            levelId = "swordsmith_blood_moon"
+            stageName = "Blood Moon Stage"
+        else
+            levelId = "swordsmith_night"
+            stageName = "Night Stage"
+        end
+    end
+
+    local stateOk, choiceState = pcall(client.get_choice_state, levelId)
+    if not stateOk then
+        return nil, stageName, "Unable to check stage unlock state"
+    end
+    if type(choiceState) == "table" and choiceState.locked then
+        local lockMessage = tostring(choiceState.message or choiceState.locked)
+            :gsub("<[^>]->", "")
+            :gsub("[%c]+", " ")
+        return nil, stageName, lockMessage
+    end
+
+    return levelId, stageName
+end
+
+function RequestMistyVillageMatchmaking()
+    if mistyMatchmakingBusy or not IsInLobby() or IsMatchmaking() then
+        return false
+    end
+
+    local levelId, stageName, reason = GetMistyVillageTargetStage()
+    if not levelId then
+        UpdateEventStatus(
+            "Waiting for " .. tostring(stageName or "stage") .. ": " .. tostring(reason or "not available"),
+            Color3.fromRGB(255, 190, 80),
+            "Misty Village"
+        )
+        return false
+    end
+
+    local now = os.clock()
+    if now - mistyMatchmakingLastRequest < EVENT_MATCHMAKING_COOLDOWN then
+        return false
+    end
+
+    mistyMatchmakingLastRequest = now
+    mistyMatchmakingBusy = true
+    UpdateEventStatus("Requesting " .. stageName .. "...", Color3.fromRGB(255, 200, 70), "Misty Village")
+
+    local ok, result = pcall(InvokeEndpoint, "request_matchmaking", levelId)
+    mistyMatchmakingBusy = false
+    if not ok or result == false then
+        warn("[Octoput Hub Misty Village] Matchmaking request failed: " .. tostring(result))
+        UpdateEventStatus("Matchmaking request failed (" .. stageName .. ")", Color3.fromRGB(255, 100, 100), "Misty Village")
+        return false
+    end
+    return true
 end
 
 function HandlePopups()
@@ -6132,28 +6268,76 @@ end
 
 eventAutomationStopped = false
 
-CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 1, function(isON)
-    -- Manually toggling Auto Find Match back on resumes event automation.
+local SummerAutoMatchToggle = nil
+local MistyAutoMatchToggle = nil
+
+local function SetEventToggleVisual(toggleFrame, enabled)
+    local switch = toggleFrame and toggleFrame:FindFirstChildWhichIsA("TextButton", true)
+    local indicator = switch and switch:FindFirstChild("Indicator")
+    if not switch or not indicator then return end
+
+    switch.BackgroundColor3 = enabled and Color3.fromRGB(0, 168, 255) or Color3.fromRGB(45, 45, 58)
+    indicator.Position = enabled and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+end
+
+local function DisableOtherEventTarget(otherStateKey, otherToggle)
+    if State[otherStateKey] then
+        State[otherStateKey] = false
+        SetEventToggleVisual(otherToggle, false)
+        SaveConfig()
+        if IsInLobby() and IsMatchmaking() then
+            pcall(InvokeEndpoint, "leave_matchmaking")
+            task.wait(1)
+        end
+    end
+end
+
+CreateSection(EventPage, "SUMMER EVENT", 1)
+SummerAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Summer Hunt)", "AutoFindMatch", 2, function(isON)
     eventAutomationStopped = false
     if isON then
-        UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70))
+        DisableOtherEventTarget("AutoFindMistyMatch", MistyAutoMatchToggle)
+        UpdateEventStatus("Starting Matchmaking...", Color3.fromRGB(255, 200, 70), "Summer Hunt")
         if IsInLobby() and not IsMatchmaking() then
             RequestSummerHuntMatchmaking()
         end
     else
-        UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180))
-        if IsInLobby() and IsMatchmaking() then
-            InvokeEndpoint("leave_matchmaking")
+        if not State.AutoFindMistyMatch then
+            UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180), "Summer Hunt")
+            if IsInLobby() and IsMatchmaking() then
+                InvokeEndpoint("leave_matchmaking")
+            end
         end
     end
 end)
+CreateToggle(EventPage, "Auto Event Quests (Summer Bingo)", "AutoEventQuests", 3)
 
-CreateToggle(EventPage, "Auto Event Quests", "AutoEventQuests", 2)
-CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 3)
-CreateSection(EventPage, "Pick Card", 4)
-CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 5)
-CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, "DebuffAvoid", 8)
-CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 11)
+CreateSection(EventPage, "MISTY VILLAGE", 4)
+MistyAutoMatchToggle = CreateToggle(EventPage, "Auto Find Match (Misty Village)", "AutoFindMistyMatch", 5, function(isON)
+    eventAutomationStopped = false
+    if isON then
+        DisableOtherEventTarget("AutoFindMatch", SummerAutoMatchToggle)
+        UpdateEventStatus("Checking village clock...", Color3.fromRGB(255, 200, 70), "Misty Village")
+        if IsInLobby() and not IsMatchmaking() then
+            RequestMistyVillageMatchmaking()
+        end
+    else
+        if not State.AutoFindMatch then
+            UpdateEventStatus("Status: Idle", Color3.fromRGB(160, 160, 180), "Misty Village")
+            if IsInLobby() and IsMatchmaking() then
+                InvokeEndpoint("leave_matchmaking")
+            end
+        end
+    end
+end)
+CreateHint(EventPage, "Automatically selects Day, Night, or Blood Moon using the game's shared village clock. Locked stages are not queued.", 6, 36)
+
+CreateSection(EventPage, "SHARED OPTIONS", 7)
+CreateToggle(EventPage, "Auto Pick Cards", "AutoPickCards", 8)
+CreateSection(EventPage, "Pick Card", 9)
+CreatePriorityEditor(EventPage, "Buff Card Selection", "Checked buffs are preferred, from top to bottom. Leave all unchecked to keep automatic selection.", BUFF_DEFS, "BuffPriority", 10)
+CreatePriorityEditor(EventPage, "Debuff Card Selection", "Checked debuffs are avoided, from top to bottom. Leave all unchecked to keep automatic selection.", DEBUFF_DEFS, 13)
+CreateToggle(EventPage, "Auto Replay Match", "AutoReplay", 16)
 
 WebhookStatus = nil
 CreateTextBox(WebhookPage, "Discord Webhook URL", "https://discord.com/api/webhooks/...", 1, function(text)
@@ -6853,6 +7037,7 @@ function HandleMatchEnd(gameFinished)
     -- Priority: Main tab controls always win over Event tab automation.
     -- Main order: Next (when available) > Main Replay > Main Leave.
     -- Event Replay is only a fallback when no Main action is selected.
+    local eventAutoFindActive = State.AutoFindMatch or State.AutoFindMistyMatch
     local nextKind = State.AutoNext and NextActionAvailable() or nil
     local mainActionSelected = State.AutoNext or State.MainAutoReplay or State.AutoLeave
     local action = nil
@@ -6863,9 +7048,9 @@ function HandleMatchEnd(gameFinished)
         action = "replay"
     elseif State.AutoLeave then
         action = "leave"
-    elseif not mainActionSelected and State.AutoFindMatch and State.AutoReplay then
+    elseif not mainActionSelected and eventAutoFindActive and State.AutoReplay then
         action = "replay"
-    elseif not mainActionSelected and State.AutoFindMatch and not State.AutoReplay then
+    elseif not mainActionSelected and eventAutoFindActive and not State.AutoReplay then
         action = "leave"
     end
     if not action then
@@ -6889,7 +7074,7 @@ function HandleMatchEnd(gameFinished)
         elseif action == "replay" then
             UpdateEventStatus("Match Finished! Voting Replay...", Color3.fromRGB(255, 170, 0))
             InvokeEndpoint("set_game_finished_vote", "replay")
-            if State.AutoFindMatch then
+            if eventAutoFindActive then
                 task.wait(8)
                 if gameFinished.Parent and gameFinished.Value == true then
                     UpdateEventStatus("Returning to Lobby for Next Match...", Color3.fromRGB(255, 100, 100))
@@ -8207,21 +8392,37 @@ task.spawn(function()
         local gameFinished = dataFolder and dataFolder:FindFirstChild("GameFinished")
         HandleMatchEnd(gameFinished)
 
-        if State.AutoFindMatch and not eventAutomationStopped then
+        if (State.AutoFindMatch or State.AutoFindMistyMatch) and not eventAutomationStopped then
             if IsInLobby() then
-                HandlePopups()
+                if State.AutoFindMatch then
+                    HandlePopups()
+                end
 
                 if IsMatchmaking() then
-                    UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255))
+                    if State.AutoFindMistyMatch then
+                        local _, stageName = GetMistyVillageTargetStage()
+                        UpdateEventStatus("In Queue (" .. tostring(stageName or "Misty Village") .. ")...", Color3.fromRGB(70, 200, 255), "Misty Village")
+                    else
+                        UpdateEventStatus("In Queue (Summer Hunt)...", Color3.fromRGB(70, 200, 255), "Summer Hunt")
+                    end
                 else
-                    UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70))
-                    if os.clock() - lastMatchmakingRequest >= 5 then
-                        lastMatchmakingRequest = os.clock()
-                        InvokeEndpoint("request_matchmaking", EVENT_LEVEL_ID)
+                    if State.AutoFindMistyMatch then
+                        RequestMistyVillageMatchmaking()
+                    else
+                        UpdateEventStatus("Requesting Matchmaking...", Color3.fromRGB(255, 200, 70), "Summer Hunt")
+                        if os.clock() - lastMatchmakingRequest >= 5 then
+                            lastMatchmakingRequest = os.clock()
+                            RequestSummerHuntMatchmaking()
+                        end
                     end
                 end
             elseif not matchEndHandled then
-                UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100))
+                if State.AutoFindMistyMatch then
+                    local _, stageName = GetMistyVillageTargetStage()
+                    UpdateEventStatus("In Match (" .. tostring(stageName or "Misty Village") .. ")", Color3.fromRGB(100, 255, 100), "Misty Village")
+                else
+                    UpdateEventStatus("In Match (Summer Hunt)", Color3.fromRGB(100, 255, 100), "Summer Hunt")
+                end
             end
         end
 
@@ -8244,7 +8445,7 @@ task.spawn(function()
             end
         end
 
-        if State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
+        if State.AutoFindMatch and State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
             lastQuestClaim = os.clock()
             InvokeEndpoint("claim_summer2_map_board_lines")
         end
