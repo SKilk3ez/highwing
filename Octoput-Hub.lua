@@ -8445,7 +8445,7 @@ task.spawn(function()
             end
         end
 
-        if State.AutoFindMatch and State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
+        if not State.AutoFindMistyMatch and State.AutoEventQuests and os.clock() - lastQuestClaim >= 15 then
             lastQuestClaim = os.clock()
             InvokeEndpoint("claim_summer2_map_board_lines")
         end
