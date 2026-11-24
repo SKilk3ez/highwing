@@ -6146,37 +6146,40 @@ local function GetMistyVillageTargetStage()
         return nil, nil, "Unable to read the shared Misty Village clock"
     end
 
-    local levelId
-    local stageName
+    local candidates = {}
     if not isNight then
-        levelId = "swordsmith_day"
-        stageName = "Day Stage"
+        table.insert(candidates, { id = "swordsmith_day", name = "Day Stage" })
     else
         local moonOk, isBloodMoon = pcall(core.is_blood_moon)
         if not moonOk then
             return nil, nil, "Unable to read Blood Moon state"
         end
         if isBloodMoon == true then
-            levelId = "swordsmith_blood_moon"
-            stageName = "Blood Moon Stage"
-        else
-            levelId = "swordsmith_night"
-            stageName = "Night Stage"
+            table.insert(candidates, { id = "swordsmith_blood_moon", name = "Blood Moon Stage" })
         end
+        table.insert(candidates, { id = "swordsmith_night", name = "Night Stage" })
+        -- Day Stage is open during both phases and is a safe fallback when
+        -- the player's progression has not unlocked the current night stage.
+        table.insert(candidates, { id = "swordsmith_day", name = "Day Stage" })
     end
 
-    local stateOk, choiceState = pcall(client.get_choice_state, levelId)
-    if not stateOk then
-        return nil, stageName, "Unable to check stage unlock state"
-    end
-    if type(choiceState) == "table" and choiceState.locked then
-        local lockMessage = tostring(choiceState.message or choiceState.locked)
+    local lastStageName = "Misty Village"
+    local lastLockMessage = "No available Misty Village stage"
+    for _, candidate in ipairs(candidates) do
+        lastStageName = candidate.name
+        local stateOk, choiceState = pcall(client.get_choice_state, candidate.id)
+        if not stateOk then
+            return nil, candidate.name, "Unable to check stage unlock state"
+        end
+        if type(choiceState) ~= "table" or not choiceState.locked then
+            return candidate.id, candidate.name
+        end
+        lastLockMessage = tostring(choiceState.message or choiceState.locked)
             :gsub("<[^>]->", "")
             :gsub("[%c]+", " ")
-        return nil, stageName, lockMessage
     end
 
-    return levelId, stageName
+    return nil, lastStageName, lastLockMessage
 end
 
 function RequestMistyVillageMatchmaking()
