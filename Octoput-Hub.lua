@@ -8142,7 +8142,9 @@ end
 
 StartManagedLoop(function()
     while IsOctoputRunActive() do
-        task.wait(0.1)
+        -- Keep the precise 0.1s cadence while rotation is active, but avoid
+        -- waking this worker ten times per second when the feature is disabled.
+        task.wait(State.AutoBuffRotation and 0.1 or 0.75)
         local rotationOk, rotationErr = pcall(function()
             if not State.AutoBuffRotation then
                 SetBuffRotationStatus("Auto Buff: Disabled", Color3.fromRGB(160, 160, 180))
