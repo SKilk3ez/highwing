@@ -1205,30 +1205,29 @@ function GetPlayerUnits()
     return myUnits
 end
 
-function IsFarmUnit(unit)
+function IsFarmUnit(unit, knownData)
     if not unit then return false end
 
-    -- Match the game's unit_static_is_farm() implementation:
-    -- Units[unitId].tags must contain the exact "Farm" tag.
-    -- LookupUnitData reads the same canonical ReplicatedStorage unit database.
-    local ids = {
-        GetRawUnitId(unit),
-        GetUnitId(unit),
-    }
+    -- Match the game's unit_static_is_farm() implementation exactly.
+    local function hasFarmTag(data)
+        if type(data) == "table" and type(data.tags) == "table" then
+            for _, tag in pairs(data.tags) do
+                if tag == "Farm" then return true end
+            end
+        end
+        return false
+    end
+    if hasFarmTag(knownData) then return true end
 
+    local ids = { GetRawUnitId(unit), GetUnitId(unit) }
     for _, id in ipairs(ids) do
         if id and id ~= "" then
             local data = LookupUnitData(id)
-            if type(data) == "table" and type(data.tags) == "table" then
-                for _, tag in pairs(data.tags) do
-                    if tag == "Farm" then
-                        return true
-                    end
-                end
+            if data ~= knownData and hasFarmTag(data) then
+                return true
             end
         end
     end
-
     return false
 end
 function GetEquippedUnitList()
@@ -1292,20 +1291,24 @@ function GetEquippedUnitList()
 end
 
 function EnrichEquipped(list)
+    -- Resolve the collection service once; the equipped squad has at most six slots.
+    local ucs = nil
+    local serviceOk, serviceResult = pcall(function()
+        local Loader = require(ReplicatedStorage.src.Loader)
+        return Loader.load_client_service(game, "UnitCollectionServiceClient")
+    end)
+    if serviceOk then ucs = serviceResult end
+
     for _, info in ipairs(list) do
         local unitId = info.unitId
-        pcall(function()
-            if info.uuid then
-                local Loader = require(ReplicatedStorage.src.Loader)
-                local ucs = Loader.load_client_service(game, "UnitCollectionServiceClient")
-                if ucs and ucs.get_equipped_unit_by_uuid then
-                    local owned = ucs.get_equipped_unit_by_uuid(info.uuid)
-                    if owned then
-                        unitId = owned.unit_id or owned.unitId or owned.id or unitId
-                    end
+        if info.uuid and ucs and type(ucs.get_equipped_unit_by_uuid) == "function" then
+            pcall(function()
+                local owned = ucs.get_equipped_unit_by_uuid(info.uuid)
+                if owned then
+                    unitId = owned.unit_id or owned.unitId or owned.id or unitId
                 end
-            end
-        end)
+            end)
+        end
         if not unitId then
             local _, foundId = LookupUnitData(info.name)
             unitId = foundId or info.name
@@ -2064,11 +2067,63 @@ end
 -- Match equipped units against the actual placed model using both internal IDs
 -- and display names. Some units (notably farm units with renamed/evolved IDs)
 -- do not expose the same identifier in the loadout and in workspace._UNITS.
-function CountPlacedInfo(info)
-    if not info then return 0 end
+-- Build one identity snapshot per Auto Place cycle. This keeps the exact
+-- normalized-ID/name matching rules while avoiding rescanning every deployed
+-- model for each equipped unit.
+function BuildPlacedUnitSnapshot()
+    local snapshot = { localUnits = {}, globalUnits = {} }
 
-    -- Use exact normalized identities only. Partial substring matching can make
-    -- one farm unit (e.g. Bulby) accidentally count as another equipped farm.
+    local function buildAliases(unit)
+        local aliases = {}
+        local function add(value)
+            local key = NormalizeName(value)
+            if key ~= "" and key ~= "unit" then aliases[key] = true end
+        end
+
+        local rawId = GetRawUnitId(unit)
+        local normalizedId = GetUnitId(unit)
+        add(rawId)
+        add(normalizedId)
+        add(unit.Name)
+        add(State.UnitNames[rawId])
+        add(State.UnitNames[normalizedId])
+
+        local stats = unit:FindFirstChild("_stats")
+        if stats then
+            for _, fieldName in ipairs({ "name", "display_name", "unit_name" }) do
+                local field = stats:FindFirstChild(fieldName)
+                if field then add(field.Value) end
+            end
+        end
+
+        local placedData = LookupUnitData(rawId)
+        if type(placedData) == "table" then
+            add(placedData.name)
+            add(placedData.display_name)
+            add(placedData.displayName)
+        end
+        return aliases
+    end
+
+    for _, unit in ipairs(GetPlayerUnits()) do
+        if unit and unit.Parent then
+            table.insert(snapshot.localUnits, buildAliases(unit))
+        end
+    end
+
+    local unitsFolder = workspace:FindFirstChild("_UNITS")
+    if unitsFolder then
+        for _, unit in ipairs(unitsFolder:GetChildren()) do
+            if unit:IsA("Model") and unit:FindFirstChild("_stats") then
+                table.insert(snapshot.globalUnits, buildAliases(unit))
+            end
+        end
+    end
+    return snapshot
+end
+
+local function CountMatchingSnapshot(info, records)
+    if not info then return 0 end
     local wanted = {}
     local function addWanted(value)
         local key = NormalizeName(value)
@@ -2084,42 +2139,13 @@ function CountPlacedInfo(info)
         addWanted(equippedData.display_name)
         addWanted(equippedData.displayName)
     end
-
     if next(wanted) == nil then return 0 end
 
     local count = 0
-    for _, unit in ipairs(GetPlayerUnits()) do
-        local actual = {}
-        local function addActual(value)
-            local key = NormalizeName(value)
-            if key ~= "" and key ~= "unit" then actual[key] = true end
-        end
-
-        local rawId = GetRawUnitId(unit)
-        addActual(rawId)
-        addActual(GetUnitId(unit))
-        addActual(unit.Name)
-        addActual(State.UnitNames[rawId])
-        addActual(State.UnitNames[GetUnitId(unit)])
-
-        local stats = unit:FindFirstChild("_stats")
-        if stats then
-            for _, fieldName in ipairs({ "name", "display_name", "unit_name" }) do
-                local field = stats:FindFirstChild(fieldName)
-                if field then addActual(field.Value) end
-            end
-        end
-
-        local placedData = LookupUnitData(rawId)
-        if type(placedData) == "table" then
-            addActual(placedData.name)
-            addActual(placedData.display_name)
-            addActual(placedData.displayName)
-        end
-
+    for _, actual in ipairs(records or {}) do
         for key in pairs(wanted) do
             if actual[key] then
-                count = count + 1
+                count += 1
                 break
             end
         end
@@ -2127,70 +2153,21 @@ function CountPlacedInfo(info)
     return count
 end
 
+function CountPlacedInfo(info, snapshot)
+    if snapshot then
+        return CountMatchingSnapshot(info, snapshot.localUnits)
+    end
+    -- Preserve standalone callers by building a fresh snapshot when omitted.
+    return CountMatchingSnapshot(info, BuildPlacedUnitSnapshot().localUnits)
+end
+
 -- Count a unit across the entire match, not just the local player.
 -- Some units (e.g. Windsong) use global_spawn_cap shared by the whole party.
-function CountGlobalPlacedInfo(info)
-    if not info then return 0 end
-
-    local wanted = {}
-    local function addWanted(value)
-        local key = NormalizeName(value)
-        if key ~= "" and key ~= "unit" then wanted[key] = true end
+function CountGlobalPlacedInfo(info, snapshot)
+    if snapshot then
+        return CountMatchingSnapshot(info, snapshot.globalUnits)
     end
-
-    addWanted(info.unitId)
-    addWanted(info.name)
-    addWanted(info.displayName)
-    local equippedData = LookupUnitData(info.unitId)
-    if type(equippedData) == "table" then
-        addWanted(equippedData.name)
-        addWanted(equippedData.display_name)
-        addWanted(equippedData.displayName)
-    end
-    if next(wanted) == nil then return 0 end
-
-    local unitsFolder = workspace:FindFirstChild("_UNITS")
-    if not unitsFolder then return 0 end
-
-    local count = 0
-    for _, unit in ipairs(unitsFolder:GetChildren()) do
-        if unit:IsA("Model") and unit:FindFirstChild("_stats") then
-            local actual = {}
-            local function addActual(value)
-                local key = NormalizeName(value)
-                if key ~= "" and key ~= "unit" then actual[key] = true end
-            end
-
-            local rawId = GetRawUnitId(unit)
-            local normalizedId = GetUnitId(unit)
-            addActual(rawId)
-            addActual(normalizedId)
-            addActual(unit.Name)
-            addActual(State.UnitNames[rawId])
-            addActual(State.UnitNames[normalizedId])
-
-            local stats = unit:FindFirstChild("_stats")
-            for _, fieldName in ipairs({ "name", "display_name", "unit_name" }) do
-                local field = stats:FindFirstChild(fieldName)
-                if field then addActual(field.Value) end
-            end
-
-            local placedData = LookupUnitData(rawId)
-            if type(placedData) == "table" then
-                addActual(placedData.name)
-                addActual(placedData.display_name)
-                addActual(placedData.displayName)
-            end
-
-            for key in pairs(wanted) do
-                if actual[key] then
-                    count = count + 1
-                    break
-                end
-            end
-        end
-    end
-    return count
+    return CountMatchingSnapshot(info, BuildPlacedUnitSnapshot().globalUnits)
 end
 
 function ResolvePlacementKind(unitId)
@@ -2213,7 +2190,7 @@ function ResolvePlacementKind(unitId)
     return "ground"
 end
 
-function CanPlaceConfigured(info, wave)
+function CanPlaceConfigured(info, wave, snapshot)
     local cfg = GetUnitConfig(info.unitId)
     if cfg and cfg.placeStartWave ~= nil and wave < cfg.placeStartWave then
         return false
@@ -2224,7 +2201,7 @@ function CanPlaceConfigured(info, wave)
     local data = LookupUnitData(info.unitId)
     local globalCap = tonumber(info.globalSpawnCap)
         or (type(data) == "table" and tonumber(data.global_spawn_cap))
-    if globalCap and CountGlobalPlacedInfo(info) >= globalCap then
+    if globalCap and CountGlobalPlacedInfo(info, snapshot) >= globalCap then
         return false
     end
 
@@ -2237,7 +2214,7 @@ function CanPlaceConfigured(info, wave)
     if localLimit then
         -- Use the same identity matching as placement confirmation. Farm units can
         -- expose a different runtime ID/name from their equipped collection record.
-        local placedCount = CountPlacedInfo(info)
+        local placedCount = CountPlacedInfo(info, snapshot)
         if placedCount >= localLimit then
             return false
         end
@@ -7806,7 +7783,7 @@ SafeStartupStep("Refresh Unit Configuration", RefreshUnitConfigUI)
 -- Estimate the next upgrade price from live unit stats first, then unit data.
 -- Unknown prices for non-maxed units fall back to 0 instead of math.huge so
 -- runtime-replicated units like Elfy (Sylph) are never skipped by AutoUpgrade.
-function GetNextUpgradeCost(unit)
+function GetNextUpgradeCost(unit, knownData)
     if not unit or not unit:FindFirstChild("_stats") then return math.huge end
     local stats = unit._stats
     local current = stats:FindFirstChild("upgrade")
@@ -7822,7 +7799,7 @@ function GetNextUpgradeCost(unit)
     -- Match the game's own pricing path:
     -- ceil(upgrade data cost * player_cost_scale * unit upgrade_cost_multiplier),
     -- with the _negate_high_cost cap applied by UnitServiceCore.
-    local data = LookupUnitData(GetRawUnitId(unit))
+    local data = knownData or LookupUnitData(GetRawUnitId(unit))
     local upgrades = type(data) == "table" and data.upgrade or nil
     local nextInfo = type(upgrades) == "table" and upgrades[curLvl + 1] or nil
     local baseCost = type(nextInfo) == "table"
@@ -7936,10 +7913,10 @@ StartManagedLoop(function()
                 local stats = unit:FindFirstChild("_stats")
                 local level = stats and stats:FindFirstChild("upgrade")
                 local maximum = stats and stats:FindFirstChild("max_upgrade")
-                local isFarm = IsFarmUnit(unit)
+                local rawId = GetRawUnitId(unit)
+                local data = LookupUnitData(rawId)
+                local isFarm = IsFarmUnit(unit, data)
                 if level then
-                    local rawId = GetRawUnitId(unit)
-                    local data = LookupUnitData(rawId)
                     local dataMax = type(data) == "table" and type(data.upgrade) == "table" and #data.upgrade or 0
                     local targetLevel = tonumber(maximum and maximum.Value) or dataMax
                     local cfg = GetUnitConfig(rawId) or GetUnitConfig(GetUnitId(unit))
@@ -8402,11 +8379,12 @@ StartManagedLoop(function()
 
         if not IsInLobby() and workspace:FindFirstChild("_UNITS") ~= nil then
             SyncReplicatedGameData()
-            local myUnits = GetPlayerUnits()
+            local myUnits = nil
             local wave = GetCurrentWave()
 
             if State.AutoPlace then
                 local equipped = EnrichEquipped(GetEquippedUnitList())
+                local placedSnapshot = BuildPlacedUnitSnapshot()
                 if #equipped > 0 then
                     -- Farm First prioritizes Farm placement first, then Farm upgrades.
                     -- Other units remain eligible whenever the next Farm placement or
@@ -8424,7 +8402,7 @@ StartManagedLoop(function()
                     if State.AutoUpgradeFarmFirst and State.AutoUpgrade then
                         local farmPlacementIncomplete = false
                         for _, info in ipairs(equipped) do
-                            if IsFarmInfo(info) and CanPlaceConfigured(info, wave) then
+                            if IsFarmInfo(info) and CanPlaceConfigured(info, wave, placedSnapshot) then
                                 farmPlacementIncomplete = true
                                 break
                             end
@@ -8437,6 +8415,7 @@ StartManagedLoop(function()
                                 end
                             end
                             if not holdOtherPlacementForFarmUpgrade then
+                                myUnits = myUnits or GetPlayerUnits()
                                 local nextFarmCost = GetNextFarmUpgradeCost(myUnits)
                                 if nextFarmCost and cashNow ~= nil and nextFarmCost <= cashNow then
                                     holdOtherPlacementForFarmUpgrade = true
@@ -8452,7 +8431,7 @@ StartManagedLoop(function()
                         for _, equippedInfo in ipairs(equipped) do
                             if tostring(equippedInfo.uuid or "") == uuid then info = equippedInfo break end
                         end
-                        local observed = info and CountPlacedInfo(info) or 0
+                        local observed = info and CountPlacedInfo(info, placedSnapshot) or 0
                         if (pending.countBefore and observed > pending.countBefore) or now - pending.time > 4 then
                             pendingSpawnRequests[uuid] = nil
                         end
@@ -8468,7 +8447,7 @@ StartManagedLoop(function()
                         local uuidKey = tostring(unitInfo.uuid or "")
                         if uuidKey ~= "" and not pendingSpawnRequests[uuidKey]
                             and (cashNow == nil or (tonumber(unitInfo.cost) or 0) <= cashNow)
-                            and CanPlaceConfigured(unitInfo, wave) then
+                            and CanPlaceConfigured(unitInfo, wave, placedSnapshot) then
                             if State.AutoUpgradeFarmFirst and IsFarmInfo(unitInfo) then
                                 table.insert(farmEligible, unitInfo)
                             elseif not holdOtherPlacementForFarmUpgrade then
@@ -8505,10 +8484,11 @@ StartManagedLoop(function()
                             end
                         end
                         for _, chosen in ipairs(eligible) do
+                            myUnits = myUnits or GetPlayerUnits()
                             local placeIndex = #myUnits + 1
                             local cframe, kind = GetPlacementCFrameForInfo(placeIndex, chosen)
                             if cframe then
-                                local countBefore = CountPlacedInfo(chosen)
+                                local countBefore = CountPlacedInfo(chosen, placedSnapshot)
                                 local ok = InvokeEndpoint("spawn_unit", chosen.uuid, cframe)
                                 if ok ~= false then
                                     pendingSpawnRequests[tostring(chosen.uuid)] = {
