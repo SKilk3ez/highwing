@@ -70,6 +70,13 @@ RunService = game:GetService("RunService")
 HttpService = game:GetService("HttpService")
 CollectionService = game:GetService("CollectionService")
 
+function AddCorner(parent, radius)
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = radius
+    corner.Parent = parent
+    return corner
+end
+
 player = Players.LocalPlayer
 playerGui = player:WaitForChild("PlayerGui")
 
@@ -148,9 +155,7 @@ FloatingButton.Image = ""
 FloatingButton.ScaleType = Enum.ScaleType.Fit
 FloatingButton.Parent = ScreenGui
 
-FloatingCorner = Instance.new("UICorner")
-FloatingCorner.CornerRadius = UDim.new(0, 16)
-FloatingCorner.Parent = FloatingButton
+AddCorner(FloatingButton, UDim.new(0, 16))
 FloatingStroke = Instance.new("UIStroke")
 FloatingStroke.Color = Color3.fromRGB(110, 115, 145)
 FloatingStroke.Transparency = 0.2
@@ -179,9 +184,7 @@ for index = 1, 3 do
     aura.Visible = false
     aura.ZIndex = FloatingButton.ZIndex - 1
     aura.Parent = FloatingButton
-    local auraCorner = Instance.new("UICorner")
-    auraCorner.CornerRadius = UDim.new(0, 19 + index * 3)
-    auraCorner.Parent = aura
+    AddCorner(aura, UDim.new(0, 19 + index * 3))
     local auraStroke = Instance.new("UIStroke")
     auraStroke.Name = "AuraStroke"
     auraStroke.Thickness = index == 1 and 3 or (index == 2 and 5 or 7)
@@ -227,9 +230,7 @@ MatchInfoPanel.BorderSizePixel = 0
 MatchInfoPanel.Visible = false
 MatchInfoPanel.ZIndex = 2
 MatchInfoPanel.Parent = ScreenGui
-MatchPanelCorner = Instance.new("UICorner")
-MatchPanelCorner.CornerRadius = UDim.new(0, 18)
-MatchPanelCorner.Parent = MatchInfoPanel
+AddCorner(MatchInfoPanel, UDim.new(0, 18))
 MatchPanelStroke = Instance.new("UIStroke")
 MatchPanelStroke.Color = Color3.fromRGB(105, 125, 190)
 MatchPanelStroke.Thickness = 2
@@ -246,9 +247,7 @@ PromoLogo.BorderSizePixel = 0
 PromoLogo.ScaleType = Enum.ScaleType.Fit
 PromoLogo.ZIndex = 3
 PromoLogo.Parent = MatchInfoPanel
-PromoLogoCorner = Instance.new("UICorner")
-PromoLogoCorner.CornerRadius = UDim.new(0, 14)
-PromoLogoCorner.Parent = PromoLogo
+AddCorner(PromoLogo, UDim.new(0, 14))
 PromoLogoFallback = Instance.new("TextLabel")
 PromoLogoFallback.Size = UDim2.fromScale(1, 1)
 PromoLogoFallback.BackgroundTransparency = 1
@@ -446,9 +445,7 @@ FloatingButton.Activated:Connect(function()
     MainFrame.Visible = not MainFrame.Visible
 end)
 
-MainCorner = Instance.new("UICorner")
-MainCorner.CornerRadius = UDim.new(0, 10)
-MainCorner.Parent = MainFrame
+AddCorner(MainFrame, UDim.new(0, 10))
 
 TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -20, 0, 35)
@@ -471,9 +468,7 @@ Sidebar.BorderSizePixel = 0
 Sidebar.ZIndex = 11
 Sidebar.Parent = MainFrame
 
-SidebarCorner = Instance.new("UICorner")
-SidebarCorner.CornerRadius = UDim.new(0, 8)
-SidebarCorner.Parent = Sidebar
+AddCorner(Sidebar, UDim.new(0, 8))
 
 SidebarList = Instance.new("UIListLayout")
 SidebarList.SortOrder = Enum.SortOrder.LayoutOrder
@@ -4513,9 +4508,7 @@ function CreateTab(name, layoutOrder)
     TabButton.ZIndex = 12
     TabButton.Parent = Sidebar
 
-    local TabCorner = Instance.new("UICorner")
-    TabCorner.CornerRadius = UDim.new(0, 6)
-    TabCorner.Parent = TabButton
+    AddCorner(TabButton, UDim.new(0, 6))
 
     local PageFrame = Instance.new("ScrollingFrame")
     PageFrame.Name = name .. "Page"
@@ -4604,9 +4597,7 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     ToggleContainer.ZIndex = 12
     ToggleContainer.Parent = parent
 
-    local ContainerCorner = Instance.new("UICorner")
-    ContainerCorner.CornerRadius = UDim.new(0, 6)
-    ContainerCorner.Parent = ToggleContainer
+    AddCorner(ToggleContainer, UDim.new(0, 6))
 
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -70, 1, 0)
@@ -4622,9 +4613,7 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     SwitchBtn.ZIndex = 13
     SwitchBtn.Parent = ToggleContainer
 
-    local SwitchCorner = Instance.new("UICorner")
-    SwitchCorner.CornerRadius = UDim.new(1, 0)
-    SwitchCorner.Parent = SwitchBtn
+    AddCorner(SwitchBtn, UDim.new(1, 0))
 
     local Indicator = Instance.new("Frame")
     Indicator.Name = "Indicator"
@@ -4634,9 +4623,7 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     Indicator.ZIndex = 14
     Indicator.Parent = SwitchBtn
 
-    local IndicatorCorner = Instance.new("UICorner")
-    IndicatorCorner.CornerRadius = UDim.new(1, 0)
-    IndicatorCorner.Parent = Indicator
+    AddCorner(Indicator, UDim.new(1, 0))
 
     SwitchBtn.MouseButton1Click:Connect(function()
         State[stateKey] = not State[stateKey]
@@ -4676,9 +4663,7 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
     Box.ZIndex = 12
     Box.Parent = parent
 
-    local Corner = Instance.new("UICorner")
-    Corner.CornerRadius = UDim.new(0, 6)
-    Corner.Parent = Box
+    AddCorner(Box, UDim.new(0, 6))
 
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -20, 0, 22)
@@ -4701,9 +4686,7 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
     Input.ZIndex = 13
     Input.Parent = Box
 
-    local InputCorner = Instance.new("UICorner")
-    InputCorner.CornerRadius = UDim.new(0, 4)
-    InputCorner.Parent = Input
+    AddCorner(Input, UDim.new(0, 4))
 
     local InputPad = Instance.new("UIPadding")
     InputPad.PaddingLeft = UDim.new(0, 8)
@@ -4730,9 +4713,7 @@ function CreateButton(parent, title, layoutOrder, onClick)
     Button.ZIndex = 12
     Button.Parent = parent
 
-    local Corner = Instance.new("UICorner")
-    Corner.CornerRadius = UDim.new(0, 6)
-    Corner.Parent = Button
+    AddCorner(Button, UDim.new(0, 6))
 
     Button.MouseButton1Click:Connect(function()
         if onClick then
@@ -4750,9 +4731,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     Card.ZIndex = 12
     Card.Parent = parent
 
-    local Corner = Instance.new("UICorner")
-    Corner.CornerRadius = UDim.new(0, 6)
-    Corner.Parent = Card
+    AddCorner(Card, UDim.new(0, 6))
 
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -20, 0, 22)
@@ -4769,9 +4748,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     Bar.ZIndex = 13
     Bar.Parent = Card
 
-    local BarCorner = Instance.new("UICorner")
-    BarCorner.CornerRadius = UDim.new(1, 0)
-    BarCorner.Parent = Bar
+    AddCorner(Bar, UDim.new(1, 0))
 
     local Fill = Instance.new("Frame")
     Fill.Name = "Fill"
@@ -4780,9 +4757,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     Fill.ZIndex = 14
     Fill.Parent = Bar
 
-    local FillCorner = Instance.new("UICorner")
-    FillCorner.CornerRadius = UDim.new(1, 0)
-    FillCorner.Parent = Fill
+    AddCorner(Fill, UDim.new(1, 0))
 
     local Handle = Instance.new("TextButton")
     Handle.Size = UDim2.new(0, 16, 0, 16)
@@ -4793,9 +4768,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     Handle.AutoButtonColor = false
     Handle.ZIndex = 15
     Handle.Parent = Bar
-    local HandleCorner = Instance.new("UICorner")
-    HandleCorner.CornerRadius = UDim.new(1, 0)
-    HandleCorner.Parent = Handle
+    AddCorner(Handle, UDim.new(1, 0))
 
     local ValueBox = Instance.new("TextBox")
     ValueBox.Size = UDim2.new(0, 52, 0, 24)
@@ -4808,9 +4781,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     ValueBox.ClearTextOnFocus = false
     ValueBox.ZIndex = 13
     ValueBox.Parent = Card
-    local ValueCorner = Instance.new("UICorner")
-    ValueCorner.CornerRadius = UDim.new(0, 4)
-    ValueCorner.Parent = ValueBox
+    AddCorner(ValueBox, UDim.new(0, 4))
 
     local Hint = Instance.new("TextLabel")
     Hint.Size = UDim2.new(1, -24, 0, 18)
@@ -4901,9 +4872,7 @@ function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
     Scroller.LayoutOrder = layoutOrder + 2
     Scroller.ZIndex = 12
     Scroller.Parent = parent
-    local ScrollerCorner = Instance.new("UICorner")
-    ScrollerCorner.CornerRadius = UDim.new(0, 6)
-    ScrollerCorner.Parent = Scroller
+    AddCorner(Scroller, UDim.new(0, 6))
     local List = Instance.new("UIListLayout")
     List.SortOrder = Enum.SortOrder.LayoutOrder
     List.Padding = UDim.new(0, 4)
@@ -4938,9 +4907,7 @@ function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
             Row.LayoutOrder = rank or (100 + index)
             Row.ZIndex = 13
             Row.Parent = Scroller
-            local RowCorner = Instance.new("UICorner")
-            RowCorner.CornerRadius = UDim.new(0, 4)
-            RowCorner.Parent = Row
+            AddCorner(Row, UDim.new(0, 4))
 
             local Box = Instance.new("TextButton")
             Box.Size = UDim2.new(0, 18, 0, 18)
@@ -4952,9 +4919,7 @@ function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
             Box.Font = Enum.Font.GothamBold
             Box.ZIndex = 14
             Box.Parent = Row
-            local BoxCorner = Instance.new("UICorner")
-            BoxCorner.CornerRadius = UDim.new(0, 3)
-            BoxCorner.Parent = Box
+            AddCorner(Box, UDim.new(0, 3))
 
             local Name = Instance.new("TextLabel")
             Name.Size = UDim2.new(1, -150, 1, 0)
@@ -4980,9 +4945,7 @@ function CreatePriorityEditor(parent, title, hint, defs, stateKey, layoutOrder)
                 Mini.Visible = rank ~= nil
                 Mini.ZIndex = 14
                 Mini.Parent = Row
-                local MiniCorner = Instance.new("UICorner")
-                MiniCorner.CornerRadius = UDim.new(0, 4)
-                MiniCorner.Parent = Mini
+                AddCorner(Mini, UDim.new(0, 4))
                 Mini.MouseButton1Click:Connect(callback)
             end
 
@@ -5083,9 +5046,7 @@ AutoPlayStatusCard.LayoutOrder = 0
 AutoPlayStatusCard.ZIndex = 12
 AutoPlayStatusCard.Parent = AutoPlayPage
 
-AutoPlayStatusCorner = Instance.new("UICorner")
-AutoPlayStatusCorner.CornerRadius = UDim.new(0, 6)
-AutoPlayStatusCorner.Parent = AutoPlayStatusCard
+AddCorner(AutoPlayStatusCard, UDim.new(0, 6))
 
 AutoPlayStatusLabel = Instance.new("TextLabel")
 AutoPlayStatusLabel.Size = UDim2.new(1, -20, 1, 0)
@@ -5157,9 +5118,7 @@ UnitRefreshButton.TextSize = 12
 UnitRefreshButton.Font = Enum.Font.GothamBold
 UnitRefreshButton.ZIndex = 14
 UnitRefreshButton.Parent = UnitRefreshBar
-local UnitRefreshCorner = Instance.new("UICorner")
-UnitRefreshCorner.CornerRadius = UDim.new(0, 5)
-UnitRefreshCorner.Parent = UnitRefreshButton
+AddCorner(UnitRefreshButton, UDim.new(0, 5))
 
 UnitRefreshStatus = Instance.new("TextLabel")
 UnitRefreshStatus.Name = "RefreshStatus"
@@ -5239,9 +5198,7 @@ function AddConfigBox(parent, label, placeholder, order, getter, setter)
     Input.ClearTextOnFocus = false
     Input.ZIndex = 15
     Input.Parent = Row
-    local InputCorner = Instance.new("UICorner")
-    InputCorner.CornerRadius = UDim.new(0, 4)
-    InputCorner.Parent = Input
+    AddCorner(Input, UDim.new(0, 4))
 
     Input.FocusLost:Connect(function()
         local text = Input.Text:gsub("%s+", "")
@@ -5333,9 +5290,7 @@ function RefreshUnitConfigUI()
         Card.LayoutOrder = index
         Card.ZIndex = 13
         Card.Parent = UnitConfigHolder
-        local CardCorner = Instance.new("UICorner")
-        CardCorner.CornerRadius = UDim.new(0, 6)
-        CardCorner.Parent = Card
+        AddCorner(Card, UDim.new(0, 6))
         local CardList = Instance.new("UIListLayout")
         CardList.SortOrder = Enum.SortOrder.LayoutOrder
         CardList.Padding = UDim.new(0, 4)
@@ -5531,9 +5486,7 @@ function CreatePortalSelectionColumn(name, title, hint, order)
     list.ZIndex = 12
     list.Parent = column
 
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 6)
-    corner.Parent = list
+    AddCorner(list, UDim.new(0, 6))
 
     local layout = Instance.new("UIListLayout")
     layout.Padding = UDim.new(0, 3)
@@ -6072,9 +6025,7 @@ EventStatusCard.LayoutOrder = 0
 EventStatusCard.ZIndex = 12
 EventStatusCard.Parent = EventPage
 
-EventStatusCorner = Instance.new("UICorner")
-EventStatusCorner.CornerRadius = UDim.new(0, 6)
-EventStatusCorner.Parent = EventStatusCard
+AddCorner(EventStatusCard, UDim.new(0, 6))
 
 EventStatusLabel = Instance.new("TextLabel")
 EventStatusLabel.Size = UDim2.new(1, -20, 1, 0)
@@ -7475,9 +7426,7 @@ local function SnipeBuildBannerList()
         local pad = Instance.new("UIPadding")
         pad.PaddingLeft = UDim.new(0, 8)
         pad.Parent = button
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 5)
-        corner.Parent = button
+        AddCorner(button, UDim.new(0, 5))
         button.MouseButton1Click:Connect(function()
             State.SnipeBanner = bannerId
             State.SnipeTargets = {}
@@ -7533,9 +7482,7 @@ function SnipeBuildUnitList()
         local pad = Instance.new("UIPadding")
         pad.PaddingLeft = UDim.new(0, 8)
         pad.Parent = button
-        local corner = Instance.new("UICorner")
-        corner.CornerRadius = UDim.new(0, 5)
-        corner.Parent = button
+        AddCorner(button, UDim.new(0, 5))
         button.MouseButton1Click:Connect(function()
             if State.SnipeTargets[unitId] == true then
                 State.SnipeTargets[unitId] = nil
