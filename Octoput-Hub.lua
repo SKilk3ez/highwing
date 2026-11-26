@@ -3250,34 +3250,24 @@ function ReadInventoryRewardSnapshot()
         end
     end
 
-    -- Executor fallback: only accept a session explicitly owned by LocalPlayer.
-    if (not inventoryProfile or not collectionProfile) and type(getgc) == "function" then
-        local ok, objects = pcall(getgc, true)
-        if ok and type(objects) == "table" then
-            for _, object in ipairs(objects) do
-                if type(object) == "table" then
-                    local candidates = { object, object.session }
-                    for _, candidate in ipairs(candidates) do
-                        if type(candidate) == "table" and candidate.player == player then
-                            if not inventoryProfile then
-                                local inventory = candidate.inventory
-                                local profile = type(inventory) == "table" and inventory.inventory_profile_data or nil
-                                if type(profile) == "table" and type(profile.unique_items) == "table" then
-                                    inventoryProfile = profile
-                                end
-                            end
-                            if not collectionProfile then
-                                local collection = candidate.collection
-                                local ownedProfile = type(collection) == "table" and collection.collection_profile_data or nil
-                                if type(ownedProfile) == "table" and type(ownedProfile.owned_units) == "table" then
-                                    collectionProfile = ownedProfile
-                                end
-                            end
-                        end
-                    end
+    -- Executor fallback: only accept sessions explicitly owned by LocalPlayer.
+    if not inventoryProfile or not collectionProfile then
+        FindInLocalPlayerSessionCandidates(function(candidate)
+            if not inventoryProfile then
+                local inventory = candidate.inventory
+                local profile = type(inventory) == "table" and inventory.inventory_profile_data or nil
+                if type(profile) == "table" and type(profile.unique_items) == "table" then
+                    inventoryProfile = profile
                 end
             end
-        end
+            if not collectionProfile then
+                local collection = candidate.collection
+                local ownedProfile = type(collection) == "table" and collection.collection_profile_data or nil
+                if type(ownedProfile) == "table" and type(ownedProfile.owned_units) == "table" then
+                    collectionProfile = ownedProfile
+                end
+            end
+        end)
     end
 
     local portalNames = {
@@ -5679,6 +5669,26 @@ PortalRefreshButton.BackgroundColor3 = Color3.fromRGB(0, 168, 255)
 
 -- The game Session owns both services; this mirrors the structure in game.lua:
 -- session.collection.collection_profile_data and session.inventory.inventory_profile_data.
+-- Iterate GC-discovered sessions in their original order and stop when a
+-- caller returns a non-nil result. Every candidate must belong to LocalPlayer.
+function FindInLocalPlayerSessionCandidates(callback)
+    if type(callback) ~= "function" or type(getgc) ~= "function" then return nil end
+    local ok, objects = pcall(getgc, true)
+    if not ok or type(objects) ~= "table" then return nil end
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            for _, candidate in ipairs({ object, object.session }) do
+                if type(candidate) == "table" and candidate.player == player then
+                    local result = callback(candidate)
+                    if result ~= nil then return result end
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function FindLocalGameSession()
     local ok, guiService = pcall(function()
         local src = ReplicatedStorage:FindFirstChild("src")
@@ -5695,22 +5705,11 @@ function FindLocalGameSession()
         end
     end
 
-    if type(getgc) ~= "function" then return nil end
-    local gcOk, objects = pcall(getgc, true)
-    if not gcOk or type(objects) ~= "table" then return nil end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local candidates = { object, object.session }
-            for _, candidate in ipairs(candidates) do
-                if type(candidate) == "table" and candidate.player == player
-                    and type(candidate.collection) == "table"
-                    and type(candidate.inventory) == "table" then
-                    return candidate
-                end
-            end
+    return FindInLocalPlayerSessionCandidates(function(candidate)
+        if type(candidate.collection) == "table" and type(candidate.inventory) == "table" then
+            return candidate
         end
-    end
-    return nil
+    end)
 end
 
 function FindLocalInventoryProfile()
@@ -5722,24 +5721,13 @@ function FindLocalInventoryProfile()
         end
     end
 
-    if type(getgc) ~= "function" then return nil end
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return nil end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local candidates = { object, object.session }
-            for _, candidate in ipairs(candidates) do
-                if type(candidate) == "table" and candidate.player == player then
-                    local inventory = candidate.inventory
-                    local profile = type(inventory) == "table" and inventory.inventory_profile_data
-                    if type(profile) == "table" and type(profile.unique_items) == "table" then
-                        return profile
-                    end
-                end
-            end
+    return FindInLocalPlayerSessionCandidates(function(candidate)
+        local inventory = candidate.inventory
+        local profile = type(inventory) == "table" and inventory.inventory_profile_data
+        if type(profile) == "table" and type(profile.unique_items) == "table" then
+            return profile
         end
-    end
-    return nil
+    end)
 end
 
 -- Real-time detection for Summer Hunt Sky Portal drops.
@@ -7588,28 +7576,18 @@ local function SnipeFindOwnedUnits()
     end
 
     -- Fallback for executor environments where the GUIService session is not exposed.
-    if type(getgc) ~= "function" then return nil end
-    local ok, objects = pcall(getgc, true)
-    if not ok or type(objects) ~= "table" then return nil end
-    for _, object in ipairs(objects) do
-        if type(object) == "table" then
-            local candidates = { object, object.session }
-            for _, candidate in ipairs(candidates) do
-                if type(candidate) == "table" and candidate.player == player then
-                    local collection = candidate.collection
-                    local profile = type(collection) == "table" and collection.collection_profile_data
-                    if type(profile) == "table" and type(profile.owned_units) == "table" then
-                        return profile.owned_units
-                    end
-                    profile = candidate.collection_profile_data
-                    if type(profile) == "table" and type(profile.owned_units) == "table" then
-                        return profile.owned_units
-                    end
-                end
-            end
+    return FindInLocalPlayerSessionCandidates(function(candidate)
+        local collection = candidate.collection
+        local profile = type(collection) == "table" and collection.collection_profile_data
+        if type(profile) == "table" and type(profile.owned_units) == "table" then
+            return profile.owned_units
         end
-    end
-    return nil
+
+        profile = candidate.collection_profile_data
+        if type(profile) == "table" and type(profile.owned_units) == "table" then
+            return profile.owned_units
+        end
+    end)
 end
 
 local function SnipeCountTargets(owned, targets)
