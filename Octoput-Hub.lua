@@ -7930,7 +7930,7 @@ StartManagedLoop(function()
                     if level.Value < targetLevel then
                         local allowed = not (cfg and cfg.upgradeStartWave ~= nil and wave < cfg.upgradeStartWave)
                         if allowed and not pendingRequest then
-                            local cost = GetNextUpgradeCost(unit)
+                            local cost = GetNextUpgradeCost(unit, data)
                             local cash = GetInGameCash()
                             local activeVal = stats:FindFirstChild("active_attack")
                             local hasActive = activeVal and tostring(activeVal.Value) ~= "" and tostring(activeVal.Value) ~= "nil"
