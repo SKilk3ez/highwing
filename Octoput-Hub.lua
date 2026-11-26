@@ -956,10 +956,7 @@ function IsMatchmaking()
         return true
     end
     local alreadyInLobby = player:FindFirstChild("AlreadyInLobby")
-    if alreadyInLobby and alreadyInLobby.Value == true then
-        return true
-    end
-    return false
+    return alreadyInLobby ~= nil and alreadyInLobby.Value == true
 end
 
 function NormalizeName(text)
@@ -1658,10 +1655,9 @@ function IsElfySylphUnit(rawId, unitData, unit)
     if name:find("sylph", 1, true) then
         return true
     end
-    if type(unitData) == "table" and type(unitData.evolved) == "table" and unitData.evolved.from == "leafa" then
-        return true
-    end
-    return false
+    return (type(unitData) == "table"
+        and type(unitData.evolved) == "table"
+        and unitData.evolved.from == "leafa") == true
 end
 
 function IsElfyFamilyUnit(rawId, unitData, unit)
@@ -3812,6 +3808,12 @@ function ReadMatchUnitLines()
     local lines = {}
     for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
     return #lines > 0 and table.concat(lines, "\n") or "No placed unit stats captured."
+end
+
+function HasDefinitiveResultTitle(title)
+    title = tostring(title or "")
+    return title:find("VICTORY", 1, true) ~= nil
+        or title:find("DEFEAT", 1, true) ~= nil
 end
 
 function ResolveWebhookOutcome(resultDetails)
@@ -8135,10 +8137,7 @@ function DidUnitStartActiveCast(unit, stats, beforeLastCast, beforeTrackId)
     if trackId > (beforeTrackId or 0) then
         return true
     end
-    if GetUnitOverheadReadyAttribute(unit) == false then
-        return true
-    end
-    return false
+    return GetUnitOverheadReadyAttribute(unit) == false
 end
 
 function SendBuffActiveRequest(runtime, entry, now)
@@ -8891,7 +8890,7 @@ StartManagedLoop(function()
                                 return
                             end
                             local title = string.upper(tostring(titleLabel.Text or ""))
-                            if title:find("VICTORY", 1, true) or title:find("DEFEAT", 1, true) then
+                            if HasDefinitiveResultTitle(title) then
                                 task.spawn(function()
                                     task.wait(0.15)
                                     if webhookBoundResultsGui == resultsGui
@@ -8907,7 +8906,7 @@ StartManagedLoop(function()
                         -- this monitor attached (e.g. the executor started late).
                         local initialTitle = string.upper(tostring(titleLabel.Text or ""))
                         if resultsGui.Enabled and holder.Visible
-                            and (initialTitle:find("VICTORY", 1, true) or initialTitle:find("DEFEAT", 1, true)) then
+                            and HasDefinitiveResultTitle(initialTitle) then
                             task.defer(function()
                                 if webhookBoundResultsGui == resultsGui
                                     and webhookBoundResultTitle == titleLabel then
@@ -8924,7 +8923,7 @@ StartManagedLoop(function()
                                 task.wait(0.1)
                                 local details = GetResultDetails()
                                 local title = string.upper(tostring(details.result or ""))
-                                if title:find("VICTORY", 1, true) or title:find("DEFEAT", 1, true) then
+                                if HasDefinitiveResultTitle(title) then
                                     MarkWebhookEnd("ResultsUI.Enabled")
                                 else
                                     -- Executor getgc access can be unavailable; the UI
@@ -8932,7 +8931,7 @@ StartManagedLoop(function()
                                     local currentHolder = resultsGui:FindFirstChild("Holder")
                                     local currentTitle = currentHolder and currentHolder:FindFirstChild("Title")
                                     local visibleTitle = string.upper(tostring(currentTitle and currentTitle.Text or ""))
-                                    if currentTitle and (visibleTitle:find("VICTORY", 1, true) or visibleTitle:find("DEFEAT", 1, true)) then
+                                    if currentTitle and HasDefinitiveResultTitle(visibleTitle) then
                                         MarkWebhookEnd("ResultsUI.Enabled.TitleFallback")
                                     end
                                 end
@@ -8973,8 +8972,7 @@ StartManagedLoop(function()
             local freshResultSettings = currentSettings ~= nil
                 and currentSettings ~= webhookResultSettingsAtStart
                 and currentSettings ~= webhookLastSentSettings
-            local hasResultTitle = resultTitle:find("VICTORY", 1, true) ~= nil
-                or resultTitle:find("DEFEAT", 1, true) ~= nil
+            local hasResultTitle = HasDefinitiveResultTitle(resultTitle)
             -- A fresh settings payload with a definitive result is enough to
             -- confirm completion; do not require ResultsUI.Enabled to flip first.
             local resultScreenConfirmed = hasResultTitle
