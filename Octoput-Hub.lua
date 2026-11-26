@@ -1042,9 +1042,22 @@ function SyncReplicatedGameData()
     end)
 end
 
+-- Unit definitions are static for a server session. Keep the merged
+-- canonical/Loader snapshot instead of rebuilding the full table every time
+-- LookupUnitData is called by the Auto Buff and Auto Place workers.
+UnitsDataCacheJobId = UnitsDataCacheJobId or nil
+UnitsDataCacheReady = UnitsDataCacheReady or false
+
 function GetUnitsData(forceRefresh)
     if not IsInLobby() then
         SyncReplicatedGameData()
+    end
+
+    local jobId = tostring(game.JobId or "")
+    if not forceRefresh and UnitsDataCacheReady
+        and UnitsDataCacheJobId == jobId
+        and type(UnitsDataCache) == "table" then
+        return UnitsDataCache
     end
 
     -- game.lua's ReplicatedStorage.src.Data.Units module is the canonical
@@ -1096,6 +1109,8 @@ function GetUnitsData(forceRefresh)
 
     if hasData then
         UnitsDataCache = merged
+        UnitsDataCacheJobId = jobId
+        UnitsDataCacheReady = true
         return UnitsDataCache
     end
 
