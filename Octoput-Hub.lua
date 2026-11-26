@@ -3373,6 +3373,15 @@ function GetWebhookPortalCounts(snapshot)
     return counts
 end
 
+function SortRewardEntries(entries)
+    table.sort(entries, function(a, b) return a.sort < b.sort end)
+    local lines = {}
+    for _, entry in ipairs(entries) do
+        table.insert(lines, entry.line)
+    end
+    return lines
+end
+
 function BuildInventoryRewardLines(before, after, skipTrackedPortals)
     local normalEntries, secretEntries = {}, {}
     local beforePortals = GetWebhookPortalCounts(before)
@@ -3423,14 +3432,8 @@ function BuildInventoryRewardLines(before, after, skipTrackedPortals)
         end
     end
 
-    local function SortLines(entries)
-        table.sort(entries, function(a, b) return a.sort < b.sort end)
-        local lines = {}
-        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
-        return lines
-    end
-    local normalLines = SortLines(normalEntries)
-    local secretLines = SortLines(secretEntries)
+    local normalLines = SortRewardEntries(normalEntries)
+    local secretLines = SortRewardEntries(secretEntries)
     return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
         #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
@@ -3594,14 +3597,8 @@ function BuildResultPayloadRewardLines(settings, trackedPortals)
         end
     end
 
-    local function sortLines(entries)
-        table.sort(entries, function(a, b) return a.sort < b.sort end)
-        local lines = {}
-        for _, entry in ipairs(entries) do table.insert(lines, entry.line) end
-        return lines
-    end
-    local normalLines = sortLines(normalEntries)
-    local secretLines = sortLines(secretEntries)
+    local normalLines = SortRewardEntries(normalEntries)
+    local secretLines = SortRewardEntries(secretEntries)
     return #normalLines > 0 and table.concat(normalLines, "\n") or nil,
         #secretLines > 0 and table.concat(secretLines, "\n") or nil
 end
