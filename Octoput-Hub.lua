@@ -4589,6 +4589,16 @@ function CreateHint(parent, text, layoutOrder, height)
     return Label
 end
 
+function StyleControlLabel(label, title)
+    label.BackgroundTransparency = 1
+    label.Text = title
+    label.TextColor3 = Color3.fromRGB(220, 220, 235)
+    label.TextSize = 13
+    label.Font = Enum.Font.Gotham
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.ZIndex = 13
+end
+
 function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local ToggleContainer = Instance.new("Frame")
     ToggleContainer.Size = UDim2.new(1, -10, 0, 42)
@@ -4604,13 +4614,7 @@ function CreateToggle(parent, title, stateKey, layoutOrder, callback)
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -70, 1, 0)
     Label.Position = UDim2.new(0, 12, 0, 0)
-    Label.BackgroundTransparency = 1
-    Label.Text = title
-    Label.TextColor3 = Color3.fromRGB(220, 220, 235)
-    Label.TextSize = 13
-    Label.Font = Enum.Font.Gotham
-    Label.TextXAlignment = Enum.TextXAlignment.Left
-    Label.ZIndex = 13
+    StyleControlLabel(Label, title)
     Label.Parent = ToggleContainer
 
     local SwitchBtn = Instance.new("TextButton")
@@ -4682,13 +4686,7 @@ function CreateTextBox(parent, title, placeholder, layoutOrder, onChanged, initi
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -20, 0, 22)
     Label.Position = UDim2.new(0, 12, 0, 4)
-    Label.BackgroundTransparency = 1
-    Label.Text = title
-    Label.TextColor3 = Color3.fromRGB(220, 220, 235)
-    Label.TextSize = 13
-    Label.Font = Enum.Font.Gotham
-    Label.TextXAlignment = Enum.TextXAlignment.Left
-    Label.ZIndex = 13
+    StyleControlLabel(Label, title)
     Label.Parent = Box
 
     local Input = Instance.new("TextBox")
@@ -4762,13 +4760,7 @@ function CreateSingleSlider(parent, title, hint, layoutOrder, minValue, maxValue
     local Label = Instance.new("TextLabel")
     Label.Size = UDim2.new(1, -20, 0, 22)
     Label.Position = UDim2.new(0, 12, 0, 6)
-    Label.BackgroundTransparency = 1
-    Label.Text = title
-    Label.TextColor3 = Color3.fromRGB(220, 220, 235)
-    Label.TextSize = 13
-    Label.Font = Enum.Font.Gotham
-    Label.TextXAlignment = Enum.TextXAlignment.Left
-    Label.ZIndex = 13
+    StyleControlLabel(Label, title)
     Label.Parent = Card
 
     local Bar = Instance.new("Frame")
